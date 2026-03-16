@@ -1,3 +1,1 @@
-pub mod context;
-
-pub use context::OpsClawContext;
+pub mod notifier;

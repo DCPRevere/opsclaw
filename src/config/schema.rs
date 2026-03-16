@@ -303,6 +303,10 @@ pub struct Config {
     /// OpsClaw target host definitions (`[[targets]]`).
     #[serde(default)]
     pub targets: Option<Vec<TargetConfig>>,
+
+    /// OpsClaw notification settings (`[opsclaw.notifications]`).
+    #[serde(default, alias = "opsclaw.notifications")]
+    pub notifications: Option<OpsClawNotificationConfig>,
 }
 
 // ── OpsClaw target configuration ─────────────────────────────────
@@ -358,6 +362,50 @@ pub struct TargetConfig {
     /// Path to an optional context file (Markdown) describing this target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_file: Option<String>,
+}
+
+// ── OpsClaw notification configuration ──────────────────────────
+
+/// Notification delivery settings for OpsClaw alerts.
+///
+/// ```toml
+/// [opsclaw.notifications]
+/// telegram_bot_token = "123456:ABC..."
+/// telegram_chat_id   = "-100123456789"
+/// min_severity       = "warning"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OpsClawNotificationConfig {
+    /// Telegram bot token for sending alerts.
+    pub telegram_bot_token: Option<String>,
+    /// Telegram chat ID to send alerts to (can be a group or user chat ID).
+    pub telegram_chat_id: Option<String>,
+    /// Minimum severity level to send notifications for. Default: `warning`.
+    #[serde(default = "default_min_severity")]
+    pub min_severity: String,
+}
+
+impl Default for OpsClawNotificationConfig {
+    fn default() -> Self {
+        Self {
+            telegram_bot_token: None,
+            telegram_chat_id: None,
+            min_severity: "warning".to_string(),
+        }
+    }
+}
+
+fn default_min_severity() -> String {
+    "warning".to_string()
+}
+
+/// Parse a severity string into an `AlertSeverity` value.
+pub fn parse_min_severity(s: &str) -> crate::tools::monitoring::AlertSeverity {
+    match s.to_lowercase().as_str() {
+        "info" => crate::tools::monitoring::AlertSeverity::Info,
+        "critical" => crate::tools::monitoring::AlertSeverity::Critical,
+        _ => crate::tools::monitoring::AlertSeverity::Warning,
+    }
 }
 
 /// Validate a list of target configs: unique names, SSH fields present, local fields absent.
@@ -5234,6 +5282,7 @@ impl Default for Config {
             notion: NotionConfig::default(),
             node_transport: NodeTransportConfig::default(),
             targets: None,
+            notifications: None,
         }
     }
 }
@@ -5394,9 +5443,7 @@ pub(crate) fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> (PathBuf
         );
     }
 
-    let legacy_config_dir = workspace_dir
-        .parent()
-        .map(|parent| parent.join(".opsclaw"));
+    let legacy_config_dir = workspace_dir.parent().map(|parent| parent.join(".opsclaw"));
     if let Some(legacy_dir) = legacy_config_dir {
         if legacy_dir.join("config.toml").exists() {
             return (legacy_dir, workspace_config_dir);
@@ -7533,6 +7580,7 @@ default_temperature = 0.7
             notion: NotionConfig::default(),
             node_transport: NodeTransportConfig::default(),
             targets: None,
+            notifications: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -7836,6 +7884,7 @@ tool_dispatcher = "xml"
             notion: NotionConfig::default(),
             node_transport: NodeTransportConfig::default(),
             targets: None,
+            notifications: None,
         };
 
         config.save().await.unwrap();

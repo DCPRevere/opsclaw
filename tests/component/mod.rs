@@ -14,3 +14,4 @@ mod whatsapp_webhook_security;
 
 mod discovery_scan;
 mod monitoring_loop;
+mod notification;

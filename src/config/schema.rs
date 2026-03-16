@@ -299,6 +299,112 @@ pub struct Config {
     /// Secure inter-node transport configuration (`[node_transport]`).
     #[serde(default)]
     pub node_transport: NodeTransportConfig,
+
+    /// OpsClaw target host definitions (`[[targets]]`).
+    #[serde(default)]
+    pub targets: Option<Vec<TargetConfig>>,
+}
+
+// ── OpsClaw target configuration ─────────────────────────────────
+
+/// Autonomy level for OpsClaw SRE targets (separate from ZeroClaw's `AutonomyLevel`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpsClawAutonomy {
+    /// Observe only — read metrics, logs, and state. No mutations.
+    #[default]
+    Observe,
+    /// Suggest remediation actions but do not execute them.
+    Suggest,
+    /// Automatically act on known, pre-approved runbooks.
+    ActOnKnown,
+    /// Full autonomous remediation (requires explicit opt-in).
+    FullAuto,
+}
+
+/// Connection type for an OpsClaw target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetType {
+    /// SSH connection to a remote host.
+    Ssh,
+    /// The local machine.
+    Local,
+}
+
+/// Configuration for a single OpsClaw SRE target host.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TargetConfig {
+    /// Unique name for this target.
+    pub name: String,
+    /// Connection type: `ssh` or `local`.
+    #[serde(rename = "type")]
+    pub target_type: TargetType,
+    /// Remote hostname or IP (required for SSH targets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// SSH port (default: 22, only for SSH targets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// SSH username (required for SSH targets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Reference to a secret name in the OpsClaw secret store (SSH key, required for SSH targets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_secret: Option<String>,
+    /// Autonomy level for this target.
+    #[serde(default)]
+    pub autonomy: OpsClawAutonomy,
+    /// Path to an optional context file (Markdown) describing this target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_file: Option<String>,
+}
+
+/// Validate a list of target configs: unique names, SSH fields present, local fields absent.
+pub fn validate_targets(targets: &[TargetConfig]) -> Result<()> {
+    let mut seen_names = std::collections::HashSet::new();
+    for target in targets {
+        if !seen_names.insert(&target.name) {
+            anyhow::bail!("Duplicate target name: {}", target.name);
+        }
+        match target.target_type {
+            TargetType::Ssh => {
+                if target.host.is_none() {
+                    anyhow::bail!(
+                        "SSH target '{}' is missing required field 'host'",
+                        target.name
+                    );
+                }
+                if target.user.is_none() {
+                    anyhow::bail!(
+                        "SSH target '{}' is missing required field 'user'",
+                        target.name
+                    );
+                }
+                if target.key_secret.is_none() {
+                    anyhow::bail!(
+                        "SSH target '{}' is missing required field 'key_secret'",
+                        target.name
+                    );
+                }
+            }
+            TargetType::Local => {
+                if target.host.is_some() {
+                    anyhow::bail!("Local target '{}' must not have 'host' field", target.name);
+                }
+                if target.user.is_some() {
+                    anyhow::bail!("Local target '{}' must not have 'user' field", target.name);
+                }
+                if target.key_secret.is_some() {
+                    anyhow::bail!(
+                        "Local target '{}' must not have 'key_secret' field",
+                        target.name
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Multi-client workspace isolation configuration.
@@ -5127,6 +5233,7 @@ impl Default for Config {
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
             node_transport: NodeTransportConfig::default(),
+            targets: None,
         }
     }
 }
@@ -7425,6 +7532,7 @@ default_temperature = 0.7
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
             node_transport: NodeTransportConfig::default(),
+            targets: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -7727,6 +7835,7 @@ tool_dispatcher = "xml"
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
             node_transport: NodeTransportConfig::default(),
+            targets: None,
         };
 
         config.save().await.unwrap();

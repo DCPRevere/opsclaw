@@ -6,7 +6,9 @@ mod otel_dependency_feature_regression;
 mod provider_resolution;
 mod provider_schema;
 mod reply_target_field_regression;
+mod secret_store;
 mod security;
+mod target_config;
 mod whatsapp_webhook_security;
 
 // OpsClaw Phase 1 tests — will fail to compile until implementations exist.

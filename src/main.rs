@@ -111,7 +111,7 @@ use config::Config;
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
 pub use zeroclaw::{
     ChannelCommands, CronCommands, GatewayCommands, HardwareCommands, IntegrationCommands,
-    MigrateCommands, PeripheralCommands, ServiceCommands, SkillCommands,
+    MigrateCommands, PeripheralCommands, SecretCommands, ServiceCommands, SkillCommands,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -383,6 +383,23 @@ Examples:
     Migrate {
         #[command(subcommand)]
         migrate_command: MigrateCommands,
+    },
+
+    /// Manage OpsClaw secrets (SSH keys, tokens, credentials)
+    #[command(long_about = "\
+Manage encrypted secrets for OpsClaw targets.
+
+Secrets are stored encrypted at ~/.opsclaw/secrets.enc and referenced \
+by name in target configurations (e.g. key_secret = \"prod-web-1-key\").
+
+Examples:
+  opsclaw secret set prod-web-1-key        # reads value from prompt
+  opsclaw secret get prod-web-1-key        # prints decrypted value
+  opsclaw secret list                      # list secret names
+  opsclaw secret remove prod-web-1-key")]
+    Secret {
+        #[command(subcommand)]
+        secret_command: SecretCommands,
     },
 
     /// Manage provider subscription authentication profiles
@@ -1204,6 +1221,8 @@ async fn main() -> Result<()> {
             migration::handle_command(migrate_command, &config).await
         }
 
+        Commands::Secret { secret_command } => handle_secret_command(secret_command),
+
         Commands::Memory { memory_command } => {
             memory::cli::handle_command(memory_command, &config).await
         }
@@ -1660,6 +1679,57 @@ fn format_expiry(profile: &auth::profiles::AuthProfile) -> String {
 }
 
 #[allow(clippy::too_many_lines)]
+fn handle_secret_command(secret_command: SecretCommands) -> Result<()> {
+    let home = directories::UserDirs::new()
+        .map(|u| u.home_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let opsclaw_dir = home.join(".opsclaw");
+    let store = security::OpsClawSecretStore::new(&opsclaw_dir);
+
+    match secret_command {
+        SecretCommands::Set { name } => {
+            let value = if std::io::stdin().is_terminal() {
+                Password::new()
+                    .with_prompt(format!("Enter value for secret '{name}'"))
+                    .interact()
+                    .context("Failed to read secret value")?
+            } else {
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_line(&mut buf)
+                    .context("Failed to read secret from stdin")?;
+                buf.trim_end().to_string()
+            };
+            store.set(&name, &value)?;
+            println!("Secret '{name}' stored.");
+        }
+        SecretCommands::Get { name } => match store.get(&name)? {
+            Some(value) => println!("{value}"),
+            None => {
+                bail!("Secret '{name}' not found");
+            }
+        },
+        SecretCommands::List => {
+            let names = store.list()?;
+            if names.is_empty() {
+                println!("No secrets stored.");
+            } else {
+                for name in names {
+                    println!("{name}");
+                }
+            }
+        }
+        SecretCommands::Remove { name } => {
+            if store.remove(&name)? {
+                println!("Secret '{name}' removed.");
+            } else {
+                bail!("Secret '{name}' not found");
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Result<()> {
     let auth_service = auth::AuthService::from_config(config);
 

@@ -73,6 +73,7 @@ pub(crate) mod tunnel;
 pub(crate) mod util;
 
 pub use config::Config;
+pub use security::OpsClawSecretStore;
 
 /// Gateway management subcommands
 #[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,6 +250,28 @@ pub enum SkillCommands {
     /// Remove an installed skill
     Remove {
         /// Skill name to remove
+        name: String,
+    },
+}
+
+/// OpsClaw secret management subcommands
+#[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SecretCommands {
+    /// Store a secret (reads value from stdin or interactive prompt)
+    Set {
+        /// Secret name
+        name: String,
+    },
+    /// Retrieve a secret by name (prints decrypted value)
+    Get {
+        /// Secret name
+        name: String,
+    },
+    /// List all stored secret names (never shows values)
+    List,
+    /// Remove a stored secret
+    Remove {
+        /// Secret name
         name: String,
     },
 }

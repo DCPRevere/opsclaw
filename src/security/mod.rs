@@ -34,6 +34,7 @@ pub mod iam_policy;
 pub mod landlock;
 pub mod leak_detector;
 pub mod nevis;
+pub mod opsclaw_secrets;
 pub mod otp;
 pub mod pairing;
 pub mod playbook;
@@ -51,6 +52,8 @@ pub use detect::create_sandbox;
 pub use domain_matcher::DomainMatcher;
 #[allow(unused_imports)]
 pub use estop::{EstopLevel, EstopManager, EstopState, ResumeSelector};
+#[allow(unused_imports)]
+pub use opsclaw_secrets::OpsClawSecretStore;
 #[allow(unused_imports)]
 pub use otp::OtpValidator;
 #[allow(unused_imports)]

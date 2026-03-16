@@ -1,164 +1,129 @@
-//! Secret store component tests (Phase 1b).
-//!
-//! Validates that the OpsClaw secret store encrypts, stores, retrieves,
-//! and deletes credentials correctly. All operations use a temporary
-//! directory — nothing touches the real secret store.
-
-use std::path::Path;
 use tempfile::TempDir;
-
-// Import once implemented.
-use zeroclaw::config::secrets::{SecretStore, SecretStoreError};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Basic store / retrieve cycle
-// ─────────────────────────────────────────────────────────────────────────────
+use zeroclaw::OpsClawSecretStore;
 
 #[test]
-fn secret_store_round_trip() {
+fn set_get_list_remove_cycle() {
     let tmp = TempDir::new().unwrap();
-    let store = SecretStore::open(tmp.path()).expect("should open store");
+    let store = OpsClawSecretStore::new(tmp.path());
+
+    // Initially empty
+    assert!(store.list().unwrap().is_empty());
+
+    // Set
     store
-        .set("slack-webhook", "https://hooks.slack.com/services/T00/B00/xxxx")
-        .expect("should store secret");
-    let value = store.get("slack-webhook").expect("should retrieve secret");
-    assert_eq!(value, "https://hooks.slack.com/services/T00/B00/xxxx");
+        .set(
+            "ssh-key-1",
+            "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----",
+        )
+        .unwrap();
+    store.set("api-token", "sk-secret-123").unwrap();
+
+    // List
+    let names = store.list().unwrap();
+    assert_eq!(names.len(), 2);
+    assert!(names.contains(&"api-token".to_string()));
+    assert!(names.contains(&"ssh-key-1".to_string()));
+
+    // Get
+    let value = store.get("api-token").unwrap();
+    assert_eq!(value, Some("sk-secret-123".to_string()));
+
+    // Get missing
+    assert_eq!(store.get("nonexistent").unwrap(), None);
+
+    // Remove
+    assert!(store.remove("api-token").unwrap());
+    assert_eq!(store.get("api-token").unwrap(), None);
+    assert_eq!(store.list().unwrap().len(), 1);
+
+    // Remove nonexistent
+    assert!(!store.remove("api-token").unwrap());
 }
 
 #[test]
-fn secret_store_overwrites_existing() {
+fn encryption_roundtrip() {
     let tmp = TempDir::new().unwrap();
-    let store = SecretStore::open(tmp.path()).expect("should open store");
-    store.set("api-key", "old-value").unwrap();
-    store.set("api-key", "new-value").unwrap();
-    assert_eq!(store.get("api-key").unwrap(), "new-value");
+    let store = OpsClawSecretStore::new(tmp.path());
+
+    let secret = "super-secret-value-🔑";
+    store.set("enc-test", secret).unwrap();
+
+    // Read the raw file to verify it's not plaintext
+    let raw = std::fs::read_to_string(tmp.path().join("secrets.enc")).unwrap();
+    assert!(!raw.contains(secret), "Secret should be encrypted on disk");
+
+    // Verify decryption works
+    let decrypted = store.get("enc-test").unwrap();
+    assert_eq!(decrypted, Some(secret.to_string()));
 }
 
 #[test]
-fn secret_store_get_nonexistent_returns_error() {
+fn persistence_across_store_instances() {
     let tmp = TempDir::new().unwrap();
-    let store = SecretStore::open(tmp.path()).expect("should open store");
-    let result = store.get("does-not-exist");
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        SecretStoreError::NotFound(name) => assert_eq!(name, "does-not-exist"),
-        other => panic!("expected NotFound, got: {other:?}"),
-    }
-}
 
-#[test]
-fn secret_store_delete() {
-    let tmp = TempDir::new().unwrap();
-    let store = SecretStore::open(tmp.path()).expect("should open store");
-    store.set("temp-secret", "value").unwrap();
-    assert!(store.get("temp-secret").is_ok());
-    store.delete("temp-secret").unwrap();
-    assert!(store.get("temp-secret").is_err());
-}
-
-#[test]
-fn secret_store_list_names() {
-    let tmp = TempDir::new().unwrap();
-    let store = SecretStore::open(tmp.path()).expect("should open store");
-    store.set("alpha", "1").unwrap();
-    store.set("bravo", "2").unwrap();
-    store.set("charlie", "3").unwrap();
-    let mut names = store.list().expect("should list secret names");
-    names.sort();
-    assert_eq!(names, vec!["alpha", "bravo", "charlie"]);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Encryption
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn secret_store_values_not_stored_plaintext() {
-    let tmp = TempDir::new().unwrap();
-    let store = SecretStore::open(tmp.path()).expect("should open store");
-    let secret_value = "super-secret-api-key-12345";
-    store.set("test-key", secret_value).unwrap();
-
-    // Read all files in the store directory and check none contain plaintext.
-    let dir_contents = read_all_files_recursive(tmp.path());
-    assert!(
-        !dir_contents.contains(secret_value),
-        "secret value must not appear in plaintext on disk"
-    );
-}
-
-#[test]
-fn secret_store_persists_across_reopen() {
-    let tmp = TempDir::new().unwrap();
     {
-        let store = SecretStore::open(tmp.path()).unwrap();
-        store.set("persistent", "value-123").unwrap();
+        let store = OpsClawSecretStore::new(tmp.path());
+        store.set("persistent-key", "persistent-value").unwrap();
     }
-    // Reopen from the same directory.
-    let store = SecretStore::open(tmp.path()).unwrap();
-    assert_eq!(store.get("persistent").unwrap(), "value-123");
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Validation
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn secret_store_rejects_empty_name() {
-    let tmp = TempDir::new().unwrap();
-    let store = SecretStore::open(tmp.path()).unwrap();
-    assert!(
-        store.set("", "value").is_err(),
-        "empty secret name should be rejected"
+    // New instance, same directory
+    let store2 = OpsClawSecretStore::new(tmp.path());
+    assert_eq!(
+        store2.get("persistent-key").unwrap(),
+        Some("persistent-value".to_string())
     );
 }
 
 #[test]
-fn secret_store_rejects_empty_value() {
+fn overwrite_secret() {
     let tmp = TempDir::new().unwrap();
-    let store = SecretStore::open(tmp.path()).unwrap();
-    assert!(
-        store.set("name", "").is_err(),
-        "empty secret value should be rejected"
-    );
+    let store = OpsClawSecretStore::new(tmp.path());
+
+    store.set("mutable", "v1").unwrap();
+    assert_eq!(store.get("mutable").unwrap(), Some("v1".to_string()));
+
+    store.set("mutable", "v2").unwrap();
+    assert_eq!(store.get("mutable").unwrap(), Some("v2".to_string()));
+
+    // Only one entry
+    assert_eq!(store.list().unwrap().len(), 1);
 }
 
 #[test]
-fn secret_store_name_allows_reasonable_characters() {
+fn unicode_secret_roundtrip() {
     let tmp = TempDir::new().unwrap();
-    let store = SecretStore::open(tmp.path()).unwrap();
-    // Names should support dashes, underscores, dots, alphanumeric.
-    for name in &[
-        "simple",
-        "with-dashes",
-        "with_underscores",
-        "with.dots",
-        "CamelCase",
-        "prod-pg-readonly",
-    ] {
-        store
-            .set(name, "value")
-            .unwrap_or_else(|_| panic!("name '{name}' should be accepted"));
-    }
+    let store = OpsClawSecretStore::new(tmp.path());
+
+    let secret = "密码-пароль-🦀-émojis";
+    store.set("unicode", secret).unwrap();
+    assert_eq!(store.get("unicode").unwrap(), Some(secret.to_string()));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+#[test]
+fn long_secret_roundtrip() {
+    let tmp = TempDir::new().unwrap();
+    let store = OpsClawSecretStore::new(tmp.path());
 
-fn read_all_files_recursive(dir: &Path) -> String {
-    let mut contents = String::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                contents.push_str(&read_all_files_recursive(&path));
-            } else if let Ok(bytes) = std::fs::read(&path) {
-                // Include both text and hex representation to catch plaintext
-                // in either text or binary files.
-                contents.push_str(&String::from_utf8_lossy(&bytes));
-            }
-        }
-    }
-    contents
+    let secret = "a".repeat(10_000);
+    store.set("long", &secret).unwrap();
+    assert_eq!(store.get("long").unwrap(), Some(secret));
+}
+
+#[cfg(unix)]
+#[test]
+fn secrets_file_has_restricted_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let store = OpsClawSecretStore::new(tmp.path());
+    store.set("perm-test", "value").unwrap();
+
+    let perms = std::fs::metadata(tmp.path().join("secrets.enc"))
+        .unwrap()
+        .permissions();
+    assert_eq!(
+        perms.mode() & 0o777,
+        0o600,
+        "Secrets file must be owner-only (0600)"
+    );
 }

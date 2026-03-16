@@ -13,4 +13,5 @@ mod target_config;
 mod whatsapp_webhook_security;
 
 mod discovery_scan;
+mod monitoring_cli;
 mod monitoring_loop;

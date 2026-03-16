@@ -95,6 +95,7 @@ mod migration;
 mod multimodal;
 mod observability;
 mod onboard;
+mod ops_cli;
 mod peripherals;
 mod providers;
 mod runtime;
@@ -477,6 +478,50 @@ Examples:
     Config {
         #[command(subcommand)]
         config_command: ConfigCommands,
+    },
+
+    /// Run a discovery scan on a target host
+    #[command(long_about = "\
+Run a discovery scan on one or all configured targets.
+
+Connects to the target (via SSH or locally), inventories the host \
+(OS, containers, services, ports, disk, memory, load), and saves \
+the snapshot to ~/.opsclaw/snapshots/<target>.json.
+
+Examples:
+  opsclaw scan sacra              # scan a single target
+  opsclaw scan --all              # scan all configured targets")]
+    Scan {
+        /// Target name to scan (from config [[targets]])
+        target: Option<String>,
+        /// Scan all configured targets
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Run the monitoring loop comparing live state against baselines
+    #[command(long_about = "\
+Run the monitoring loop for configured targets.
+
+For each target, runs a discovery scan and compares the result against \
+the saved baseline snapshot. If no baseline exists, the first scan \
+establishes one. Alerts are logged to ~/.opsclaw/monitor.log.
+
+Examples:
+  opsclaw monitor                        # all targets, 5min interval
+  opsclaw monitor --target sacra         # single target
+  opsclaw monitor --interval 60          # check every 60 seconds
+  opsclaw monitor --once                 # single check, then exit")]
+    Monitor {
+        /// Monitor a specific target only
+        #[arg(long)]
+        target: Option<String>,
+        /// Check interval in seconds (default: 300)
+        #[arg(long, default_value = "300")]
+        interval: u64,
+        /// Run one cycle and exit
+        #[arg(long)]
+        once: bool,
     },
 
     /// Generate shell completion script to stdout
@@ -1110,6 +1155,32 @@ async fn main() -> Result<()> {
             );
             println!("  Boards:    {}", config.peripherals.boards.len());
 
+            // OpsClaw targets
+            if let Some(targets) = &config.targets {
+                if !targets.is_empty() {
+                    println!();
+                    println!("OpsClaw Targets:");
+                    for t in targets {
+                        let snap_info = match zeroclaw::ops::snapshots::load_snapshot(&t.name) {
+                            Ok(Some(snap)) => {
+                                let ts = snap.scanned_at.format("%Y-%m-%d %H:%M");
+                                format!(
+                                    "last scan: {}  ({} containers, {} services)",
+                                    ts,
+                                    snap.containers.len(),
+                                    snap.services.len()
+                                )
+                            }
+                            _ => "no snapshot".to_string(),
+                        };
+                        println!(
+                            "  {:<12} {:?}  autonomy: {:?}  {}",
+                            t.name, t.target_type, t.autonomy, snap_info
+                        );
+                    }
+                }
+            }
+
             Ok(())
         }
 
@@ -1236,6 +1307,14 @@ async fn main() -> Result<()> {
         Commands::Peripheral { peripheral_command } => {
             peripherals::handle_command(peripheral_command.clone(), &config).await
         }
+
+        Commands::Scan { target, all } => ops_cli::handle_scan(&config, target, all).await,
+
+        Commands::Monitor {
+            target,
+            interval,
+            once,
+        } => ops_cli::handle_monitor(&config, target, interval, once).await,
 
         Commands::Config { config_command } => match config_command {
             ConfigCommands::Schema => {

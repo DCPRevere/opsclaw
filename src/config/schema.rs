@@ -61,7 +61,7 @@ static RUNTIME_PROXY_CLIENT_CACHE: OnceLock<RwLock<HashMap<String, reqwest::Clie
 
 /// Top-level ZeroClaw configuration, loaded from `config.toml`.
 ///
-/// Resolution order: `ZEROCLAW_WORKSPACE` env → `active_workspace.toml` marker → `~/.zeroclaw/config.toml`.
+/// Resolution order: `ZEROCLAW_WORKSPACE` env → `active_workspace.toml` marker → `~/.opsclaw/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Config {
     /// Workspace directory - computed from home, not serialized
@@ -332,7 +332,7 @@ pub struct WorkspaceConfig {
 }
 
 fn default_workspaces_dir() -> String {
-    "~/.zeroclaw/workspaces".to_string()
+    "~/.opsclaw/workspaces".to_string()
 }
 
 impl Default for WorkspaceConfig {
@@ -1845,7 +1845,7 @@ fn default_project_intel_language() -> String {
 }
 
 fn default_project_intel_report_dir() -> String {
-    "~/.zeroclaw/project-reports".into()
+    "~/.opsclaw/project-reports".into()
 }
 
 fn default_project_intel_risk_sensitivity() -> String {
@@ -4367,7 +4367,7 @@ pub struct EstopConfig {
 }
 
 fn default_estop_state_file() -> String {
-    "~/.zeroclaw/estop-state.json".to_string()
+    "~/.opsclaw/estop-state.json".to_string()
 }
 
 impl Default for EstopConfig {
@@ -5031,7 +5031,7 @@ pub struct SecurityOpsConfig {
 }
 
 fn default_playbooks_dir() -> String {
-    "~/.zeroclaw/playbooks".into()
+    "~/.opsclaw/playbooks".into()
 }
 
 fn default_require_approval() -> bool {
@@ -5043,7 +5043,7 @@ fn default_max_auto_severity() -> String {
 }
 
 fn default_report_output_dir() -> String {
-    "~/.zeroclaw/security-reports".into()
+    "~/.opsclaw/security-reports".into()
 }
 
 impl Default for SecurityOpsConfig {
@@ -5066,7 +5066,7 @@ impl Default for Config {
     fn default() -> Self {
         let home =
             UserDirs::new().map_or_else(|| PathBuf::from("."), |u| u.home_dir().to_path_buf());
-        let zeroclaw_dir = home.join(".zeroclaw");
+        let zeroclaw_dir = home.join(".opsclaw");
 
         Self {
             workspace_dir: zeroclaw_dir.join("workspace"),
@@ -5147,7 +5147,7 @@ fn default_config_dir() -> Result<PathBuf> {
     let home = UserDirs::new()
         .map(|u| u.home_dir().to_path_buf())
         .context("Could not find home directory")?;
-    Ok(home.join(".zeroclaw"))
+    Ok(home.join(".opsclaw"))
 }
 
 fn active_workspace_state_path(default_dir: &Path) -> PathBuf {
@@ -5289,7 +5289,7 @@ pub(crate) fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> (PathBuf
 
     let legacy_config_dir = workspace_dir
         .parent()
-        .map(|parent| parent.join(".zeroclaw"));
+        .map(|parent| parent.join(".opsclaw"));
     if let Some(legacy_dir) = legacy_config_dir {
         if legacy_dir.join("config.toml").exists() {
             return (legacy_dir, workspace_config_dir);
@@ -8292,7 +8292,7 @@ channel_id = "C123"
             phone_number_id: Some("123".into()),
             verify_token: Some("ver".into()),
             app_secret: None,
-            session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
+            session_path: Some("~/.opsclaw/state/whatsapp-web/session.db".into()),
             pair_phone: None,
             pair_code: None,
             allowed_numbers: vec!["+1".into()],
@@ -8308,7 +8308,7 @@ channel_id = "C123"
             phone_number_id: None,
             verify_token: None,
             app_secret: None,
-            session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
+            session_path: Some("~/.opsclaw/state/whatsapp-web/session.db".into()),
             pair_phone: None,
             pair_code: None,
             allowed_numbers: vec![],
@@ -8984,7 +8984,7 @@ requires_openai_auth = true
         let temp_home =
             std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
         let workspace_dir = temp_home.join("workspace");
-        let resolved_config_path = temp_home.join(".zeroclaw").join("config.toml");
+        let resolved_config_path = temp_home.join(".opsclaw").join("config.toml");
 
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &temp_home);
@@ -9239,7 +9239,7 @@ requires_openai_auth = true
         let temp_home =
             std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
         let workspace_dir = temp_home.join("workspace");
-        let legacy_config_path = temp_home.join(".zeroclaw").join("config.toml");
+        let legacy_config_path = temp_home.join(".opsclaw").join("config.toml");
 
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &temp_home);
@@ -9266,7 +9266,7 @@ requires_openai_auth = true
         let temp_home =
             std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
         let workspace_dir = temp_home.join("custom-workspace");
-        let legacy_config_dir = temp_home.join(".zeroclaw");
+        let legacy_config_dir = temp_home.join(".opsclaw");
         let legacy_config_path = legacy_config_dir.join("config.toml");
 
         fs::create_dir_all(&legacy_config_dir).await.unwrap();
@@ -9303,7 +9303,7 @@ default_model = "legacy-model"
         let _env_guard = env_override_lock().await;
         let temp_home =
             std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
-        let config_dir = temp_home.join(".zeroclaw");
+        let config_dir = temp_home.join(".opsclaw");
         let config_path = config_dir.join("config.toml");
 
         fs::create_dir_all(&config_dir).await.unwrap();
@@ -9420,7 +9420,7 @@ default_model = "legacy-model"
         let _env_guard = env_override_lock().await;
         let temp_home =
             std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
-        let default_config_dir = temp_home.join(".zeroclaw");
+        let default_config_dir = temp_home.join(".opsclaw");
         let custom_config_dir = temp_home.join("profiles").join("custom-profile");
         let marker_path = default_config_dir.join(ACTIVE_WORKSPACE_STATE_FILE);
 
@@ -10127,7 +10127,7 @@ gated_domain_categories = ["banking"]
 
 [security.estop]
 enabled = true
-state_file = "~/.zeroclaw/estop-state.json"
+state_file = "~/.opsclaw/estop-state.json"
 require_otp_to_resume = true
 "#,
         )

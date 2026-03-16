@@ -452,7 +452,7 @@ fn resolve_quick_setup_dirs_with_home(home: &Path) -> (PathBuf, PathBuf) {
         }
     }
 
-    let config_dir = home.join(".zeroclaw");
+    let config_dir = home.join(".opsclaw");
     (config_dir.clone(), config_dir.join("workspace"))
 }
 
@@ -662,7 +662,7 @@ async fn run_quick_setup_with_home(
         } else {
             let env_var = provider_env_var(&provider_name);
             println!("    1. Set your API key:  export {env_var}=\"sk-...\"");
-            println!("    2. Or edit:           ~/.zeroclaw/config.toml");
+            println!("    2. Or edit:           ~/.opsclaw/config.toml");
             println!("    3. Chat:              zeroclaw agent -m \"Hello!\"");
             println!("    4. Gateway:           zeroclaw gateway");
         }
@@ -4196,7 +4196,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                     let session_path: String = Input::new()
                         .with_prompt("  Session database path")
-                        .default("~/.zeroclaw/state/whatsapp-web/session.db".into())
+                        .default("~/.opsclaw/state/whatsapp-web/session.db".into())
                         .interact_text()?;
 
                     if session_path.trim().is_empty() {
@@ -5957,7 +5957,7 @@ mod tests {
         let _workspace_env = EnvVarGuard::unset("ZEROCLAW_WORKSPACE");
         let _config_env = EnvVarGuard::unset("ZEROCLAW_CONFIG_DIR");
         let tmp = TempDir::new().unwrap();
-        let zeroclaw_dir = tmp.path().join(".zeroclaw");
+        let zeroclaw_dir = tmp.path().join(".opsclaw");
         let config_path = zeroclaw_dir.join("config.toml");
 
         tokio::fs::create_dir_all(&zeroclaw_dir).await.unwrap();
@@ -5987,7 +5987,7 @@ mod tests {
         let _workspace_env = EnvVarGuard::unset("ZEROCLAW_WORKSPACE");
         let _config_env = EnvVarGuard::unset("ZEROCLAW_CONFIG_DIR");
         let tmp = TempDir::new().unwrap();
-        let zeroclaw_dir = tmp.path().join(".zeroclaw");
+        let zeroclaw_dir = tmp.path().join(".opsclaw");
         let config_path = zeroclaw_dir.join("config.toml");
 
         tokio::fs::create_dir_all(&zeroclaw_dir).await.unwrap();
@@ -6024,7 +6024,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let workspace_root = tmp.path().join("zeroclaw-data");
         let workspace_dir = workspace_root.join("workspace");
-        let expected_config_path = workspace_root.join(".zeroclaw").join("config.toml");
+        let expected_config_path = workspace_root.join(".opsclaw").join("config.toml");
 
         let _workspace_env = EnvVarGuard::set(
             "ZEROCLAW_WORKSPACE",

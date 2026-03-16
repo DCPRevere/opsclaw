@@ -1094,8 +1094,8 @@ fn create_provider_with_url_and_options(
                 .clone()
                 .unwrap_or_else(|| {
                     directories::UserDirs::new().map_or_else(
-                        || PathBuf::from(".zeroclaw"),
-                        |dirs| dirs.home_dir().join(".zeroclaw"),
+                        || PathBuf::from(".opsclaw"),
+                        |dirs| dirs.home_dir().join(".opsclaw"),
                     )
                 });
             let auth_service = AuthService::new(&state_dir, options.secrets_encrypt);

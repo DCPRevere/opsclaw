@@ -142,7 +142,7 @@ enum EstopLevelArg {
 
 /// `ZeroClaw` - Zero overhead. Zero compromise. 100% Rust.
 #[derive(Parser, Debug)]
-#[command(name = "zeroclaw")]
+#[command(name = "opsclaw")]
 #[command(author = "theonlyhennygod")]
 #[command(version)]
 #[command(about = "The fastest, smallest AI assistant.", long_about = None)]
@@ -837,7 +837,7 @@ async fn main() -> Result<()> {
                     "  \x1b[2mDashboard: http://127.0.0.1:{}\x1b[0m",
                     config.gateway.port
                 );
-                println!("  \x1b[2mDocs: https://www.zeroclawlabs.ai/docs\x1b[0m");
+                println!("  \x1b[2mDocs: https://www.opsclawlabs.ai/docs\x1b[0m");
                 println!();
             }
         }

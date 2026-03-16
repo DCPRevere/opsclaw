@@ -31,6 +31,8 @@ pub mod cron_runs;
 pub mod cron_update;
 pub mod data_management;
 pub mod delegate;
+pub mod discovery;
+
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -54,6 +56,7 @@ pub mod memory_recall;
 pub mod memory_store;
 pub mod microsoft365;
 pub mod model_routing_config;
+pub mod monitoring;
 pub mod node_tool;
 pub mod notion_tool;
 pub mod pdf_read;

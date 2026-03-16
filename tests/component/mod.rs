@@ -11,3 +11,6 @@ mod security;
 mod ssh_tool;
 mod target_config;
 mod whatsapp_webhook_security;
+
+mod discovery_scan;
+mod monitoring_loop;

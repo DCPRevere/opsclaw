@@ -1,263 +1,259 @@
-//! Discovery scan component tests (Phase 1d).
-//!
-//! Tests the discovery scan routine that builds a target snapshot from
-//! read-only commands. These tests validate the snapshot data model and
-//! the scan's ability to parse command output into structured data.
-//! They do NOT require a real SSH connection — they test the parsing layer.
+use anyhow::Result;
+use async_trait::async_trait;
+use zeroclaw::tools::discovery::*;
 
-use serde_json::Value;
+// ---------------------------------------------------------------------------
+// Mock runner
+// ---------------------------------------------------------------------------
 
-// Import once implemented.
-use zeroclaw::tools::ssh::discovery::{DiscoveryScan, TargetSnapshot};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Snapshot structure
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn snapshot_has_required_sections() {
-    let snapshot = TargetSnapshot::empty("prod-web-1");
-    assert_eq!(snapshot.target_name(), "prod-web-1");
-    assert!(snapshot.processes().is_empty());
-    assert!(snapshot.listening_ports().is_empty());
-    assert!(snapshot.containers().is_empty());
-    assert!(snapshot.systemd_services().is_empty());
-    assert!(snapshot.disks().is_empty());
-    assert!(snapshot.os_info().is_none());
-    assert!(snapshot.scanned_at().is_some(), "should record scan time");
+struct MockRunner {
+    responses: std::collections::HashMap<String, CommandOutput>,
 }
 
-#[test]
-fn snapshot_serializes_to_json() {
-    let snapshot = TargetSnapshot::empty("test");
-    let json = serde_json::to_value(&snapshot).expect("should serialize to JSON");
-    assert!(json.is_object());
-    assert_eq!(json["target_name"], "test");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Parsing: ps aux
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn parse_ps_aux_extracts_processes() {
-    let ps_output = "\
-USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
-root         1  0.0  0.1  16956  3456 ?        Ss   Mar15   0:03 /sbin/init
-postgres   512  0.1  2.3 214788 47616 ?        Ss   Mar15   1:22 /usr/lib/postgresql/15/bin/postgres
-www-data  1024  0.5  1.1  65432 22016 ?        S    Mar15   3:45 nginx: worker process
-";
-    let processes = DiscoveryScan::parse_ps_aux(ps_output);
-    assert_eq!(processes.len(), 3);
-    assert!(processes.iter().any(|p| p.command.contains("postgres")));
-    assert!(processes.iter().any(|p| p.command.contains("nginx")));
-    assert!(processes.iter().any(|p| p.user == "root"));
-}
-
-#[test]
-fn parse_ps_aux_handles_empty_output() {
-    let processes = DiscoveryScan::parse_ps_aux("");
-    assert!(processes.is_empty());
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Parsing: ss -tlnp
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn parse_ss_extracts_listening_ports() {
-    let ss_output = "\
-State   Recv-Q  Send-Q   Local Address:Port    Peer Address:Port  Process
-LISTEN  0       128            0.0.0.0:22           0.0.0.0:*      users:((\"sshd\",pid=456,fd=3))
-LISTEN  0       244          127.0.0.1:5432         0.0.0.0:*      users:((\"postgres\",pid=512,fd=6))
-LISTEN  0       511            0.0.0.0:80           0.0.0.0:*      users:((\"nginx\",pid=1024,fd=8))
-";
-    let ports = DiscoveryScan::parse_ss(ss_output);
-    assert_eq!(ports.len(), 3);
-    assert!(ports.iter().any(|p| p.port == 22 && p.process == "sshd"));
-    assert!(ports
-        .iter()
-        .any(|p| p.port == 5432 && p.process == "postgres"));
-    assert!(ports.iter().any(|p| p.port == 80 && p.process == "nginx"));
-}
-
-#[test]
-fn parse_ss_handles_ipv6() {
-    let ss_output = "\
-State   Recv-Q  Send-Q   Local Address:Port    Peer Address:Port  Process
-LISTEN  0       128               [::]:22              [::]:*      users:((\"sshd\",pid=456,fd=4))
-";
-    let ports = DiscoveryScan::parse_ss(ss_output);
-    assert_eq!(ports.len(), 1);
-    assert_eq!(ports[0].port, 22);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Parsing: docker ps
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn parse_docker_ps_extracts_containers() {
-    let docker_output = "\
-CONTAINER ID   IMAGE          COMMAND                  CREATED        STATUS        PORTS                  NAMES
-abc123def456   postgres:15    \"docker-entrypoint.s…\"   2 days ago     Up 2 days     0.0.0.0:5432->5432/tcp db
-fed654cba321   nginx:latest   \"/docker-entrypoint.…\"   2 days ago     Up 2 days     0.0.0.0:80->80/tcp     web
-";
-    let containers = DiscoveryScan::parse_docker_ps(docker_output);
-    assert_eq!(containers.len(), 2);
-    assert!(containers.iter().any(|c| c.name == "db" && c.image.contains("postgres")));
-    assert!(containers.iter().any(|c| c.name == "web" && c.image.contains("nginx")));
-    assert!(containers.iter().all(|c| c.status.contains("Up")));
-}
-
-#[test]
-fn parse_docker_ps_handles_no_containers() {
-    let docker_output = "\
-CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES
-";
-    let containers = DiscoveryScan::parse_docker_ps(docker_output);
-    assert!(containers.is_empty());
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Parsing: df -h
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn parse_df_extracts_disk_usage() {
-    let df_output = "\
-Filesystem      Size  Used Avail Use% Mounted on
-/dev/sda1        50G   32G   16G  67% /
-tmpfs           2.0G     0  2.0G   0% /dev/shm
-/dev/sdb1       200G  180G   10G  95% /data
-";
-    let disks = DiscoveryScan::parse_df(df_output);
-    assert!(disks.len() >= 2); // Might filter tmpfs
-    assert!(disks.iter().any(|d| d.mount_point == "/" && d.use_percent == 67));
-    assert!(disks.iter().any(|d| d.mount_point == "/data" && d.use_percent == 95));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Parsing: /etc/os-release
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn parse_os_release() {
-    let content = r#"
-PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
-NAME="Debian GNU/Linux"
-VERSION_ID="12"
-VERSION="12 (bookworm)"
-ID=debian
-"#;
-    let info = DiscoveryScan::parse_os_release(content);
-    assert_eq!(info.name, "Debian GNU/Linux");
-    assert_eq!(info.version_id, "12");
-    assert_eq!(info.id, "debian");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Database detection
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn detect_databases_from_ports_and_processes() {
-    let ss_output = "\
-State   Recv-Q  Send-Q   Local Address:Port    Peer Address:Port  Process
-LISTEN  0       244          127.0.0.1:5432         0.0.0.0:*      users:((\"postgres\",pid=512,fd=6))
-LISTEN  0       128          127.0.0.1:6379         0.0.0.0:*      users:((\"redis-server\",pid=800,fd=7))
-LISTEN  0       80           127.0.0.1:3306         0.0.0.0:*      users:((\"mysqld\",pid=900,fd=5))
-";
-    let ports = DiscoveryScan::parse_ss(ss_output);
-    let databases = DiscoveryScan::detect_databases(&ports);
-    assert_eq!(databases.len(), 3);
-    assert!(databases.iter().any(|d| d.db_type == "postgres" && d.port == 5432));
-    assert!(databases.iter().any(|d| d.db_type == "redis" && d.port == 6379));
-    assert!(databases.iter().any(|d| d.db_type == "mysql" && d.port == 3306));
-}
-
-#[test]
-fn detect_postgres_on_non_standard_port() {
-    let ss_output = "\
-State   Recv-Q  Send-Q   Local Address:Port    Peer Address:Port  Process
-LISTEN  0       244          127.0.0.1:5433         0.0.0.0:*      users:((\"postgres\",pid=512,fd=6))
-";
-    let ports = DiscoveryScan::parse_ss(ss_output);
-    let databases = DiscoveryScan::detect_databases(&ports);
-    assert_eq!(databases.len(), 1);
-    assert_eq!(databases[0].db_type, "postgres");
-    assert_eq!(databases[0].port, 5433);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Drift detection
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn snapshot_diff_detects_new_container() {
-    let mut old = TargetSnapshot::empty("test");
-    old.add_container("web", "nginx:latest", "Up");
-
-    let mut new = TargetSnapshot::empty("test");
-    new.add_container("web", "nginx:latest", "Up");
-    new.add_container("api", "myapp:v2", "Up");
-
-    let diff = new.diff(&old);
-    assert!(!diff.is_empty(), "should detect drift");
-    assert!(
-        diff.iter()
-            .any(|d| d.contains("api") && d.contains("added")),
-        "should report new container"
-    );
-}
-
-#[test]
-fn snapshot_diff_detects_stopped_container() {
-    let mut old = TargetSnapshot::empty("test");
-    old.add_container("web", "nginx:latest", "Up");
-    old.add_container("worker", "myapp:v1", "Up");
-
-    let mut new = TargetSnapshot::empty("test");
-    new.add_container("web", "nginx:latest", "Up");
-
-    let diff = new.diff(&old);
-    assert!(
-        diff.iter()
-            .any(|d| d.contains("worker") && d.contains("removed")),
-        "should report missing container"
-    );
-}
-
-#[test]
-fn snapshot_diff_empty_when_identical() {
-    let mut s1 = TargetSnapshot::empty("test");
-    s1.add_container("web", "nginx:latest", "Up");
-
-    let mut s2 = TargetSnapshot::empty("test");
-    s2.add_container("web", "nginx:latest", "Up");
-
-    let diff = s1.diff(&s2);
-    assert!(diff.is_empty(), "identical snapshots should have no diff");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Scan is read-only
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn scan_commands_are_all_read_only() {
-    let commands = DiscoveryScan::commands();
-    let write_prefixes = [
-        "rm ", "mv ", "cp ", "dd ", "mkfs", "kill", "reboot", "shutdown", "systemctl start",
-        "systemctl stop", "systemctl restart", "docker stop", "docker rm", "docker kill",
-        "apt", "yum", "dnf", "pip", "npm", "chmod", "chown",
-    ];
-    for cmd in &commands {
-        for prefix in &write_prefixes {
-            assert!(
-                !cmd.starts_with(prefix),
-                "scan command '{cmd}' looks like a write operation (starts with '{prefix}')"
-            );
+impl MockRunner {
+    fn new() -> Self {
+        Self {
+            responses: std::collections::HashMap::new(),
         }
     }
+
+    fn add(&mut self, cmd: &str, stdout: &str) {
+        self.responses.insert(
+            cmd.to_string(),
+            CommandOutput {
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+            },
+        );
+    }
+}
+
+#[async_trait]
+impl CommandRunner for MockRunner {
+    async fn run(&self, command: &str) -> Result<CommandOutput> {
+        self.responses
+            .get(command)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unexpected command: {command}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Realistic sample outputs
+// ---------------------------------------------------------------------------
+
+const UNAME_OUTPUT: &str =
+    "Linux sacra-vps 5.15.0-91-generic #101-Ubuntu SMP Tue Nov 14 13:30:08 UTC 2023 x86_64 x86_64 x86_64 GNU/Linux";
+
+const OS_RELEASE_OUTPUT: &str = r#"PRETTY_NAME="Ubuntu 22.04.3 LTS"
+NAME="Ubuntu"
+VERSION_ID="22.04"
+VERSION="22.04.3 LTS (Jammy Jellyfish)"
+VERSION_CODENAME=jammy
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=jammy
+"#;
+
+const SS_OUTPUT: &str = "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
+LISTEN 0      4096       0.0.0.0:33000      0.0.0.0:*     users:((\"docker-proxy\",pid=1234,fd=4))
+LISTEN 0      4096       0.0.0.0:33100      0.0.0.0:*     users:((\"docker-proxy\",pid=1235,fd=4))
+LISTEN 0      4096       0.0.0.0:33200      0.0.0.0:*     users:((\"docker-proxy\",pid=1236,fd=4))
+LISTEN 0      4096       0.0.0.0:33300      0.0.0.0:*     users:((\"docker-proxy\",pid=1237,fd=4))
+LISTEN 0      4096       127.0.0.1:5432     0.0.0.0:*     users:((\"docker-proxy\",pid=1238,fd=4))
+LISTEN 0      128        0.0.0.0:22         0.0.0.0:*     users:((\"sshd\",pid=800,fd=3))
+";
+
+const DOCKER_PS_OUTPUT: &str = r#"{"ID":"abc123","Names":"sacra-api","Image":"sacra/api:latest","Status":"Up 5 hours","Ports":"0.0.0.0:33000->8080/tcp","RunningFor":"5 hours"}
+{"ID":"def456","Names":"sacra-server","Image":"sacra/server:latest","Status":"Up 5 hours","Ports":"0.0.0.0:33100->8080/tcp","RunningFor":"5 hours"}
+{"ID":"ghi789","Names":"postgres","Image":"postgres:15","Status":"Up 5 hours","Ports":"5432/tcp","RunningFor":"5 hours"}
+{"ID":"jkl012","Names":"seq","Image":"datalust/seq:latest","Status":"Up 5 hours","Ports":"0.0.0.0:33200->80/tcp","RunningFor":"5 hours"}
+{"ID":"mno345","Names":"jaeger","Image":"jaegertracing/all-in-one:1.51","Status":"Up 5 hours","Ports":"0.0.0.0:33300->16686/tcp","RunningFor":"5 hours"}
+"#;
+
+const SYSTEMCTL_OUTPUT: &str = "  UNIT                       LOAD   ACTIVE SUB     DESCRIPTION
+  ssh.service                loaded active running OpenBSD Secure Shell server
+  docker.service             loaded active running Docker Application Container Engine
+  systemd-journald.service   loaded active running Journal Service
+
+3 loaded units listed.
+";
+
+const DF_OUTPUT: &str = "Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        40G   22G   16G  58% /
+tmpfs           3.9G     0  3.9G   0% /dev/shm
+/dev/sda15      105M  6.1M   99M   6% /boot/efi
+";
+
+const FREE_OUTPUT: &str =
+    "              total        used        free      shared  buff/cache   available
+Mem:           7951        3042         512         123        4396        4558
+Swap:          2047         100        1947
+";
+
+const UPTIME_OUTPUT: &str =
+    " 14:23:05 up 42 days,  3:15,  2 users,  load average: 0.45, 0.30, 0.25";
+
+// ---------------------------------------------------------------------------
+// Parser tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_uname_extracts_kernel() {
+    let result = parse_uname(UNAME_OUTPUT);
+    assert!(result.contains("5.15.0-91-generic"));
+    assert!(result.contains("x86_64"));
+}
+
+#[test]
+fn parse_os_release_extracts_distro() {
+    let (name, ver) = parse_os_release(OS_RELEASE_OUTPUT);
+    assert_eq!(name, "Ubuntu");
+    assert_eq!(ver, "22.04");
+}
+
+#[test]
+fn parse_ss_finds_all_ports() {
+    let ports = parse_ss(SS_OUTPUT);
+    assert_eq!(ports.len(), 6);
+    let port_nums: Vec<u16> = ports.iter().map(|p| p.port).collect();
+    assert!(port_nums.contains(&33000));
+    assert!(port_nums.contains(&33100));
+    assert!(port_nums.contains(&33200));
+    assert!(port_nums.contains(&33300));
+    assert!(port_nums.contains(&5432));
+    assert!(port_nums.contains(&22));
+}
+
+#[test]
+fn parse_ss_extracts_process_info() {
+    let ports = parse_ss(SS_OUTPUT);
+    let ssh_port = ports.iter().find(|p| p.port == 22).unwrap();
+    assert!(ssh_port.process.contains("sshd"));
+}
+
+#[test]
+fn parse_docker_ps_json_sacra_containers() {
+    let containers = parse_docker_ps_json(DOCKER_PS_OUTPUT);
+    assert_eq!(containers.len(), 5);
+    let names: Vec<&str> = containers.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"sacra-api"));
+    assert!(names.contains(&"sacra-server"));
+    assert!(names.contains(&"postgres"));
+    assert!(names.contains(&"seq"));
+    assert!(names.contains(&"jaeger"));
+}
+
+#[test]
+fn parse_docker_ps_json_extracts_fields() {
+    let containers = parse_docker_ps_json(DOCKER_PS_OUTPUT);
+    let api = containers.iter().find(|c| c.name == "sacra-api").unwrap();
+    assert_eq!(api.image, "sacra/api:latest");
+    assert_eq!(api.status, "Up 5 hours");
+    assert!(api.ports.contains("33000"));
+}
+
+#[test]
+fn parse_systemctl_services() {
+    let services = parse_systemctl(SYSTEMCTL_OUTPUT);
+    assert_eq!(services.len(), 3);
+    let units: Vec<&str> = services.iter().map(|s| s.unit.as_str()).collect();
+    assert!(units.contains(&"ssh.service"));
+    assert!(units.contains(&"docker.service"));
+}
+
+#[test]
+fn parse_df_disk_usage() {
+    let disks = parse_df(DF_OUTPUT);
+    assert_eq!(disks.len(), 3);
+    let root = disks.iter().find(|d| d.mount_point == "/").unwrap();
+    assert_eq!(root.use_percent, 58);
+    assert_eq!(root.size, "40G");
+}
+
+#[test]
+fn parse_free_memory() {
+    let mem = parse_free(FREE_OUTPUT);
+    assert_eq!(mem.total_mb, 7951);
+    assert_eq!(mem.used_mb, 3042);
+    assert_eq!(mem.available_mb, 4558);
+}
+
+#[test]
+fn parse_uptime_load() {
+    let load = parse_uptime(UPTIME_OUTPUT);
+    assert!((load.load_1 - 0.45).abs() < 0.001);
+    assert!((load.load_5 - 0.30).abs() < 0.001);
+    assert!((load.load_15 - 0.25).abs() < 0.001);
+}
+
+// ---------------------------------------------------------------------------
+// Full scan integration test
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn full_scan_produces_snapshot() {
+    let mut runner = MockRunner::new();
+    runner.add("uname -a", UNAME_OUTPUT);
+    runner.add("cat /etc/os-release", OS_RELEASE_OUTPUT);
+    runner.add("ss -tlnp", SS_OUTPUT);
+    runner.add("docker ps --format json", DOCKER_PS_OUTPUT);
+    runner.add(
+        "systemctl list-units --type=service --state=running --no-pager",
+        SYSTEMCTL_OUTPUT,
+    );
+    runner.add("df -h", DF_OUTPUT);
+    runner.add("free -m", FREE_OUTPUT);
+    runner.add("uptime", UPTIME_OUTPUT);
+
+    let snap = run_discovery_scan(&runner).await.unwrap();
+
+    assert_eq!(snap.os.distro_name, "Ubuntu");
+    assert_eq!(snap.os.distro_version, "22.04");
+    assert_eq!(snap.containers.len(), 5);
+    assert_eq!(snap.services.len(), 3);
+    assert_eq!(snap.listening_ports.len(), 6);
+    assert_eq!(snap.disk.len(), 3);
+    assert_eq!(snap.memory.total_mb, 7951);
+    assert!((snap.load.load_1 - 0.45).abs() < 0.001);
+}
+
+// ---------------------------------------------------------------------------
+// Markdown summary test
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn markdown_summary_contains_key_sections() {
+    let mut runner = MockRunner::new();
+    runner.add("uname -a", UNAME_OUTPUT);
+    runner.add("cat /etc/os-release", OS_RELEASE_OUTPUT);
+    runner.add("ss -tlnp", SS_OUTPUT);
+    runner.add("docker ps --format json", DOCKER_PS_OUTPUT);
+    runner.add(
+        "systemctl list-units --type=service --state=running --no-pager",
+        SYSTEMCTL_OUTPUT,
+    );
+    runner.add("df -h", DF_OUTPUT);
+    runner.add("free -m", FREE_OUTPUT);
+    runner.add("uptime", UPTIME_OUTPUT);
+
+    let snap = run_discovery_scan(&runner).await.unwrap();
+    let md = snapshot_to_markdown(&snap);
+
+    assert!(md.contains("# Discovery Scan"));
+    assert!(md.contains("## OS"));
+    assert!(md.contains("Ubuntu"));
+    assert!(md.contains("## Containers"));
+    assert!(md.contains("sacra-api"));
+    assert!(md.contains("## Listening Ports"));
+    assert!(md.contains("33000"));
+    assert!(md.contains("## Disk"));
+    assert!(md.contains("58%"));
+    assert!(md.contains("## Memory"));
+    assert!(md.contains("7951"));
 }

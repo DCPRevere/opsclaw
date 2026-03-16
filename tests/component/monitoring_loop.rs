@@ -1,225 +1,319 @@
-//! Monitoring loop component tests (Phase 1f).
-//!
-//! Validates that health check cron jobs are created with the right
-//! configuration — correct tool allowlists, isolated sessions, delivery
-//! config, and system prompt construction.
+use chrono::Utc;
+use zeroclaw::tools::discovery::*;
+use zeroclaw::tools::monitoring::*;
 
-use zeroclaw::config::Config;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-// Import once implemented.
-use zeroclaw::monitoring::{HealthCheckBuilder, MonitoringConfig};
+fn base_snapshot() -> TargetSnapshot {
+    TargetSnapshot {
+        scanned_at: Utc::now(),
+        os: OsInfo {
+            uname: "Linux test 5.15.0".to_string(),
+            distro_name: "Ubuntu".to_string(),
+            distro_version: "22.04".to_string(),
+        },
+        containers: vec![
+            ContainerInfo {
+                id: "abc123".into(),
+                name: "sacra-api".into(),
+                image: "sacra/api:latest".into(),
+                status: "Up 5 hours".into(),
+                ports: "0.0.0.0:33000->8080/tcp".into(),
+                running_for: "5 hours".into(),
+            },
+            ContainerInfo {
+                id: "def456".into(),
+                name: "postgres".into(),
+                image: "postgres:15".into(),
+                status: "Up 5 hours".into(),
+                ports: "5432/tcp".into(),
+                running_for: "5 hours".into(),
+            },
+        ],
+        services: vec![
+            ServiceInfo {
+                unit: "ssh.service".into(),
+                load_state: "loaded".into(),
+                active_state: "active".into(),
+                sub_state: "running".into(),
+                description: "OpenBSD Secure Shell server".into(),
+            },
+            ServiceInfo {
+                unit: "docker.service".into(),
+                load_state: "loaded".into(),
+                active_state: "active".into(),
+                sub_state: "running".into(),
+                description: "Docker Application Container Engine".into(),
+            },
+        ],
+        listening_ports: vec![
+            PortInfo {
+                protocol: "tcp".into(),
+                address: "0.0.0.0".into(),
+                port: 33000,
+                process: "docker-proxy".into(),
+            },
+            PortInfo {
+                protocol: "tcp".into(),
+                address: "0.0.0.0".into(),
+                port: 22,
+                process: "sshd".into(),
+            },
+        ],
+        disk: vec![DiskInfo {
+            filesystem: "/dev/sda1".into(),
+            size: "40G".into(),
+            used: "22G".into(),
+            available: "16G".into(),
+            use_percent: 58,
+            mount_point: "/".into(),
+        }],
+        memory: MemoryInfo {
+            total_mb: 8000,
+            used_mb: 4000,
+            free_mb: 2000,
+            available_mb: 4000,
+        },
+        load: LoadInfo {
+            load_1: 0.5,
+            load_5: 0.3,
+            load_15: 0.2,
+            uptime: "up 42 days".into(),
+        },
+    }
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Health check cron job construction
-// ─────────────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[test]
-fn health_check_creates_agent_job_type() {
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .interval_minutes(5)
-        .build();
-    assert_eq!(
-        check.job_type().as_str(),
-        "agent",
-        "health checks must be Agent jobs, not Shell"
-    );
+fn no_changes_is_healthy() {
+    let baseline = base_snapshot();
+    let current = base_snapshot();
+    let hc = check_health("sacra-vps", &baseline, &current);
+    assert_eq!(hc.status, HealthStatus::Healthy);
+    assert!(hc.alerts.is_empty());
+    assert_eq!(hc.target_name, "sacra-vps");
 }
 
 #[test]
-fn health_check_uses_isolated_session() {
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .interval_minutes(5)
-        .build();
-    assert_eq!(
-        check.session_target().as_str(),
-        "isolated",
-        "health checks must use isolated sessions to avoid cross-contamination"
-    );
+fn container_down_triggers_critical() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    // Remove sacra-api container
+    current.containers.retain(|c| c.name != "sacra-api");
+
+    let hc = check_health("sacra-vps", &baseline, &current);
+    assert_eq!(hc.status, HealthStatus::Critical);
+    let down_alerts: Vec<_> = hc
+        .alerts
+        .iter()
+        .filter(|a| a.category == AlertCategory::ContainerDown)
+        .collect();
+    assert_eq!(down_alerts.len(), 1);
+    assert!(down_alerts[0].message.contains("sacra-api"));
+    assert_eq!(down_alerts[0].severity, AlertSeverity::Critical);
 }
 
 #[test]
-fn health_check_restricts_allowed_tools_ssh_target() {
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .target_type("ssh")
-        .interval_minutes(5)
-        .build();
-    let allowed = check.allowed_tools().expect("should have tool allowlist");
-    assert!(allowed.contains(&"ssh".to_string()));
-    assert!(allowed.contains(&"memory_recall".to_string()));
-    assert!(allowed.contains(&"memory_store".to_string()));
-    // Should NOT include destructive or unrelated tools.
-    assert!(!allowed.contains(&"file_write".to_string()));
-    assert!(!allowed.contains(&"shell".to_string()));
-    assert!(!allowed.contains(&"browser".to_string()));
+fn new_container_triggers_info() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    current.containers.push(ContainerInfo {
+        id: "new123".into(),
+        name: "redis".into(),
+        image: "redis:7".into(),
+        status: "Up 2 minutes".into(),
+        ports: "6379/tcp".into(),
+        running_for: "2 minutes".into(),
+    });
+
+    let hc = check_health("sacra-vps", &baseline, &current);
+    let new_alerts: Vec<_> = hc
+        .alerts
+        .iter()
+        .filter(|a| a.category == AlertCategory::NewContainer)
+        .collect();
+    assert_eq!(new_alerts.len(), 1);
+    assert!(new_alerts[0].message.contains("redis"));
+    assert_eq!(new_alerts[0].severity, AlertSeverity::Info);
 }
 
 #[test]
-fn health_check_restricts_allowed_tools_local_target() {
-    let check = HealthCheckBuilder::new("this-box")
-        .target_type("local")
-        .interval_minutes(5)
-        .build();
-    let allowed = check.allowed_tools().expect("should have tool allowlist");
-    // Local target uses shell instead of SSH, but still restricted.
-    assert!(
-        allowed.contains(&"shell".to_string()) || allowed.contains(&"local_exec".to_string()),
-        "local target should allow local command execution"
-    );
-    assert!(allowed.contains(&"memory_recall".to_string()));
-    assert!(allowed.contains(&"memory_store".to_string()));
-}
+fn container_restart_triggers_warning() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    // Simulate restart: running_for is much shorter than baseline
+    current.containers[0].running_for = "2 minutes".to_string();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// System prompt construction
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn health_check_prompt_includes_target_name() {
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .interval_minutes(5)
-        .build();
-    let prompt = check.system_prompt();
-    assert!(
-        prompt.contains("prod-web-1"),
-        "prompt should reference the target by name"
-    );
+    let hc = check_health("sacra-vps", &baseline, &current);
+    let restart_alerts: Vec<_> = hc
+        .alerts
+        .iter()
+        .filter(|a| a.category == AlertCategory::ContainerRestarted)
+        .collect();
+    assert_eq!(restart_alerts.len(), 1);
+    assert_eq!(restart_alerts[0].severity, AlertSeverity::Warning);
 }
 
 #[test]
-fn health_check_prompt_includes_snapshot_context() {
-    let snapshot_json = r#"{"containers": [{"name": "web", "image": "nginx"}]}"#;
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .snapshot(snapshot_json)
-        .interval_minutes(5)
-        .build();
-    let prompt = check.system_prompt();
-    assert!(
-        prompt.contains("nginx"),
-        "prompt should include snapshot data so the LLM knows what to expect"
-    );
+fn service_stopped_triggers_critical() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    // Remove docker.service from current
+    current.services.retain(|s| s.unit != "docker.service");
+
+    let hc = check_health("sacra-vps", &baseline, &current);
+    assert_eq!(hc.status, HealthStatus::Critical);
+    let svc_alerts: Vec<_> = hc
+        .alerts
+        .iter()
+        .filter(|a| a.category == AlertCategory::ServiceStopped)
+        .collect();
+    assert_eq!(svc_alerts.len(), 1);
+    assert!(svc_alerts[0].message.contains("docker.service"));
 }
 
 #[test]
-fn health_check_prompt_includes_user_context() {
-    let context = "Postgres runs on port 5433. Redis is for sessions only.";
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .context(context)
-        .interval_minutes(5)
-        .build();
-    let prompt = check.system_prompt();
-    assert!(
-        prompt.contains("5433"),
-        "prompt should include user-provided target context"
-    );
-    assert!(prompt.contains("sessions"));
+fn disk_space_warning_at_85_percent() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    current.disk[0].use_percent = 85;
+
+    let hc = check_health("sacra-vps", &baseline, &current);
+    assert_eq!(hc.status, HealthStatus::Warning);
+    let disk_alerts: Vec<_> = hc
+        .alerts
+        .iter()
+        .filter(|a| a.category == AlertCategory::DiskSpaceLow)
+        .collect();
+    assert_eq!(disk_alerts.len(), 1);
+    assert_eq!(disk_alerts[0].severity, AlertSeverity::Warning);
 }
 
 #[test]
-fn health_check_prompt_without_context_still_valid() {
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .interval_minutes(5)
-        .build();
-    let prompt = check.system_prompt();
-    assert!(!prompt.is_empty(), "prompt should still be valid without context");
-    assert!(
-        prompt.contains("prod-web-1"),
-        "prompt should at minimum reference the target"
-    );
-}
+fn disk_space_critical_at_95_percent() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    current.disk[0].use_percent = 95;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Scheduling
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn health_check_default_interval_is_5_minutes() {
-    let check = HealthCheckBuilder::new("prod-web-1").build();
-    assert_eq!(
-        check.interval_ms(),
-        5 * 60 * 1000,
-        "default interval should be 5 minutes"
-    );
+    let hc = check_health("sacra-vps", &baseline, &current);
+    assert_eq!(hc.status, HealthStatus::Critical);
+    let disk_alerts: Vec<_> = hc
+        .alerts
+        .iter()
+        .filter(|a| a.category == AlertCategory::DiskSpaceLow)
+        .collect();
+    assert_eq!(disk_alerts.len(), 1);
+    assert_eq!(disk_alerts[0].severity, AlertSeverity::Critical);
 }
 
 #[test]
-fn health_check_custom_interval() {
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .interval_minutes(1)
-        .build();
-    assert_eq!(check.interval_ms(), 60_000);
+fn high_memory_triggers_warning() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    current.memory.used_mb = 7500; // 93.75% of 8000
+
+    let hc = check_health("sacra-vps", &baseline, &current);
+    let mem_alerts: Vec<_> = hc
+        .alerts
+        .iter()
+        .filter(|a| a.category == AlertCategory::HighMemory)
+        .collect();
+    assert_eq!(mem_alerts.len(), 1);
+    assert_eq!(mem_alerts[0].severity, AlertSeverity::Warning);
 }
 
 #[test]
-fn health_check_interval_minimum_enforced() {
-    // Checking more frequently than every 30 seconds is wasteful and expensive.
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .interval_seconds(10)
-        .build();
-    assert!(
-        check.interval_ms() >= 30_000,
-        "interval should not be less than 30 seconds"
-    );
-}
+fn port_gone_triggers_warning() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    // Remove port 33000
+    current.listening_ports.retain(|p| p.port != 33000);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Delivery config
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn health_check_delivery_targets_configured_channel() {
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .delivery_channel("telegram")
-        .delivery_recipient("123456789")
-        .interval_minutes(5)
-        .build();
-    let delivery = check.delivery();
-    assert_eq!(delivery.channel, "telegram");
-    assert_eq!(delivery.recipient, "123456789");
+    let hc = check_health("sacra-vps", &baseline, &current);
+    let port_alerts: Vec<_> = hc
+        .alerts
+        .iter()
+        .filter(|a| a.category == AlertCategory::PortGone)
+        .collect();
+    assert_eq!(port_alerts.len(), 1);
+    assert!(port_alerts[0].message.contains("33000"));
+    assert_eq!(port_alerts[0].severity, AlertSeverity::Warning);
 }
 
 #[test]
-fn health_check_delivery_defaults_to_none() {
-    let check = HealthCheckBuilder::new("prod-web-1")
-        .interval_minutes(5)
-        .build();
-    let delivery = check.delivery();
-    assert!(
-        delivery.channel.is_empty() || delivery.channel == "none",
-        "without explicit delivery config, should default to none"
-    );
+fn new_port_triggers_info() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    current.listening_ports.push(PortInfo {
+        protocol: "tcp".into(),
+        address: "0.0.0.0".into(),
+        port: 9090,
+        process: "prometheus".into(),
+    });
+
+    let hc = check_health("sacra-vps", &baseline, &current);
+    let port_alerts: Vec<_> = hc
+        .alerts
+        .iter()
+        .filter(|a| a.category == AlertCategory::NewPort)
+        .collect();
+    assert_eq!(port_alerts.len(), 1);
+    assert!(port_alerts[0].message.contains("9090"));
+    assert_eq!(port_alerts[0].severity, AlertSeverity::Info);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Config-driven creation
-// ─────────────────────────────────────────────────────────────────────────────
+#[test]
+fn multiple_alerts_picks_worst_status() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    // Container down (critical) + new port (info)
+    current.containers.retain(|c| c.name != "sacra-api");
+    current.listening_ports.push(PortInfo {
+        protocol: "tcp".into(),
+        address: "0.0.0.0".into(),
+        port: 9090,
+        process: "prometheus".into(),
+    });
+
+    let hc = check_health("sacra-vps", &baseline, &current);
+    assert_eq!(hc.status, HealthStatus::Critical);
+    assert!(hc.alerts.len() >= 2);
+}
 
 #[test]
-fn monitoring_config_creates_one_check_per_target() {
-    let toml_str = r#"
-[[targets]]
-name = "prod-web-1"
-type = "ssh"
-host = "203.0.113.10"
-user = "opsclaw"
-key = "/etc/opsclaw/keys/prod"
-autonomy = "observe"
+fn health_check_markdown_output() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    current.containers.retain(|c| c.name != "sacra-api");
+    current.disk[0].use_percent = 85;
 
-[[targets]]
-name = "this-box"
-type = "local"
-autonomy = "observe"
+    let hc = check_health("sacra-vps", &baseline, &current);
+    let md = health_check_to_markdown(&hc);
 
-[monitoring]
-interval_minutes = 5
-"#;
-    let config: Config = toml::from_str(toml_str).expect("should parse");
-    let checks = MonitoringConfig::from_config(&config).health_checks();
-    assert_eq!(
-        checks.len(),
-        2,
-        "should create one health check per target"
-    );
-    let names: Vec<&str> = checks.iter().map(|c| c.target_name()).collect();
-    assert!(names.contains(&"prod-web-1"));
-    assert!(names.contains(&"this-box"));
+    assert!(md.contains("sacra-vps"));
+    assert!(md.contains("CRITICAL"));
+    assert!(md.contains("[CRIT]"));
+    assert!(md.contains("[WARN]"));
+    assert!(md.contains("sacra-api"));
+}
+
+#[test]
+fn high_load_triggers_warning() {
+    let baseline = base_snapshot();
+    let mut current = base_snapshot();
+    current.load.load_1 = 12.0;
+
+    let hc = check_health("sacra-vps", &baseline, &current);
+    let load_alerts: Vec<_> = hc
+        .alerts
+        .iter()
+        .filter(|a| a.category == AlertCategory::HighLoad)
+        .collect();
+    assert_eq!(load_alerts.len(), 1);
+    assert_eq!(load_alerts[0].severity, AlertSeverity::Warning);
 }

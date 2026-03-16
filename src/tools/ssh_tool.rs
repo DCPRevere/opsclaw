@@ -238,6 +238,67 @@ pub fn write_audit_entry(
     Ok(())
 }
 
+// ── SshCommandRunner ────────────────────────────────────
+
+/// A resolved, ready-to-use SSH runner for a single target.
+/// Created by `OpsClawContext::ssh_runner_for` with the key already resolved.
+pub struct SshCommandRunner {
+    target: TargetEntry,
+    executor: Box<dyn SshExecutor>,
+    timeout: Duration,
+}
+
+impl std::fmt::Debug for SshCommandRunner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshCommandRunner")
+            .field("target", &self.target)
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SshCommandRunner {
+    pub fn new(target: TargetEntry) -> Self {
+        Self {
+            target,
+            executor: Box::new(RealSshExecutor),
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        }
+    }
+
+    /// Construct with a custom executor (for testing).
+    pub fn with_executor(target: TargetEntry, executor: Box<dyn SshExecutor>) -> Self {
+        Self {
+            target,
+            executor,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        }
+    }
+
+    pub fn target(&self) -> &TargetEntry {
+        &self.target
+    }
+
+    pub fn host(&self) -> &str {
+        &self.target.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.target.port
+    }
+
+    pub fn user(&self) -> &str {
+        &self.target.user
+    }
+
+    /// Execute a command on this target.
+    pub async fn run(&self, command: &str, pty: bool) -> anyhow::Result<SshOutput> {
+        self.executor
+            .run(&self.target, command, self.timeout, pty)
+            .await
+    }
+}
+
 // ── SshTool ─────────────────────────────────────────────
 
 /// Tool trait implementation for SSH command execution.

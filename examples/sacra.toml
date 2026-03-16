@@ -1,0 +1,12 @@
+[agents.defaults.model]
+primary = "anthropic/claude-sonnet-4-6"
+
+[[targets]]
+name = "sacra"
+type = "ssh"
+host = "159.69.92.65"
+port = 22
+user = "root"
+key_secret = "sacra-hetzner-key"
+autonomy = "observe"
+context_file = "context/sacra.md"

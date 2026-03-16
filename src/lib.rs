@@ -61,6 +61,7 @@ pub(crate) mod multimodal;
 pub mod nodes;
 pub mod observability;
 pub(crate) mod onboard;
+pub mod ops;
 pub mod peripherals;
 pub mod providers;
 pub mod rag;

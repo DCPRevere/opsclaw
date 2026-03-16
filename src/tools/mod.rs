@@ -69,6 +69,7 @@ pub mod schema;
 pub mod screenshot;
 pub mod security_ops;
 pub mod shell;
+pub mod ssh_command_runner;
 pub mod ssh_tool;
 pub mod swarm;
 pub mod tool_search;

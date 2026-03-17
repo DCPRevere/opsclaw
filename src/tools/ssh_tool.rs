@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Default SSH command timeout in seconds.
@@ -185,22 +186,128 @@ pub struct SshOutput {
     pub exit_code: i32,
 }
 
-/// Real SSH executor (placeholder — Phase 2 will integrate russh).
+/// Real SSH executor backed by the `russh` crate.
 pub struct RealSshExecutor;
+
+/// Minimal handler that accepts any server host key.
+struct SshClientHandler;
+
+#[async_trait]
+impl russh::client::Handler for SshClientHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &russh_keys::key::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        // Accept all host keys. Production deployments should verify against
+        // a known_hosts file — acceptable for the current threat model where
+        // targets are pre-configured by the operator.
+        Ok(true)
+    }
+}
 
 #[async_trait]
 impl SshExecutor for RealSshExecutor {
     async fn run(
         &self,
-        _target: &TargetEntry,
-        _command: &str,
-        _timeout: Duration,
-        _pty: bool,
+        target: &TargetEntry,
+        command: &str,
+        timeout: Duration,
+        pty: bool,
     ) -> anyhow::Result<SshOutput> {
-        // TODO(phase-2): implement with russh
-        Err(anyhow::anyhow!(
-            "real SSH execution not yet implemented — add russh dependency in Phase 2"
-        ))
+        let result = tokio::time::timeout(timeout, self.run_inner(target, command, pty)).await;
+        match result {
+            Ok(inner) => inner,
+            Err(_) => anyhow::bail!("SSH command timed out after {}s", timeout.as_secs()),
+        }
+    }
+}
+
+impl RealSshExecutor {
+    async fn run_inner(
+        &self,
+        target: &TargetEntry,
+        command: &str,
+        pty: bool,
+    ) -> anyhow::Result<SshOutput> {
+        // Decode the PEM private key.
+        let key_pair = russh_keys::decode_secret_key(&target.private_key_pem, None)
+            .map_err(|e| anyhow::anyhow!("failed to decode SSH private key: {e}"))?;
+
+        // Connect.
+        let config = Arc::new(russh::client::Config::default());
+        let handler = SshClientHandler;
+        let mut handle =
+            russh::client::connect(config, (&*target.host, target.port), handler)
+                .await
+                .map_err(|e| anyhow::anyhow!("SSH connection to {}:{} failed: {e}", target.host, target.port))?;
+
+        // Authenticate.
+        let authenticated = handle
+            .authenticate_publickey(&target.user, Arc::new(key_pair))
+            .await
+            .map_err(|e| anyhow::anyhow!("SSH authentication failed: {e}"))?;
+
+        if !authenticated {
+            anyhow::bail!(
+                "SSH authentication failed for user '{}' on {}:{}",
+                target.user,
+                target.host,
+                target.port,
+            );
+        }
+
+        // Open session channel.
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to open SSH session channel: {e}"))?;
+
+        // Request PTY if needed.
+        if pty {
+            channel
+                .request_pty(true, "xterm", 80, 24, 0, 0, &[])
+                .await
+                .map_err(|e| anyhow::anyhow!("PTY request failed: {e}"))?;
+        }
+
+        // Execute command.
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| anyhow::anyhow!("SSH exec failed: {e}"))?;
+
+        // Collect output.
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+        let mut exit_code: Option<u32> = None;
+
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                russh::ChannelMsg::Data { data } => {
+                    stdout_buf.extend_from_slice(&data);
+                }
+                russh::ChannelMsg::ExtendedData { data, .. } => {
+                    stderr_buf.extend_from_slice(&data);
+                }
+                russh::ChannelMsg::ExitStatus { exit_status } => {
+                    exit_code = Some(exit_status);
+                }
+                _ => {}
+            }
+        }
+
+        // Disconnect gracefully.
+        let _ = handle
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await;
+
+        Ok(SshOutput {
+            stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+            exit_code: exit_code.map_or(-1, |c| c as i32),
+        })
     }
 }
 

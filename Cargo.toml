@@ -112,6 +112,10 @@ parking_lot = "0.12"
 # Async traits
 async-trait = "0.1"
 
+# SSH client
+russh = "0.46"
+russh-keys = "0.46"
+
 # HMAC-SHA256 (Zhipu/GLM JWT auth)
 ring = "0.17"
 

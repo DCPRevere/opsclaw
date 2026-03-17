@@ -8,6 +8,7 @@ use crate::config::Config;
 
 // Re-import from the same crate tree the binary uses — discovery/monitoring
 // types are fine because they don't reference Config.
+use zeroclaw::ops::diagnosis::MonitoringAgent;
 use zeroclaw::ops::{monitor_log, snapshots};
 use zeroclaw::tools::discovery::{self, CommandOutput, CommandRunner};
 use zeroclaw::tools::monitoring;
@@ -153,6 +154,41 @@ pub async fn handle_monitor(
                     if hc.status != monitoring::HealthStatus::Healthy {
                         let md = monitoring::health_check_to_markdown(&hc);
                         eprintln!("{md}");
+
+                        // LLM diagnosis when an API key is available.
+                        if let Some(agent) = make_monitoring_agent() {
+                            match agent.diagnose(&hc, None).await {
+                                Ok(Some(diag)) => {
+                                    eprintln!(
+                                        "\u{1f50d} Diagnosis: {}",
+                                        diag.llm_assessment
+                                    );
+                                    eprintln!(
+                                        "   Actions: {}",
+                                        diag.suggested_actions.join(", ")
+                                    );
+                                    eprintln!(
+                                        "   Severity: {}",
+                                        diag.severity
+                                    );
+                                    if let Err(e) = agent.record_incident(&diag) {
+                                        eprintln!("   Warning: failed to record incident: {e}");
+                                    } else {
+                                        let date = diag.timestamp.format("%Y-%m-%d").to_string();
+                                        let path = agent.incident_log_path(&t.name, &date);
+                                        eprintln!(
+                                            "   Incident ID: {} logged to {}",
+                                            diag.incident_id,
+                                            path.display()
+                                        );
+                                    }
+                                }
+                                Ok(None) => {} // healthy — shouldn't happen here
+                                Err(e) => {
+                                    eprintln!("   Diagnosis skipped (LLM error): {e}");
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -171,6 +207,17 @@ pub async fn handle_monitor(
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Create a [`MonitoringAgent`] if `ANTHROPIC_API_KEY` is set.
+fn make_monitoring_agent() -> Option<MonitoringAgent> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY").ok()?;
+    if api_key.is_empty() {
+        return None;
+    }
+    let model = std::env::var("OPSCLAW_DIAGNOSIS_MODEL")
+        .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+    Some(MonitoringAgent::new(model, api_key))
+}
 
 fn resolve_targets<'a>(
     config: &'a Config,

@@ -11,12 +11,12 @@ use crate::config::Config;
 // Re-import from the same crate tree the binary uses — discovery/monitoring
 // types are fine because they don't reference Config.
 use zeroclaw::config::schema::parse_min_severity;
-use zeroclaw::ops::diagnosis::MonitoringAgent;
+use zeroclaw::ops::diagnosis::{Diagnosis, MonitoringAgent};
 use zeroclaw::ops::event_stream::{self, EventStreamManager};
 use zeroclaw::ops::notifier::{AlertNotifier, NullNotifier, TelegramNotifier};
 use zeroclaw::ops::{monitor_log, snapshots};
 use zeroclaw::tools::discovery::{self, CommandOutput, CommandRunner};
-use zeroclaw::tools::monitoring;
+use zeroclaw::tools::monitoring::{self, HealthCheck};
 use zeroclaw::tools::ssh_command_runner::SshCommandRunner;
 use zeroclaw::tools::ssh_tool::{OpsClawAutonomy, RealSshExecutor, TargetEntry};
 
@@ -194,7 +194,13 @@ pub async fn handle_monitor(
 
                         // LLM diagnosis when an API key is available.
                         if let Some(agent) = make_monitoring_agent() {
-                            match agent.diagnose(&hc, None).await {
+                            // Load target context file if configured.
+                            let context_content = t.context_file.as_ref().and_then(|path| {
+                                std::fs::read_to_string(expand_tilde(path)).ok()
+                            });
+                            let context_ref = context_content.as_deref();
+
+                            match agent.diagnose(&hc, context_ref).await {
                                 Ok(Some(diag)) => {
                                     eprintln!(
                                         "\u{1f50d} Diagnosis: {}",
@@ -208,6 +214,13 @@ pub async fn handle_monitor(
                                         "   Severity: {}",
                                         diag.severity
                                     );
+
+                                    // Send diagnosis to notification channel.
+                                    let alert_text = format_diagnosis_alert(&hc, &diag);
+                                    if let Err(e) = notifier.notify_text(&t.name, &alert_text).await {
+                                        eprintln!("   Warning: diagnosis notification failed: {e}");
+                                    }
+
                                     if let Err(e) = agent.record_incident(&diag) {
                                         eprintln!("   Warning: failed to record incident: {e}");
                                     } else {
@@ -329,6 +342,21 @@ fn make_monitoring_agent() -> Option<MonitoringAgent> {
     let model = std::env::var("OPSCLAW_DIAGNOSIS_MODEL")
         .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
     Some(MonitoringAgent::new(model, api_key))
+}
+
+/// Format a Telegram-friendly diagnosis alert combining health summary and LLM assessment.
+fn format_diagnosis_alert(hc: &HealthCheck, diag: &Diagnosis) -> String {
+    let mut msg = format!("🔍 *Diagnosis* — {}\n", hc.target_name);
+    msg.push_str(&format!("Severity: *{}*\n\n", diag.severity));
+    msg.push_str(&diag.llm_assessment);
+    if !diag.suggested_actions.is_empty() {
+        msg.push_str("\n\n*Suggested actions:*\n");
+        for action in &diag.suggested_actions {
+            msg.push_str(&format!("• {action}\n"));
+        }
+    }
+    msg.push_str(&format!("\nIncident: `{}`", diag.incident_id));
+    msg
 }
 
 fn resolve_targets<'a>(

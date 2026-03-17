@@ -16,7 +16,7 @@ categories = ["command-line-utilities", "api-bindings"]
 rust-version = "1.87"
 
 [[bin]]
-name = "zeroclaw"
+name = "opsclaw"
 path = "src/main.rs"
 
 [lib]

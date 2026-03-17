@@ -1,4 +1,4 @@
-//! OpsClaw CLI command handlers: scan, monitor.
+//! OpsClaw CLI command handlers: scan, monitor, watch.
 
 use anyhow::{bail, Context, Result};
 use tracing::info;
@@ -8,6 +8,7 @@ use crate::config::Config;
 
 // Re-import from the same crate tree the binary uses — discovery/monitoring
 // types are fine because they don't reference Config.
+use zeroclaw::ops::event_stream::{self, EventStreamManager};
 use zeroclaw::ops::{monitor_log, snapshots};
 use zeroclaw::tools::discovery::{self, CommandOutput, CommandRunner};
 use zeroclaw::tools::monitoring;
@@ -165,6 +166,59 @@ pub async fn handle_monitor(
         tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// watch command
+// ---------------------------------------------------------------------------
+
+pub async fn handle_watch(config: &Config, target: Option<String>) -> Result<()> {
+    let targets = resolve_targets(config, target.as_deref(), target.is_none())?;
+
+    if targets.is_empty() {
+        bail!("No targets configured. Add [[targets]] to your config.");
+    }
+
+    let mut manager = EventStreamManager::new();
+
+    for t in &targets {
+        match t.target_type {
+            TargetType::Local => {
+                info!("Adding Docker + systemd event sources for local target '{}'", t.name);
+                manager.add_docker_source();
+                manager.add_systemd_source();
+            }
+            TargetType::Ssh => {
+                // SSH streaming not yet wired — skip with a warning.
+                eprintln!(
+                    "Warning: SSH event streaming not yet supported, skipping target '{}'",
+                    t.name
+                );
+            }
+        }
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+
+    // Spawn the manager in a background task.
+    let manager_handle = tokio::spawn(async move {
+        if let Err(e) = manager.run(tx).await {
+            tracing::error!("Event stream manager error: {e}");
+        }
+    });
+
+    // Read events from the channel and print / alert.
+    while let Some(event) = rx.recv().await {
+        let line = event_stream::format_event(&event);
+        println!("{line}");
+
+        if let Some(alert_msg) = event_stream::event_to_alert(&event) {
+            tracing::warn!("ALERT: {alert_msg}");
+        }
+    }
+
+    let _ = manager_handle.await;
     Ok(())
 }
 

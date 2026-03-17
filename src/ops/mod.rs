@@ -2,6 +2,7 @@
 
 pub mod context;
 pub mod diagnosis;
+pub mod event_stream;
 pub mod monitor_log;
 pub mod notifier;
 pub mod setup;

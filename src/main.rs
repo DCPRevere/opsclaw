@@ -536,6 +536,23 @@ Examples:
   opsclaw setup")]
     Setup,
 
+    /// Stream real-time Docker and systemd events
+    #[command(long_about = "\
+Watch real-time events from Docker and systemd on configured targets.
+
+Spawns `docker events` and `journalctl -f` and streams parsed events \
+to the terminal. Alert-worthy events (container die/stop/kill/oom, \
+systemd errors) are forwarded to the configured notification channel.
+
+Examples:
+  opsclaw watch                        # all local targets
+  opsclaw watch --target sacra         # single target")]
+    Watch {
+        /// Watch a specific target only
+        #[arg(long)]
+        target: Option<String>,
+    },
+
     /// Generate shell completion script to stdout
     #[command(long_about = "\
 Generate shell completion scripts for `zeroclaw`.
@@ -1329,6 +1346,7 @@ async fn main() -> Result<()> {
         } => ops_cli::handle_monitor(&config, target, interval, once).await,
 
         Commands::Setup => zeroclaw::ops::setup::run_opsclaw_setup().await,
+        Commands::Watch { target } => ops_cli::handle_watch(&config, target).await,
 
         Commands::Config { config_command } => match config_command {
             ConfigCommands::Schema => {

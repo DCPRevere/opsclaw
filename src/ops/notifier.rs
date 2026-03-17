@@ -12,6 +12,9 @@ pub trait AlertNotifier: Send + Sync {
 
     /// Send a health-check summary (only when there are alerts above the configured threshold).
     async fn notify(&self, target_name: &str, health: &HealthCheck) -> anyhow::Result<()>;
+
+    /// Send a plain-text alert message (for event streams and one-off alerts).
+    async fn notify_text(&self, target_name: &str, message: &str) -> anyhow::Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +84,15 @@ impl AlertNotifier for TelegramNotifier {
         let text = format_health_check(target_name, &relevant);
         self.send_message(&text).await
     }
+
+    async fn notify_text(&self, target_name: &str, message: &str) -> anyhow::Result<()> {
+        let text = format!(
+            "\u{1f534} *{}*\n{}",
+            escape_markdown(target_name),
+            escape_markdown(message)
+        );
+        self.send_message(&text).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +108,10 @@ impl AlertNotifier for NullNotifier {
     }
 
     async fn notify(&self, _target_name: &str, _health: &HealthCheck) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn notify_text(&self, _target_name: &str, _message: &str) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -138,6 +154,17 @@ pub fn format_health_check(target_name: &str, alerts: &[&Alert]) -> String {
         let _ = writeln!(buf, "\n\u{2022} {}", a.message);
     }
     buf
+}
+
+fn escape_markdown(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '*' | '_' | '`' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn severity_icon_label(s: &AlertSeverity) -> (&'static str, &'static str) {

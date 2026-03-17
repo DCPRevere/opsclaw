@@ -3,4 +3,5 @@
 pub mod context;
 pub mod monitor_log;
 pub mod notifier;
+pub mod setup;
 pub mod snapshots;

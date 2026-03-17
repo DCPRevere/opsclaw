@@ -524,6 +524,18 @@ Examples:
         once: bool,
     },
 
+    /// Interactive first-run setup wizard for OpsClaw targets
+    #[command(long_about = "\
+Run the interactive OpsClaw setup wizard.
+
+Walks through adding a target (SSH or local), running a discovery \
+scan, setting an autonomy level, and configuring a notification \
+channel. Writes the result to ~/.opsclaw/config.toml.
+
+Examples:
+  opsclaw setup")]
+    Setup,
+
     /// Generate shell completion script to stdout
     #[command(long_about = "\
 Generate shell completion scripts for `zeroclaw`.
@@ -1315,6 +1327,8 @@ async fn main() -> Result<()> {
             interval,
             once,
         } => ops_cli::handle_monitor(&config, target, interval, once).await,
+
+        Commands::Setup => zeroclaw::ops::setup::run_opsclaw_setup().await,
 
         Commands::Config { config_command } => match config_command {
             ConfigCommands::Schema => {

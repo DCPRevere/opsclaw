@@ -1,5 +1,7 @@
 //! OpsClaw CLI command handlers: scan, monitor, watch.
 
+use std::fs;
+
 use anyhow::{bail, Context, Result};
 use tracing::info;
 
@@ -13,6 +15,8 @@ use zeroclaw::ops::event_stream::{self, EventStreamManager};
 use zeroclaw::ops::{monitor_log, snapshots};
 use zeroclaw::tools::discovery::{self, CommandOutput, CommandRunner};
 use zeroclaw::tools::monitoring;
+use zeroclaw::tools::ssh_command_runner::SshCommandRunner;
+use zeroclaw::tools::ssh_tool::{OpsClawAutonomy, RealSshExecutor, TargetEntry};
 
 // ---------------------------------------------------------------------------
 // Local command runner (runs commands on the local machine)
@@ -39,41 +43,65 @@ impl CommandRunner for LocalCommandRunner {
 }
 
 // ---------------------------------------------------------------------------
-// Stub SSH runner (SshCommandRunner is being built in parallel)
-// ---------------------------------------------------------------------------
-
-struct SshCommandRunnerStub {
-    host: String,
-    user: String,
-    port: u16,
-}
-
-#[async_trait::async_trait]
-impl CommandRunner for SshCommandRunnerStub {
-    async fn run(&self, _command: &str) -> Result<CommandOutput> {
-        // TODO: Replace with real SshCommandRunner once available
-        bail!(
-            "SSH command runner not yet wired — target {}@{}:{} requires SshCommandRunner",
-            self.user,
-            self.host,
-            self.port
-        )
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Runner factory
 // ---------------------------------------------------------------------------
 
-fn make_runner(target: &TargetConfig) -> Box<dyn CommandRunner> {
+/// Build a [`CommandRunner`] for a target config, loading SSH keys from disk.
+fn make_runner(target: &TargetConfig) -> Result<Box<dyn CommandRunner>> {
     match target.target_type {
-        TargetType::Local => Box::new(LocalCommandRunner),
-        TargetType::Ssh => Box::new(SshCommandRunnerStub {
-            host: target.host.clone().unwrap_or_default(),
-            user: target.user.clone().unwrap_or_default(),
-            port: target.port.unwrap_or(22),
-        }),
+        TargetType::Local => Ok(Box::new(LocalCommandRunner)),
+        TargetType::Ssh => {
+            let host = target.host.clone().unwrap_or_default();
+            let user = target.user.clone().unwrap_or_default();
+            let port = target.port.unwrap_or(22);
+
+            // Resolve SSH key: key_secret holds a file path (possibly with ~)
+            let key_pem = match &target.key_secret {
+                Some(path) => {
+                    let expanded = expand_tilde(path);
+                    fs::read_to_string(&expanded)
+                        .with_context(|| format!("Failed to read SSH key from {expanded}"))?
+                }
+                None => {
+                    // Fall back to ~/.ssh/id_rsa
+                    let default_key = expand_tilde("~/.ssh/id_rsa");
+                    fs::read_to_string(&default_key)
+                        .with_context(|| "No key_secret configured and ~/.ssh/id_rsa not found".to_string())?
+                }
+            };
+
+            let entry = TargetEntry {
+                name: target.name.clone(),
+                host,
+                port,
+                user,
+                private_key_pem: key_pem,
+                autonomy: convert_autonomy(target.autonomy),
+            };
+
+            Ok(Box::new(SshCommandRunner::new(entry, Box::new(RealSshExecutor))))
+        }
     }
+}
+
+/// Convert config schema autonomy to ssh_tool autonomy.
+fn convert_autonomy(a: crate::config::schema::OpsClawAutonomy) -> OpsClawAutonomy {
+    match a {
+        crate::config::schema::OpsClawAutonomy::Observe => OpsClawAutonomy::Observe,
+        crate::config::schema::OpsClawAutonomy::Suggest => OpsClawAutonomy::Suggest,
+        crate::config::schema::OpsClawAutonomy::ActOnKnown => OpsClawAutonomy::ActOnKnown,
+        crate::config::schema::OpsClawAutonomy::FullAuto => OpsClawAutonomy::FullAuto,
+    }
+}
+
+/// Expand a leading `~` to the home directory.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    path.to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +113,7 @@ pub async fn handle_scan(config: &Config, target: Option<String>, all: bool) -> 
 
     for t in &targets {
         info!("Scanning target: {}", t.name);
-        let runner = make_runner(t);
+        let runner = make_runner(t)?;
         let snapshot = discovery::run_discovery_scan(runner.as_ref())
             .await
             .with_context(|| format!("Scan failed for target '{}'", t.name))?;
@@ -119,7 +147,7 @@ pub async fn handle_monitor(
 
     loop {
         for t in &targets {
-            let runner = make_runner(t);
+            let runner = make_runner(t)?;
             let current = match discovery::run_discovery_scan(runner.as_ref()).await {
                 Ok(snap) => snap,
                 Err(e) => {

@@ -3,6 +3,7 @@
 //! Walks the user through adding a target, running a discovery scan,
 //! setting an autonomy level, and configuring a notification channel.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -14,6 +15,9 @@ use crate::config::schema::{
 };
 use crate::ops::snapshots;
 use crate::tools::discovery::{self, CommandOutput, CommandRunner, TargetSnapshot};
+use crate::tools::ssh_command_runner::SshCommandRunner;
+use crate::tools::ssh_tool::RealSshExecutor;
+use crate::tools::ssh_tool::TargetEntry;
 
 // ---------------------------------------------------------------------------
 // Step helpers (mirrors onboard/wizard.rs style)
@@ -56,38 +60,14 @@ impl CommandRunner for LocalCommandRunner {
     }
 }
 
-struct SshCommandRunnerStub {
-    host: String,
-    user: String,
-    port: u16,
-}
-
-#[async_trait::async_trait]
-impl CommandRunner for SshCommandRunnerStub {
-    async fn run(&self, command: &str) -> Result<CommandOutput> {
-        let output = tokio::process::Command::new("ssh")
-            .arg("-o")
-            .arg("ConnectTimeout=10")
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-p")
-            .arg(self.port.to_string())
-            .arg(format!("{}@{}", self.user, self.host))
-            .arg(command)
-            .output()
-            .await
-            .with_context(|| {
-                format!(
-                    "SSH command failed: {}@{}:{} '{}'",
-                    self.user, self.host, self.port, command
-                )
-            })?;
-        Ok(CommandOutput {
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            exit_code: output.status.code().unwrap_or(-1),
-        })
+/// Expand a leading `~` to the home directory.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
     }
+    path.to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -222,22 +202,38 @@ async fn step_ssh_target() -> Result<TargetResult> {
         }
     }
 
+    let runner: Box<dyn CommandRunner> = match fs::read_to_string(
+        expand_tilde(&key_path)
+    ) {
+        Ok(key_pem) => {
+            let entry = TargetEntry {
+                name: name.clone(),
+                host: host.clone(),
+                port,
+                user: user.clone(),
+                private_key_pem: key_pem,
+                autonomy: crate::tools::ssh_tool::OpsClawAutonomy::Observe,
+            };
+            Box::new(SshCommandRunner::new(entry, Box::new(RealSshExecutor)))
+        }
+        Err(e) => {
+            println!("  {} Could not read SSH key ({}): using stub for scan",
+                style("\u{26a0}").yellow(), e);
+            // Graceful fallback: scan will be skipped, not crash
+            Box::new(LocalCommandRunner)
+        }
+    };
+
     let config = TargetConfig {
         name,
         target_type: TargetType::Ssh,
-        host: Some(host.clone()),
+        host: Some(host),
         port: Some(port),
-        user: Some(user.clone()),
+        user: Some(user),
         key_secret: Some(key_path),
         autonomy: OpsClawAutonomy::default(),
         context_file: None,
     };
-
-    let runner: Box<dyn CommandRunner> = Box::new(SshCommandRunnerStub {
-        host,
-        user,
-        port,
-    });
 
     Ok(TargetResult { config, runner })
 }

@@ -10,8 +10,10 @@ use crate::config::Config;
 
 // Re-import from the same crate tree the binary uses — discovery/monitoring
 // types are fine because they don't reference Config.
+use zeroclaw::config::schema::parse_min_severity;
 use zeroclaw::ops::diagnosis::MonitoringAgent;
 use zeroclaw::ops::event_stream::{self, EventStreamManager};
+use zeroclaw::ops::notifier::{AlertNotifier, NullNotifier, TelegramNotifier};
 use zeroclaw::ops::{monitor_log, snapshots};
 use zeroclaw::tools::discovery::{self, CommandOutput, CommandRunner};
 use zeroclaw::tools::monitoring;
@@ -145,6 +147,8 @@ pub async fn handle_monitor(
         bail!("No targets configured. Add [[targets]] to your config.");
     }
 
+    let notifier = make_notifier(config);
+
     loop {
         for t in &targets {
             let runner = make_runner(t)?;
@@ -183,6 +187,10 @@ pub async fn handle_monitor(
                     if hc.status != monitoring::HealthStatus::Healthy {
                         let md = monitoring::health_check_to_markdown(&hc);
                         eprintln!("{md}");
+
+                        if let Err(e) = notifier.notify(&t.name, &hc).await {
+                            eprintln!("   Warning: notification failed: {e}");
+                        }
 
                         // LLM diagnosis when an API key is available.
                         if let Some(agent) = make_monitoring_agent() {
@@ -244,6 +252,8 @@ pub async fn handle_watch(config: &Config, target: Option<String>) -> Result<()>
         bail!("No targets configured. Add [[targets]] to your config.");
     }
 
+    let notifier = make_notifier(config);
+
     let mut manager = EventStreamManager::new();
 
     for t in &targets {
@@ -279,6 +289,8 @@ pub async fn handle_watch(config: &Config, target: Option<String>) -> Result<()>
 
         if let Some(alert_msg) = event_stream::event_to_alert(&event) {
             tracing::warn!("ALERT: {alert_msg}");
+            let target_str = targets.first().map_or("unknown", |t| t.name.as_str());
+            let _ = notifier.notify_text(target_str, &alert_msg).await;
         }
     }
 
@@ -289,6 +301,24 @@ pub async fn handle_watch(config: &Config, target: Option<String>) -> Result<()>
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Build a notifier from config. Returns `TelegramNotifier` if configured, `NullNotifier` otherwise.
+fn make_notifier(config: &Config) -> Box<dyn AlertNotifier> {
+    if let Some(notif_config) = config.notifications.as_ref() {
+        if let (Some(token), Some(chat_id)) = (
+            notif_config.telegram_bot_token.as_ref(),
+            notif_config.telegram_chat_id.as_ref(),
+        ) {
+            let severity = parse_min_severity(&notif_config.min_severity);
+            return Box::new(TelegramNotifier::new(
+                token.clone(),
+                chat_id.clone(),
+                severity,
+            ));
+        }
+    }
+    Box::new(NullNotifier)
+}
 
 /// Create a [`MonitoringAgent`] if `ANTHROPIC_API_KEY` is set.
 fn make_monitoring_agent() -> Option<MonitoringAgent> {

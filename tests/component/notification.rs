@@ -111,6 +111,9 @@ async fn null_notifier_returns_ok() {
     };
     let result: anyhow::Result<()> = notifier.notify("target", &health).await;
     assert!(result.is_ok());
+
+    let result: anyhow::Result<()> = notifier.notify_text("target", "test alert").await;
+    assert!(result.is_ok());
 }
 
 // ---------------------------------------------------------------------------

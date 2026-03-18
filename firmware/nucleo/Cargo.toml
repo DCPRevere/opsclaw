@@ -12,7 +12,7 @@ name = "nucleo"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "ZeroClaw Nucleo-F401RE peripheral firmware — GPIO over JSON serial"
+description = "OpsClaw Nucleo-F401RE peripheral firmware — GPIO over JSON serial"
 
 [dependencies]
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt"] }

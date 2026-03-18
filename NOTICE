@@ -1,43 +1,37 @@
-ZeroClaw
-Copyright 2025 ZeroClaw Labs
-
-This product includes software developed at ZeroClaw Labs (https://github.com/zeroclaw-labs).
-
-Official Repository
-===================
-
-The only official ZeroClaw repository is:
-https://github.com/zeroclaw-labs/zeroclaw
-
-Any other repository claiming to be ZeroClaw is unauthorized.
-See TRADEMARK.md for the full trademark policy.
-
-License
+OpsClaw
 =======
 
-This software is available under a dual-license model:
+Copyright © 2026 D C P Revere. All rights reserved.
 
-  1. MIT License — see LICENSE-MIT
-  2. Apache License 2.0 — see LICENSE-APACHE
+OpsClaw is built upon ZeroClaw, an open-source project by ZeroClaw Labs.
+ZeroClaw is copyright © 2025 ZeroClaw Labs and is used under the MIT License:
 
-You may use either license. Contributors grant rights under both.
-See CLA.md for the contributor license agreement.
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
 
-Contributors
-============
+    The above copyright notice and this permission notice shall be included
+    in all copies or substantial portions of the Software.
 
-This NOTICE file is maintained by repository automation.
-For the latest contributor list, see the repository contributors page:
-https://github.com/zeroclaw-labs/zeroclaw/graphs/contributors
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
 
-All contributors retain copyright ownership of their contributions.
-Contributions are permanently attributed in the repository commit history.
-Patent rights are protected for all contributors under Apache License 2.0.
+Contributor Agreement
+=====================
 
-Third-Party Dependencies
-========================
-
-This project uses third-party libraries and components,
-each licensed under their respective terms.
-
-See Cargo.lock for a complete dependency list.
+By submitting a contribution to OpsClaw (including pull requests, patches,
+or any other code or content submission), you irrevocably assign to
+D C P Revere all copyright and related rights in your contribution worldwide.
+You confirm that you are the original author of the contribution, that you
+have the right to make this assignment, and that your contribution does not
+infringe any third-party rights. This assignment allows OpsClaw to be used,
+modified, sublicensed, and distributed under any terms, including commercial
+terms, at the sole discretion of D C P Revere.

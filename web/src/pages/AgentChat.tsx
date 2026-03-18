@@ -194,7 +194,7 @@ export default function AgentChat() {
             <div className="h-16 w-16 rounded-2xl flex items-center justify-center mb-4 animate-float" style={{ background: 'linear-gradient(135deg, #0080ff15, #0080ff08)' }}>
               <Bot className="h-8 w-8 text-[#0080ff]" />
             </div>
-            <p className="text-lg font-semibold text-white mb-1">ZeroClaw Agent</p>
+            <p className="text-lg font-semibold text-white mb-1">OpsClaw Agent</p>
             <p className="text-sm text-[#556080]">Send a message to start the conversation</p>
           </div>
         )}

@@ -1,6 +1,6 @@
-# zeroclaw-tools
+# opsclaw-tools
 
-Python companion package for [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) — LangGraph-based tool calling for consistent LLM agent execution.
+Python companion package for [OpsClaw](https://github.com/DCPRevere/opsclaw) — LangGraph-based tool calling for consistent LLM agent execution.
 
 ## Why This Package?
 
@@ -14,13 +14,13 @@ Some LLM providers (particularly GLM-5/Zhipu and similar models) have inconsiste
 ## Installation
 
 ```bash
-pip install zeroclaw-tools
+pip install opsclaw-tools
 ```
 
 With Discord integration:
 
 ```bash
-pip install zeroclaw-tools[discord]
+pip install opsclaw-tools[discord]
 ```
 
 ## Quick Start
@@ -29,7 +29,7 @@ pip install zeroclaw-tools[discord]
 
 ```python
 import asyncio
-from zeroclaw_tools import create_agent, shell, file_read, file_write
+from opsclaw_tools import create_agent, shell, file_read, file_write
 from langchain_core.messages import HumanMessage
 
 async def main():
@@ -59,17 +59,17 @@ export API_KEY="your-api-key"
 export API_BASE="https://api.z.ai/api/coding/paas/v4"
 
 # Run the CLI
-zeroclaw-tools "List files in the current directory"
+opsclaw-tools "List files in the current directory"
 
 # Interactive mode (no message required)
-zeroclaw-tools -i
+opsclaw-tools -i
 ```
 
 ### Discord Bot
 
 ```python
 import os
-from zeroclaw_tools.integrations import DiscordBot
+from opsclaw_tools.integrations import DiscordBot
 
 bot = DiscordBot(
     token=os.environ["DISCORD_TOKEN"],
@@ -95,7 +95,7 @@ bot.run()
 ## Creating Custom Tools
 
 ```python
-from zeroclaw_tools import tool
+from opsclaw_tools import tool
 
 @tool
 def my_custom_tool(query: str) -> str:
@@ -124,7 +124,7 @@ Works with any OpenAI-compatible provider:
 ┌─────────────────────────────────────────────┐
 │              Your Application               │
 ├─────────────────────────────────────────────┤
-│           zeroclaw-tools Agent              │
+│           opsclaw-tools Agent              │
 │  ┌─────────────────────────────────────┐   │
 │  │         LangGraph StateGraph         │   │
 │  │    ┌───────────┐    ┌──────────┐    │   │
@@ -137,9 +137,9 @@ Works with any OpenAI-compatible provider:
 └─────────────────────────────────────────────┘
 ```
 
-## Comparison with Rust ZeroClaw
+## Comparison with Rust OpsClaw
 
-| Feature | Rust ZeroClaw | zeroclaw-tools |
+| Feature | Rust OpsClaw | opsclaw-tools |
 |---------|---------------|----------------|
 | **Binary size** | ~3.4 MB | Python package |
 | **Memory** | <5 MB | ~50 MB |
@@ -147,7 +147,7 @@ Works with any OpenAI-compatible provider:
 | **Tool consistency** | Model-dependent | LangGraph guarantees |
 | **Extensibility** | Rust traits | Python decorators |
 
-Use **Rust ZeroClaw** for production edge deployments. Use **zeroclaw-tools** when you need guaranteed tool calling consistency or Python ecosystem integration.
+Use **Rust OpsClaw** for production edge deployments. Use **opsclaw-tools** when you need guaranteed tool calling consistency or Python ecosystem integration.
 
 ## License
 

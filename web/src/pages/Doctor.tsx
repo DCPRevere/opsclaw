@@ -207,7 +207,7 @@ export default function Doctor() {
           </div>
           <p className="text-lg font-semibold text-white mb-1">System Diagnostics</p>
           <p className="text-sm text-[#556080]">
-            Click "Run Diagnostics" to check your ZeroClaw installation.
+            Click "Run Diagnostics" to check your OpsClaw installation.
           </p>
         </div>
       )}

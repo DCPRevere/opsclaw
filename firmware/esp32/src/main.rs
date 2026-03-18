@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
         &config,
     )?;
 
-    info!("ZeroClaw ESP32 firmware ready on UART0 (115200)");
+    info!("OpsClaw ESP32 firmware ready on UART0 (115200)");
 
     let mut buf = [0u8; 512];
     let mut line = Vec::new();

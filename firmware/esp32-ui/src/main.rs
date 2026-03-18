@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    info!("Starting ZeroClaw ESP32 UI scaffold");
+    info!("Starting OpsClaw ESP32 UI scaffold");
 
     let window = MainWindow::new().context("failed to create MainWindow")?;
     window.run().context("MainWindow event loop failed")?;

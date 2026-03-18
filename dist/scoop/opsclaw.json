@@ -1,0 +1,26 @@
+{
+    "version": "0.4.3",
+    "description": "Autonomous SRE agent — monitors your servers and fixes them while you sleep.",
+    "homepage": "https://opsclaw.io",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/DCPRevere/opsclaw/releases/download/v0.4.3/opsclaw-x86_64-pc-windows-msvc.zip",
+            "hash": "",
+            "bin": "opsclaw.exe"
+        }
+    },
+    "checkver": {
+        "github": "https://github.com/DCPRevere/opsclaw"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/DCPRevere/opsclaw/releases/download/v$version/opsclaw-x86_64-pc-windows-msvc.zip"
+            }
+        },
+        "hash": {
+            "url": "https://github.com/DCPRevere/opsclaw/releases/download/v$version/SHA256SUMS",
+            "regex": "([a-f0-9]{64})\\s+opsclaw-x86_64-pc-windows-msvc\\.zip"
+        }
+    }
+}

@@ -1,6 +1,6 @@
-# ZeroClaw ESP32 UI Firmware
+# OpsClaw ESP32 UI Firmware
 
-Slint-based graphical UI firmware scaffold for ZeroClaw edge scenarios on ESP32.
+Slint-based graphical UI firmware scaffold for OpsClaw edge scenarios on ESP32.
 
 ## Scope of This Crate
 
@@ -92,7 +92,7 @@ These components are placeholders to keep future hardware integration incrementa
 
 1. Wire real display driver initialization in `src/main.rs`
 2. Attach touch input events to Slint callbacks
-3. Connect UI state with ZeroClaw edge/runtime messaging
+3. Connect UI state with OpsClaw edge/runtime messaging
 4. Add board-specific pin maps with explicit target profiles
 
 ## License

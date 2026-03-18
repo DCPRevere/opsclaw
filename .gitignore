@@ -32,7 +32,7 @@ venv/
 *.pem
 credentials.json
 .worktrees/
-.zeroclaw/*
+.opsclaw/*
 
 # Skill eval workspaces (test outputs, transcripts, grading)
 .claude/skills/*-workspace/
@@ -49,3 +49,11 @@ lcov.info
 
 # Wrangler cache
 .wrangler/
+# Private design notes
+thoughts/
+
+# Agent task files (private)
+tasks/
+CLAUDE.md
+.cargo/
+AGENTS.md

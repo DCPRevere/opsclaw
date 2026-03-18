@@ -12,6 +12,11 @@ import Config from './pages/Config';
 import Cost from './pages/Cost';
 import Logs from './pages/Logs';
 import Doctor from './pages/Doctor';
+import Targets from './pages/Targets';
+import TargetDetail from './pages/TargetDetail';
+import Incidents from './pages/Incidents';
+import Runbooks from './pages/Runbooks';
+import AuditLog from './pages/AuditLog';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { DraftContext, useDraftStore } from './hooks/useDraft';
 import { setLocale, type Locale } from './lib/i18n';
@@ -52,7 +57,7 @@ export class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error('[ZeroClaw] Render error:', error, info.componentStack);
+    console.error('[OpsClaw] Render error:', error, info.componentStack);
   }
 
   render() {
@@ -114,11 +119,11 @@ function PairingDialog({ onPair }: { onPair: (code: string) => Promise<void> }) 
         <div className="text-center mb-8">
           <img
             src="/_app/logo.png"
-            alt="ZeroClaw"
+            alt="OpsClaw"
             className="h-20 w-20 rounded-2xl object-cover mx-auto mb-4 animate-float"
             style={{ boxShadow: '0 0 30px rgba(0,128,255,0.3)' }}
           />
-          <h1 className="text-2xl font-bold text-gradient-blue mb-2">ZeroClaw</h1>
+          <h1 className="text-2xl font-bold text-gradient-blue mb-2">OpsClaw</h1>
           <p className="text-[#556080] text-sm">Enter the pairing code from your terminal</p>
         </div>
         <form onSubmit={handleSubmit}>
@@ -167,8 +172,8 @@ function AppContent() {
     const handler = () => {
       logout();
     };
-    window.addEventListener('zeroclaw-unauthorized', handler);
-    return () => window.removeEventListener('zeroclaw-unauthorized', handler);
+    window.addEventListener('opsclaw-unauthorized', handler);
+    return () => window.removeEventListener('opsclaw-unauthorized', handler);
   }, [logout]);
 
   if (loading) {
@@ -201,6 +206,11 @@ function AppContent() {
             <Route path="/cost" element={<Cost />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/doctor" element={<Doctor />} />
+            <Route path="/targets" element={<Targets />} />
+            <Route path="/targets/:name" element={<TargetDetail />} />
+            <Route path="/incidents" element={<Incidents />} />
+            <Route path="/runbooks" element={<Runbooks />} />
+            <Route path="/audit" element={<AuditLog />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

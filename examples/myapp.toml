@@ -1,0 +1,12 @@
+[agents.defaults.model]
+primary = "anthropic/claude-sonnet-4-6"
+
+[[targets]]
+name = "myapp"
+type = "ssh"
+host = "203.0.113.42"
+port = 22
+user = "deploy"
+key_secret = "myapp-ssh-key"
+autonomy = "observe"
+context_file = "context/myapp.md"

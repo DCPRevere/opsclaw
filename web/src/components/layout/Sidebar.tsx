@@ -10,6 +10,10 @@ import {
   DollarSign,
   Activity,
   Stethoscope,
+  Server,
+  AlertTriangle,
+  BookOpen,
+  Shield,
 } from 'lucide-react';
 import { t } from '@/lib/i18n';
 
@@ -26,6 +30,13 @@ const navItems = [
   { to: '/doctor', icon: Stethoscope, labelKey: 'nav.doctor' },
 ];
 
+const opsclawItems = [
+  { to: '/targets', icon: Server, label: 'Targets' },
+  { to: '/incidents', icon: AlertTriangle, label: 'Incidents' },
+  { to: '/runbooks', icon: BookOpen, label: 'Runbooks' },
+  { to: '/audit', icon: Shield, label: 'Audit Log' },
+];
+
 export default function Sidebar() {
   return (
     <aside className="fixed top-0 left-0 h-screen w-60 flex flex-col" style={{ background: 'linear-gradient(180deg, #080818 0%, #050510 100%)' }}>
@@ -36,11 +47,11 @@ export default function Sidebar() {
       <div className="flex items-center gap-3 px-4 py-4 border-b border-[#1a1a3e]/50">
         <img
           src="/_app/logo.png"
-          alt="ZeroClaw"
+          alt="OpsClaw"
           className="h-10 w-10 rounded-xl object-cover animate-pulse-glow"
         />
         <span className="text-lg font-bold text-gradient-blue tracking-wide">
-          ZeroClaw
+          OpsClaw
         </span>
       </div>
 
@@ -75,11 +86,44 @@ export default function Sidebar() {
             )}
           </NavLink>
         ))}
+
+        {/* OpsClaw Section */}
+        <div className="mt-4 pt-4 border-t border-[#1a1a3e]/50">
+          <p className="text-[10px] text-[#334060] uppercase tracking-wider font-semibold px-3 mb-2">OpsClaw</p>
+          {opsclawItems.map(({ to, icon: Icon, label }, idx) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) =>
+                [
+                  'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-300 animate-slide-in-left group',
+                  isActive
+                    ? 'text-white shadow-[0_0_15px_rgba(0,128,255,0.2)]'
+                    : 'text-[#556080] hover:text-white hover:bg-[#0080ff08]',
+                ].join(' ')
+              }
+              style={({ isActive }) => ({
+                animationDelay: `${(navItems.length + idx) * 40}ms`,
+                ...(isActive ? { background: 'linear-gradient(135deg, rgba(0,128,255,0.15), rgba(0,128,255,0.05))' } : {}),
+              })}
+            >
+              {({ isActive }) => (
+                <>
+                  <Icon className={`h-5 w-5 flex-shrink-0 transition-colors duration-300 ${isActive ? 'text-[#0080ff]' : 'group-hover:text-[#0080ff80]'}`} />
+                  <span>{label}</span>
+                  {isActive && (
+                    <div className="ml-auto h-1.5 w-1.5 rounded-full bg-[#0080ff] glow-dot" />
+                  )}
+                </>
+              )}
+            </NavLink>
+          ))}
+        </div>
       </nav>
 
       {/* Footer */}
       <div className="px-5 py-4 border-t border-[#1a1a3e]/50">
-        <p className="text-[10px] text-[#334060] tracking-wider uppercase">ZeroClaw Runtime</p>
+        <p className="text-[10px] text-[#334060] tracking-wider uppercase">OpsClaw Runtime</p>
       </div>
     </aside>
   );

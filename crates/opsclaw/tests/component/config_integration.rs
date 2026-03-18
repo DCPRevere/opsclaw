@@ -23,6 +23,7 @@ fn sacra_target() -> TargetConfig {
         autonomy: OpsClawAutonomy::DryRun,
         context_file: None,
         probes: None,
+        data_sources: None,
     }
 }
 
@@ -123,6 +124,7 @@ fn ssh_runner_for_local_target_errors() {
         autonomy: OpsClawAutonomy::DryRun,
         context_file: None,
         probes: None,
+        data_sources: None,
     }]);
     let ctx = OpsClawContext::new(config, secrets);
 

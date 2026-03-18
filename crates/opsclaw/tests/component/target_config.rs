@@ -11,6 +11,7 @@ fn ssh_target(name: &str) -> TargetConfig {
         autonomy: OpsClawAutonomy::DryRun,
         context_file: None,
         probes: None,
+        data_sources: None,
     }
 }
 
@@ -25,6 +26,7 @@ fn local_target(name: &str) -> TargetConfig {
         autonomy: OpsClawAutonomy::DryRun,
         context_file: Some(format!("context/{name}.md")),
         probes: None,
+        data_sources: None,
     }
 }
 

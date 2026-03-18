@@ -9,7 +9,6 @@ pub mod github;
 pub mod jaeger;
 pub mod seq;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::ops::log_sources::LogEntry;

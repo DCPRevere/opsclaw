@@ -579,7 +579,10 @@ mod tests {
 
         let hc = check_health("test", &baseline, &current);
         assert_eq!(hc.status, HealthStatus::Critical);
-        assert!(hc.alerts.iter().any(|a| a.category == AlertCategory::PodCrashLoop));
+        assert!(hc
+            .alerts
+            .iter()
+            .any(|a| a.category == AlertCategory::PodCrashLoop));
     }
 
     #[test]
@@ -592,7 +595,10 @@ mod tests {
 
         let hc = check_health("test", &baseline, &current);
         assert_eq!(hc.status, HealthStatus::Warning);
-        assert!(hc.alerts.iter().any(|a| a.category == AlertCategory::DeploymentDegraded));
+        assert!(hc
+            .alerts
+            .iter()
+            .any(|a| a.category == AlertCategory::DeploymentDegraded));
     }
 
     #[test]
@@ -606,8 +612,7 @@ mod tests {
         let hc = check_health("test", &baseline, &current);
         assert_eq!(hc.status, HealthStatus::Critical);
         assert!(hc.alerts.iter().any(|a| {
-            a.category == AlertCategory::DeploymentDegraded
-                && a.severity == AlertSeverity::Critical
+            a.category == AlertCategory::DeploymentDegraded && a.severity == AlertSeverity::Critical
         }));
     }
 
@@ -620,7 +625,10 @@ mod tests {
 
         let hc = check_health("test", &baseline, &current);
         assert_eq!(hc.status, HealthStatus::Critical);
-        assert!(hc.alerts.iter().any(|a| a.category == AlertCategory::NodeNotReady));
+        assert!(hc
+            .alerts
+            .iter()
+            .any(|a| a.category == AlertCategory::NodeNotReady));
     }
 
     #[test]

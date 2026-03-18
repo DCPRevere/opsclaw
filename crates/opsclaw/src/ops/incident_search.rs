@@ -65,11 +65,7 @@ impl IncidentIndex {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
             .with_context(|| format!("Failed to read incident dir: {}", dir.display()))?
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map_or(false, |ext| ext == "jsonl")
-            })
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
             .collect();
 
         entries.sort_by_key(|e| e.file_name());
@@ -118,7 +114,11 @@ impl IncidentIndex {
     }
 
     /// Search for similar past incidents based on symptom/keyword matching with current alerts.
-    pub fn search_similar(&self, current_alerts: &[Alert], max_results: usize) -> Vec<&IncidentRecord> {
+    pub fn search_similar(
+        &self,
+        current_alerts: &[Alert],
+        max_results: usize,
+    ) -> Vec<&IncidentRecord> {
         if self.incidents.is_empty() || current_alerts.is_empty() {
             return Vec::new();
         }
@@ -162,7 +162,10 @@ impl IncidentIndex {
             out.push_str(&format!("Symptoms: {}\n", inc.symptoms));
             out.push_str(&format!("Diagnosis: {}\n", inc.llm_assessment));
             if !inc.suggested_actions.is_empty() {
-                out.push_str(&format!("Actions taken: {}\n", inc.suggested_actions.join(", ")));
+                out.push_str(&format!(
+                    "Actions taken: {}\n",
+                    inc.suggested_actions.join(", ")
+                ));
             }
             if let Some(ref resolution) = inc.resolution {
                 out.push_str(&format!("Resolution: {}\n", resolution));
@@ -190,7 +193,9 @@ impl IncidentIndex {
             .map(|inc| {
                 let text = format!(
                     "{} {} {}",
-                    inc.symptoms, inc.llm_assessment, inc.suggested_actions.join(" ")
+                    inc.symptoms,
+                    inc.llm_assessment,
+                    inc.suggested_actions.join(" ")
                 );
                 let text_lower = text.to_lowercase();
                 let score: f64 = keywords
@@ -214,7 +219,12 @@ impl IncidentIndex {
 
 /// Mark an incident as resolved by appending a resolution record to the JSONL file.
 pub fn mark_resolved(target_name: &str, incident_id: &str, resolution: &str) -> Result<()> {
-    mark_resolved_in_dir(&default_incident_dir(), target_name, incident_id, resolution)
+    mark_resolved_in_dir(
+        &default_incident_dir(),
+        target_name,
+        incident_id,
+        resolution,
+    )
 }
 
 fn mark_resolved_in_dir(
@@ -283,14 +293,12 @@ fn extract_keywords_from_alerts(alerts: &[Alert]) -> HashSet<String> {
 
 fn extract_keywords(text: &str) -> HashSet<String> {
     let stop_words: HashSet<&str> = [
-        "a", "an", "the", "is", "was", "are", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "shall", "can", "need", "dare", "ought",
-        "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
-        "as", "into", "through", "during", "before", "after", "above",
-        "below", "between", "out", "off", "over", "under", "again",
-        "further", "then", "once", "not", "no", "nor", "and", "but", "or",
-        "so", "if", "it", "its", "that", "this", "than", "too", "very",
+        "a", "an", "the", "is", "was", "are", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
+        "need", "dare", "ought", "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
+        "as", "into", "through", "during", "before", "after", "above", "below", "between", "out",
+        "off", "over", "under", "again", "further", "then", "once", "not", "no", "nor", "and",
+        "but", "or", "so", "if", "it", "its", "that", "this", "than", "too", "very",
     ]
     .iter()
     .copied()
@@ -309,7 +317,9 @@ fn score_incident(
 ) -> f64 {
     let incident_text = format!(
         "{} {} {}",
-        incident.symptoms, incident.llm_assessment, incident.suggested_actions.join(" ")
+        incident.symptoms,
+        incident.llm_assessment,
+        incident.suggested_actions.join(" ")
     );
     let incident_keywords = extract_keywords(&incident_text);
 
@@ -489,7 +499,10 @@ mod tests {
             target_name: "prod".to_string(),
             severity: "Warning".to_string(),
             llm_assessment: "Container crashed due to OOM".to_string(),
-            suggested_actions: vec!["docker restart api".to_string(), "increase memory".to_string()],
+            suggested_actions: vec![
+                "docker restart api".to_string(),
+                "increase memory".to_string(),
+            ],
             symptoms: "Container 'api' was missing, port 8080 gone".to_string(),
             resolution: Some("Resolved after restart".to_string()),
         };
@@ -524,12 +537,7 @@ mod tests {
         let target_dir = tmp.path().join("prod");
         std::fs::create_dir_all(&target_dir).unwrap();
 
-        let diag = make_test_diagnosis(
-            "inc-resolve",
-            "prod",
-            "- [CRIT] down",
-            "It broke",
-        );
+        let diag = make_test_diagnosis("inc-resolve", "prod", "- [CRIT] down", "It broke");
         write_diagnosis_to_dir(&target_dir, &diag);
 
         mark_resolved_in_dir(tmp.path(), "prod", "inc-resolve", "Fixed by restarting").unwrap();

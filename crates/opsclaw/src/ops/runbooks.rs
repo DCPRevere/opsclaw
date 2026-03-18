@@ -360,7 +360,8 @@ pub async fn execute_runbook(
                                         execute_step(runner, &resolved, step).await
                                     {
                                         if retry_result.success {
-                                            let last = execution.steps_completed.last_mut().unwrap();
+                                            let last =
+                                                execution.steps_completed.last_mut().unwrap();
                                             *last = StepResult {
                                                 step_index: i,
                                                 description: step.description.clone(),
@@ -443,12 +444,13 @@ pub fn execution_to_markdown(exec: &RunbookExecution, runbook_name: &str) -> Str
         ExecutionStatus::Failed { .. } => "FAILED",
         ExecutionStatus::Aborted => "ABORTED",
     };
+    let _ = writeln!(md, "## Runbook: {} — {}\n", runbook_name, status_label);
     let _ = writeln!(
         md,
-        "## Runbook: {} — {}\n",
-        runbook_name, status_label
+        "Target: {} | Started: {}\n",
+        exec.target_name,
+        exec.started_at.format("%H:%M:%S UTC")
     );
-    let _ = writeln!(md, "Target: {} | Started: {}\n", exec.target_name, exec.started_at.format("%H:%M:%S UTC"));
 
     for sr in &exec.steps_completed {
         let icon = if sr.success { "OK" } else { "FAIL" };
@@ -501,7 +503,8 @@ pub fn default_runbooks() -> Vec<Runbook> {
                 RunbookStep {
                     description: "Verify container is running".to_string(),
                     command: Some(
-                        "docker ps --filter name={container} --format '{{{{.Status}}}}'".to_string(),
+                        "docker ps --filter name={container} --format '{{{{.Status}}}}'"
+                            .to_string(),
                     ),
                     expect_exit_code: Some(0),
                     on_failure: StepFailureAction::Abort,
@@ -667,7 +670,8 @@ mod tests {
         let mut ctx = PlaceholderContext {
             values: HashMap::new(),
         };
-        ctx.values.insert("container".to_string(), "api".to_string());
+        ctx.values
+            .insert("container".to_string(), "api".to_string());
         ctx.values
             .insert("target".to_string(), "prod-1".to_string());
 
@@ -787,7 +791,9 @@ mod tests {
             message: "Container 'api' is down".into(),
         }];
 
-        let exec = execute_runbook(&runner, &rb, "prod", &alerts).await.unwrap();
+        let exec = execute_runbook(&runner, &rb, "prod", &alerts)
+            .await
+            .unwrap();
         assert!(matches!(exec.status, ExecutionStatus::Completed));
         assert_eq!(exec.steps_completed.len(), 2);
         assert!(exec.steps_completed.iter().all(|s| s.success));
@@ -834,7 +840,10 @@ mod tests {
         };
 
         let exec = execute_runbook(&runner, &rb, "prod", &[]).await.unwrap();
-        assert!(matches!(exec.status, ExecutionStatus::Failed { step: 0, .. }));
+        assert!(matches!(
+            exec.status,
+            ExecutionStatus::Failed { step: 0, .. }
+        ));
         assert_eq!(exec.steps_completed.len(), 1);
     }
 

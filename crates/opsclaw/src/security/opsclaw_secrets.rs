@@ -4,11 +4,11 @@
 // at `~/.opsclaw/secrets.enc`. Uses the existing `SecretStore` infrastructure
 // for encryption/decryption (ChaCha20-Poly1305 AEAD).
 
-use zeroclaw::security::SecretStore;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use zeroclaw::security::SecretStore;
 
 /// On-disk format: a map of secret names to encrypted values.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

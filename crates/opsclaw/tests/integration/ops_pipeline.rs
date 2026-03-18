@@ -62,7 +62,12 @@ struct MockNotifier {
 }
 
 impl MockNotifier {
-    fn new() -> (Self, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>) {
+    fn new() -> (
+        Self,
+        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
         let alerts = Arc::new(Mutex::new(Vec::new()));
         let texts = Arc::new(Mutex::new(Vec::new()));
         let health_checks = Arc::new(Mutex::new(Vec::new()));
@@ -90,10 +95,11 @@ impl AlertNotifier for MockNotifier {
     }
 
     async fn notify(&self, target_name: &str, health: &HealthCheck) -> anyhow::Result<()> {
-        self.health_checks
-            .lock()
-            .unwrap()
-            .push(format!("[{target_name}] {:?} ({} alerts)", health.status, health.alerts.len()));
+        self.health_checks.lock().unwrap().push(format!(
+            "[{target_name}] {:?} ({} alerts)",
+            health.status,
+            health.alerts.len()
+        ));
         Ok(())
     }
 
@@ -208,7 +214,8 @@ const DF_OUTPUT: &str = "Filesystem     Size  Used Avail Use% Mounted on
 tmpfs          4.0G  100M  3.9G   3% /tmp
 ";
 
-const FREE_OUTPUT: &str = "              total        used        free      shared  buff/cache   available
+const FREE_OUTPUT: &str =
+    "              total        used        free      shared  buff/cache   available
 Mem:           8000        4000        2000         100        2000        4000
 Swap:          2000         200        1800
 ";
@@ -281,7 +288,9 @@ async fn discovery_scan_produces_expected_snapshot() {
     use opsclaw::tools::discovery::run_discovery_scan;
 
     let runner = baseline_runner();
-    let snap = run_discovery_scan(&runner).await.expect("scan should succeed");
+    let snap = run_discovery_scan(&runner)
+        .await
+        .expect("scan should succeed");
 
     // OS
     assert!(snap.os.uname.contains("Linux testhost"));

@@ -3,8 +3,8 @@
 //! Defines JSON-RPC 2.0 message types, agent card, task lifecycle,
 //! and artifact structures for inter-agent communication.
 
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 /// Agent Card published at `/.well-known/agent-card.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]

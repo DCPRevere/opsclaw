@@ -1,9 +1,9 @@
+use opsclaw::ops::context::OpsClawContext;
+use opsclaw::security::OpsClawSecretStore;
 use std::io::Write;
 use tempfile::TempDir;
 use zeroclaw::config::schema::{OpsClawAutonomy, TargetConfig, TargetType};
 use zeroclaw::config::Config;
-use opsclaw::ops::context::OpsClawContext;
-use opsclaw::security::OpsClawSecretStore;
 
 fn test_config(targets: Vec<TargetConfig>) -> Config {
     Config {

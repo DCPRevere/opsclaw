@@ -97,9 +97,7 @@ impl MonitoringAgent {
 
     /// Append a [`Diagnosis`] to the incident log (JSONL file per target per day).
     pub fn record_incident(&self, diagnosis: &Diagnosis) -> Result<()> {
-        let dir = self
-            .incident_log_dir
-            .join(&diagnosis.target_name);
+        let dir = self.incident_log_dir.join(&diagnosis.target_name);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create incident dir: {}", dir.display()))?;
 
@@ -240,8 +238,7 @@ fn alerts_to_bullets(health: &HealthCheck) -> String {
 // ---------------------------------------------------------------------------
 
 fn parse_llm_response(text: &str) -> (String, Vec<String>, DiagnosisSeverity) {
-    let assessment = extract_after(text, "ASSESSMENT:")
-        .unwrap_or_else(|| text.to_string());
+    let assessment = extract_after(text, "ASSESSMENT:").unwrap_or_else(|| text.to_string());
 
     let actions = extract_actions(text);
 
@@ -304,7 +301,9 @@ fn extract_actions(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::monitoring::{Alert, AlertCategory, AlertSeverity, HealthCheck, HealthStatus};
+    use crate::tools::monitoring::{
+        Alert, AlertCategory, AlertSeverity, HealthCheck, HealthStatus,
+    };
 
     #[test]
     fn parse_well_formed_response() {

@@ -71,11 +71,11 @@ fn pause_after_no_command_help() {
     let _ = std::io::stdin().read_line(&mut line);
 }
 
+use opsclaw::ops_cli;
 use zeroclaw::agent;
 use zeroclaw::approval;
 use zeroclaw::auth;
 use zeroclaw::channels;
-use zeroclaw::rag;
 use zeroclaw::config;
 use zeroclaw::cost;
 use zeroclaw::cron;
@@ -93,9 +93,9 @@ use zeroclaw::migration;
 use zeroclaw::multimodal;
 use zeroclaw::observability;
 use zeroclaw::onboard;
-use opsclaw::ops_cli;
 use zeroclaw::peripherals;
 use zeroclaw::providers;
+use zeroclaw::rag;
 use zeroclaw::runtime;
 use zeroclaw::security;
 use zeroclaw::service;
@@ -919,28 +919,29 @@ async fn main() -> Result<()> {
         return print_no_command_help();
     }
 
-
     // Mirror OPSCLAW_* env vars → ZEROCLAW_* for upstream zeroclaw library compat.
     // Users set OPSCLAW_* names; zeroclaw internals read ZEROCLAW_* names.
     // If both are set, the user's explicit ZEROCLAW_* value wins.
     for (opsclaw_var, zeroclaw_var) in &[
-        ("OPSCLAW_API_KEY",           "ZEROCLAW_API_KEY"),
-        ("OPSCLAW_PROVIDER",          "ZEROCLAW_PROVIDER"),
-        ("OPSCLAW_PROVIDER_URL",      "ZEROCLAW_PROVIDER_URL"),
-        ("OPSCLAW_MODEL",             "ZEROCLAW_MODEL"),
-        ("OPSCLAW_TEMPERATURE",       "ZEROCLAW_TEMPERATURE"),
+        ("OPSCLAW_API_KEY", "ZEROCLAW_API_KEY"),
+        ("OPSCLAW_PROVIDER", "ZEROCLAW_PROVIDER"),
+        ("OPSCLAW_PROVIDER_URL", "ZEROCLAW_PROVIDER_URL"),
+        ("OPSCLAW_MODEL", "ZEROCLAW_MODEL"),
+        ("OPSCLAW_TEMPERATURE", "ZEROCLAW_TEMPERATURE"),
         ("OPSCLAW_REASONING_ENABLED", "ZEROCLAW_REASONING_ENABLED"),
-        ("OPSCLAW_WORKSPACE",         "ZEROCLAW_WORKSPACE"),
-        ("OPSCLAW_GATEWAY_PORT",      "ZEROCLAW_GATEWAY_PORT"),
-        ("OPSCLAW_GATEWAY_HOST",      "ZEROCLAW_GATEWAY_HOST"),
+        ("OPSCLAW_WORKSPACE", "ZEROCLAW_WORKSPACE"),
+        ("OPSCLAW_GATEWAY_PORT", "ZEROCLAW_GATEWAY_PORT"),
+        ("OPSCLAW_GATEWAY_HOST", "ZEROCLAW_GATEWAY_HOST"),
         ("OPSCLAW_ALLOW_PUBLIC_BIND", "ZEROCLAW_ALLOW_PUBLIC_BIND"),
-        ("OPSCLAW_AUTOSTART_CHANNELS","ZEROCLAW_AUTOSTART_CHANNELS"),
+        ("OPSCLAW_AUTOSTART_CHANNELS", "ZEROCLAW_AUTOSTART_CHANNELS"),
     ] {
         if let Ok(val) = std::env::var(opsclaw_var) {
             if std::env::var(zeroclaw_var).is_err() {
                 // SAFETY: single-threaded at startup
                 #[allow(deprecated)]
-                unsafe { std::env::set_var(zeroclaw_var, &val) };
+                unsafe {
+                    std::env::set_var(zeroclaw_var, &val)
+                };
             }
         }
     }
@@ -952,9 +953,13 @@ async fn main() -> Result<()> {
             bail!("--config-dir cannot be empty");
         }
         #[allow(deprecated)]
-        unsafe { std::env::set_var("OPSCLAW_CONFIG_DIR", config_dir); }
+        unsafe {
+            std::env::set_var("OPSCLAW_CONFIG_DIR", config_dir);
+        }
         #[allow(deprecated)]
-        unsafe { std::env::set_var("ZEROCLAW_CONFIG_DIR", config_dir); } // upstream compat
+        unsafe {
+            std::env::set_var("ZEROCLAW_CONFIG_DIR", config_dir);
+        } // upstream compat
     }
 
     // Completions must remain stdout-only and should not load config or initialize logging.
@@ -1099,7 +1104,8 @@ async fn main() -> Result<()> {
 
         // Auto-start channels if user said yes during wizard
         if std::env::var("OPSCLAW_AUTOSTART_CHANNELS").as_deref() == Ok("1")
-            || std::env::var("ZEROCLAW_AUTOSTART_CHANNELS").as_deref() == Ok("1") {
+            || std::env::var("ZEROCLAW_AUTOSTART_CHANNELS").as_deref() == Ok("1")
+        {
             Box::pin(channels::start_channels(config)).await?;
         }
         return Ok(());
@@ -1385,21 +1391,20 @@ async fn main() -> Result<()> {
             println!("Monitoring:    stopped (run `opsclaw monitor` to start)");
 
             // Notification config
-            let telegram_configured = config
-                .notifications
-                .as_ref()
-                .map_or(false, |n| n.telegram_bot_token.is_some() && n.telegram_chat_id.is_some());
+            let telegram_configured = config.notifications.as_ref().map_or(false, |n| {
+                n.telegram_bot_token.is_some() && n.telegram_chat_id.is_some()
+            });
             println!(
                 "Notifications: telegram {}",
                 if telegram_configured { "yes" } else { "no" }
             );
 
             // Diagnosis config
-            let diagnosis_key_present = config
-                .diagnosis
-                .api_key
-                .is_some()
-                || std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty()).is_some();
+            let diagnosis_key_present = config.diagnosis.api_key.is_some()
+                || std::env::var("ANTHROPIC_API_KEY")
+                    .ok()
+                    .filter(|k| !k.is_empty())
+                    .is_some();
             println!(
                 "Diagnosis:     API key {}",
                 if diagnosis_key_present { "yes" } else { "no" }
@@ -2703,9 +2708,8 @@ mod tests {
 
     #[test]
     fn agent_command_parses_session_state_file() {
-        let cli =
-            Cli::try_parse_from(["opsclaw", "agent", "--session-state-file", "session.json"])
-                .expect("agent command with session state file should parse");
+        let cli = Cli::try_parse_from(["opsclaw", "agent", "--session-state-file", "session.json"])
+            .expect("agent command with session state file should parse");
 
         match cli.command {
             Commands::Agent {

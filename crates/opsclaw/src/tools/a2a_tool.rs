@@ -4,11 +4,11 @@
 //! via the A2A protocol (JSON-RPC 2.0 over HTTP).
 
 use super::a2a_types::{A2aRequest, A2aResponse, AgentCard, Task};
-use zeroclaw::tools::traits::{Tool, ToolResult};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::json;
 use std::time::Duration;
+use zeroclaw::tools::traits::{Tool, ToolResult};
 
 /// HTTP client for the A2A protocol.
 pub struct A2aClient {
@@ -155,12 +155,8 @@ impl Tool for A2aTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let action = args["action"]
-            .as_str()
-            .unwrap_or_default();
-        let url = args["url"]
-            .as_str()
-            .unwrap_or_default();
+        let action = args["action"].as_str().unwrap_or_default();
+        let url = args["url"].as_str().unwrap_or_default();
 
         if url.is_empty() {
             return Ok(ToolResult {
@@ -289,7 +285,10 @@ mod tests {
     #[tokio::test]
     async fn a2a_tool_rejects_missing_url() {
         let tool = A2aTool::new();
-        let result = tool.execute(json!({"action": "discover", "url": ""})).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "discover", "url": ""}))
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.error.unwrap().contains("url"));
     }

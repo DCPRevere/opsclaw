@@ -10,14 +10,14 @@ use anyhow::{Context, Result};
 use console::style;
 use dialoguer::{Input, Select};
 
-use zeroclaw::config::schema::{
-    OpsClawAutonomy, OpsClawNotificationConfig, TargetConfig, TargetType,
-};
 use crate::ops::snapshots;
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::ssh_command_runner::{LocalCommandRunner, SshCommandRunner};
 use crate::tools::ssh_tool::RealSshExecutor;
 use crate::tools::ssh_tool::TargetEntry;
+use zeroclaw::config::schema::{
+    OpsClawAutonomy, OpsClawNotificationConfig, TargetConfig, TargetType,
+};
 
 // ---------------------------------------------------------------------------
 // Step helpers (mirrors onboard/wizard.rs style)
@@ -52,8 +52,7 @@ fn expand_tilde(path: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn opsclaw_config_path() -> Result<PathBuf> {
-    let user_dirs =
-        directories::UserDirs::new().context("Cannot determine home directory")?;
+    let user_dirs = directories::UserDirs::new().context("Cannot determine home directory")?;
     let dir = user_dirs.home_dir().join(".opsclaw");
     Ok(dir.join("config.toml"))
 }
@@ -129,9 +128,7 @@ fn step_target_type() -> Result<TargetType> {
 }
 
 async fn step_ssh_target() -> Result<TargetResult> {
-    let host: String = Input::new()
-        .with_prompt("SSH host")
-        .interact_text()?;
+    let host: String = Input::new().with_prompt("SSH host").interact_text()?;
 
     let user: String = Input::new()
         .with_prompt("SSH user")
@@ -148,12 +145,12 @@ async fn step_ssh_target() -> Result<TargetResult> {
         .default("~/.ssh/id_rsa".into())
         .interact_text()?;
 
-    let name: String = Input::new()
-        .with_prompt("Target name")
-        .interact_text()?;
+    let name: String = Input::new().with_prompt("Target name").interact_text()?;
 
     // Test connection
-    print_bullet(&format!("Testing SSH connection to {user}@{host}:{port}..."));
+    print_bullet(&format!(
+        "Testing SSH connection to {user}@{host}:{port}..."
+    ));
 
     let mut connected = test_ssh_connection(&host, &user, port).await;
     if connected {
@@ -179,9 +176,7 @@ async fn step_ssh_target() -> Result<TargetResult> {
         }
     }
 
-    let runner: Box<dyn CommandRunner> = match fs::read_to_string(
-        expand_tilde(&key_path)
-    ) {
+    let runner: Box<dyn CommandRunner> = match fs::read_to_string(expand_tilde(&key_path)) {
         Ok(key_pem) => {
             let entry = TargetEntry {
                 name: name.clone(),
@@ -194,8 +189,11 @@ async fn step_ssh_target() -> Result<TargetResult> {
             Box::new(SshCommandRunner::new(entry, Box::new(RealSshExecutor)))
         }
         Err(e) => {
-            println!("  {} Could not read SSH key ({}): using stub for scan",
-                style("\u{26a0}").yellow(), e);
+            println!(
+                "  {} Could not read SSH key ({}): using stub for scan",
+                style("\u{26a0}").yellow(),
+                e
+            );
             // Graceful fallback: scan will be skipped, not crash
             Box::new(LocalCommandRunner::new(
                 crate::tools::ssh_tool::OpsClawAutonomy::DryRun,
@@ -286,10 +284,7 @@ async fn step_discovery_scan(
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
-            print_bullet(&format!(
-                "Services: {} active",
-                snapshot.services.len()
-            ));
+            print_bullet(&format!("Services: {} active", snapshot.services.len()));
             print_bullet(&format!(
                 "Ports: {}",
                 snapshot
@@ -301,7 +296,10 @@ async fn step_discovery_scan(
             ));
             // Summarise disk from the root mount or first entry
             if let Some(d) = snapshot.disk.first() {
-                print_bullet(&format!("Disk: {} / {} ({}% used)", d.used, d.size, d.use_percent));
+                print_bullet(&format!(
+                    "Disk: {} / {} ({}% used)",
+                    d.used, d.size, d.use_percent
+                ));
             }
 
             // Save snapshot for future monitoring baselines
@@ -312,11 +310,7 @@ async fn step_discovery_scan(
             Some(snapshot)
         }
         Err(e) => {
-            println!(
-                "  {} Scan failed: {}",
-                style("✗").yellow().bold(),
-                e
-            );
+            println!("  {} Scan failed: {}", style("✗").yellow().bold(), e);
             print_bullet("You can re-run later with: opsclaw scan");
             None
         }
@@ -329,7 +323,13 @@ enum NotificationChoice {
 }
 
 fn step_notification() -> Result<NotificationChoice> {
-    let items = &["Telegram", "Slack (coming soon)", "Email (coming soon)", "Webhook (coming soon)", "Skip for now"];
+    let items = &[
+        "Telegram",
+        "Slack (coming soon)",
+        "Email (coming soon)",
+        "Webhook (coming soon)",
+        "Skip for now",
+    ];
     let selection = Select::new()
         .with_prompt("How should OpsClaw alert you?")
         .items(items)
@@ -399,10 +399,7 @@ fn write_config(
 /// Run the interactive OpsClaw setup wizard.
 pub async fn run_opsclaw_setup() -> Result<()> {
     println!();
-    println!(
-        "  {}",
-        style("OpsClaw Setup Wizard").cyan().bold()
-    );
+    println!("  {}", style("OpsClaw Setup Wizard").cyan().bold());
     println!(
         "  {}",
         style("Configure a target, run discovery, and set up alerts.").dim()
@@ -443,8 +440,7 @@ pub async fn run_opsclaw_setup() -> Result<()> {
     println!();
 
     // Print summary
-    let toml_str =
-        toml::to_string_pretty(&target_result.config).unwrap_or_default();
+    let toml_str = toml::to_string_pretty(&target_result.config).unwrap_or_default();
     println!("{toml_str}");
 
     if let NotificationChoice::Telegram { bot_token, chat_id } = &notification {

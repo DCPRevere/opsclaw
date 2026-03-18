@@ -33,11 +33,10 @@ pub enum RunbookActions {
 
 // Re-import from the same crate tree the binary uses — discovery/monitoring
 // types are fine because they don't reference Config.
-use zeroclaw::config::schema::parse_min_severity;
 use crate::ops::baseline::{self, anomalies_to_alerts, extract_metrics, BaselineStore};
 use crate::ops::diagnosis::{Diagnosis, MonitoringAgent};
-use crate::ops::incident_search::IncidentIndex;
 use crate::ops::event_stream::{self, EventStreamManager};
+use crate::ops::incident_search::IncidentIndex;
 use crate::ops::log_sources::{self, LogLevel, LogSourceType};
 use crate::ops::notifier::{AlertNotifier, NullNotifier, TelegramNotifier};
 use crate::ops::runbooks::{self, RunbookStore};
@@ -46,6 +45,7 @@ use crate::tools::discovery::{self, CommandRunner};
 use crate::tools::monitoring::{self, HealthCheck};
 use crate::tools::ssh_command_runner::{DryRunCommandRunner, LocalCommandRunner, SshCommandRunner};
 use crate::tools::ssh_tool::{OpsClawAutonomy, RealSshExecutor, TargetEntry};
+use zeroclaw::config::schema::parse_min_severity;
 
 // ---------------------------------------------------------------------------
 // Runner factory
@@ -71,9 +71,7 @@ fn make_runner(target: &TargetConfig) -> Result<Box<dyn CommandRunner>> {
     let autonomy = convert_autonomy(target.autonomy);
 
     let runner: Box<dyn CommandRunner> = match target.target_type {
-        TargetType::Local => {
-            Box::new(LocalCommandRunner::new(autonomy, target.name.clone()))
-        }
+        TargetType::Local => Box::new(LocalCommandRunner::new(autonomy, target.name.clone())),
         TargetType::Ssh => {
             let host = target.host.clone().unwrap_or_default();
             let user = target.user.clone().unwrap_or_default();
@@ -89,8 +87,9 @@ fn make_runner(target: &TargetConfig) -> Result<Box<dyn CommandRunner>> {
                 None => {
                     // Fall back to ~/.ssh/id_rsa
                     let default_key = expand_tilde("~/.ssh/id_rsa");
-                    fs::read_to_string(&default_key)
-                        .with_context(|| "No key_secret configured and ~/.ssh/id_rsa not found".to_string())?
+                    fs::read_to_string(&default_key).with_context(|| {
+                        "No key_secret configured and ~/.ssh/id_rsa not found".to_string()
+                    })?
                 }
             };
 
@@ -173,7 +172,13 @@ pub fn handle_dry_run_log(tail: Option<usize>, clear: bool) -> Result<()> {
     let lines: Vec<&str> = content.lines().collect();
 
     let output = match tail {
-        Some(n) => lines.iter().rev().take(n).rev().copied().collect::<Vec<_>>(),
+        Some(n) => lines
+            .iter()
+            .rev()
+            .take(n)
+            .rev()
+            .copied()
+            .collect::<Vec<_>>(),
         None => lines,
     };
 
@@ -266,9 +271,7 @@ pub async fn handle_logs(
                     let filtered: Vec<_> = if let Some(ref min) = min_level {
                         entries
                             .into_iter()
-                            .filter(|e| {
-                                e.level.as_ref().map_or(false, |l| l >= min)
-                            })
+                            .filter(|e| e.level.as_ref().map_or(false, |l| l >= min))
                             .collect()
                     } else {
                         entries
@@ -366,8 +369,7 @@ pub async fn handle_monitor(
                     let mut hc = monitoring::check_health(&t.name, baseline, &current);
 
                     // Run configured + auto-discovered probes
-                    let configured_probes =
-                        convert_probes(t.probes.as_deref().unwrap_or_default());
+                    let configured_probes = convert_probes(t.probes.as_deref().unwrap_or_default());
                     let discovered = probes::discover_probes(&current, t.host.as_deref());
 
                     let mut probe_results = Vec::new();
@@ -401,13 +403,17 @@ pub async fn handle_monitor(
                     // --- End baseline learning ---
 
                     // Recalculate status after all alerts (probes + baselines)
-                    hc.status = if hc.alerts.iter().any(|a| {
-                        a.severity == monitoring::AlertSeverity::Critical
-                    }) {
+                    hc.status = if hc
+                        .alerts
+                        .iter()
+                        .any(|a| a.severity == monitoring::AlertSeverity::Critical)
+                    {
                         monitoring::HealthStatus::Critical
-                    } else if hc.alerts.iter().any(|a| {
-                        a.severity == monitoring::AlertSeverity::Warning
-                    }) {
+                    } else if hc
+                        .alerts
+                        .iter()
+                        .any(|a| a.severity == monitoring::AlertSeverity::Warning)
+                    {
                         monitoring::HealthStatus::Warning
                     } else {
                         monitoring::HealthStatus::Healthy
@@ -435,9 +441,10 @@ pub async fn handle_monitor(
                         // LLM diagnosis when an API key is available.
                         if let Some(agent) = make_monitoring_agent(config) {
                             // Load target context file if configured.
-                            let mut context_content = t.context_file.as_ref().and_then(|path| {
-                                std::fs::read_to_string(expand_tilde(path)).ok()
-                            });
+                            let mut context_content = t
+                                .context_file
+                                .as_ref()
+                                .and_then(|path| std::fs::read_to_string(expand_tilde(path)).ok());
 
                             // Append error logs to context for the LLM.
                             if !error_log_context.is_empty() {
@@ -481,22 +488,14 @@ pub async fn handle_monitor(
 
                             match agent.diagnose(&hc, Some(&full_context)).await {
                                 Ok(Some(diag)) => {
-                                    eprintln!(
-                                        "\u{1f50d} Diagnosis: {}",
-                                        diag.llm_assessment
-                                    );
-                                    eprintln!(
-                                        "   Actions: {}",
-                                        diag.suggested_actions.join(", ")
-                                    );
-                                    eprintln!(
-                                        "   Severity: {}",
-                                        diag.severity
-                                    );
+                                    eprintln!("\u{1f50d} Diagnosis: {}", diag.llm_assessment);
+                                    eprintln!("   Actions: {}", diag.suggested_actions.join(", "));
+                                    eprintln!("   Severity: {}", diag.severity);
 
                                     // Send diagnosis to notification channel.
                                     let alert_text = format_diagnosis_alert(&hc, &diag);
-                                    if let Err(e) = notifier.notify_text(&t.name, &alert_text).await {
+                                    if let Err(e) = notifier.notify_text(&t.name, &alert_text).await
+                                    {
                                         eprintln!("   Warning: diagnosis notification failed: {e}");
                                     }
 
@@ -520,9 +519,7 @@ pub async fn handle_monitor(
                         }
 
                         // --- Runbook matching ---
-                        if let Ok(store) = RunbookStore::default_dir()
-                            .map(RunbookStore::new)
-                        {
+                        if let Ok(store) = RunbookStore::default_dir().map(RunbookStore::new) {
                             if let Ok(matched) = store.match_alerts(&hc.alerts, &t.name) {
                                 for rb in &matched {
                                     match t.autonomy {
@@ -550,10 +547,7 @@ pub async fn handle_monitor(
                                             );
                                         }
                                         zeroclaw::config::schema::OpsClawAutonomy::Auto => {
-                                            eprintln!(
-                                                "   Executing runbook: {} ...",
-                                                rb.name
-                                            );
+                                            eprintln!("   Executing runbook: {} ...", rb.name);
                                             match runbooks::execute_runbook(
                                                 runner.as_ref(),
                                                 rb,
@@ -563,8 +557,9 @@ pub async fn handle_monitor(
                                             .await
                                             {
                                                 Ok(exec) => {
-                                                    let exec_md =
-                                                        runbooks::execution_to_markdown(&exec, &rb.name);
+                                                    let exec_md = runbooks::execution_to_markdown(
+                                                        &exec, &rb.name,
+                                                    );
                                                     eprintln!("{exec_md}");
                                                     if let Err(e) = notifier
                                                         .notify_text(&t.name, &exec_md)
@@ -576,9 +571,7 @@ pub async fn handle_monitor(
                                                     }
                                                 }
                                                 Err(e) => {
-                                                    eprintln!(
-                                                        "   Runbook execution failed: {e}"
-                                                    );
+                                                    eprintln!("   Runbook execution failed: {e}");
                                                 }
                                             }
                                         }
@@ -620,7 +613,10 @@ pub async fn handle_watch(config: &Config, target: Option<String>) -> Result<()>
     for t in &targets {
         match t.target_type {
             TargetType::Local => {
-                info!("Adding Docker + systemd event sources for local target '{}'", t.name);
+                info!(
+                    "Adding Docker + systemd event sources for local target '{}'",
+                    t.name
+                );
                 manager.add_docker_source();
                 manager.add_systemd_source();
             }
@@ -816,11 +812,7 @@ fn format_diagnosis_alert(hc: &HealthCheck, diag: &Diagnosis) -> String {
 // baseline command
 // ---------------------------------------------------------------------------
 
-pub async fn handle_baseline(
-    config: &Config,
-    target: Option<String>,
-    reset: bool,
-) -> Result<()> {
+pub async fn handle_baseline(config: &Config, target: Option<String>, reset: bool) -> Result<()> {
     let targets = config.targets.as_deref().unwrap_or_default();
 
     if targets.is_empty() {
@@ -867,9 +859,8 @@ pub fn handle_incidents(
     // Resolve an incident.
     if let Some(id) = resolve_id {
         let resolution = resolve_msg.unwrap_or_else(|| "Resolved".to_string());
-        let target_name = target.ok_or_else(|| {
-            anyhow::anyhow!("--target is required when resolving an incident")
-        })?;
+        let target_name = target
+            .ok_or_else(|| anyhow::anyhow!("--target is required when resolving an incident"))?;
         crate::ops::incident_search::mark_resolved(&target_name, &id, &resolution)?;
         println!("Incident {id} marked as resolved.");
         return Ok(());
@@ -1061,8 +1052,7 @@ pub async fn handle_runbook(config: &Config, action: RunbookActions) -> Result<(
             let runner = make_runner(t)?;
             let rb = store.load(&id)?;
             println!("Executing runbook '{}' on target '{}'...", rb.name, target);
-            let exec =
-                runbooks::execute_runbook(runner.as_ref(), &rb, &target, &[]).await?;
+            let exec = runbooks::execute_runbook(runner.as_ref(), &rb, &target, &[]).await?;
             let md = runbooks::execution_to_markdown(&exec, &rb.name);
             println!("{md}");
         }

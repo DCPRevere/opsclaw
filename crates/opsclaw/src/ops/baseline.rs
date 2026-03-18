@@ -87,7 +87,11 @@ impl MetricBaseline {
             return 0.0;
         }
         let mean = self.mean();
-        let variance: f64 = self.points.iter().map(|p| (p.value - mean).powi(2)).sum::<f64>()
+        let variance: f64 = self
+            .points
+            .iter()
+            .map(|p| (p.value - mean).powi(2))
+            .sum::<f64>()
             / (self.points.len() - 1) as f64;
         variance.sqrt()
     }
@@ -177,8 +181,7 @@ pub fn extract_metrics(snapshot: &TargetSnapshot) -> Vec<(String, f64)> {
 
     // Memory
     if snapshot.memory.total_mb > 0 {
-        let used_pct =
-            (snapshot.memory.used_mb as f64 / snapshot.memory.total_mb as f64) * 100.0;
+        let used_pct = (snapshot.memory.used_mb as f64 / snapshot.memory.total_mb as f64) * 100.0;
         metrics.push(("memory.used_percent".to_string(), used_pct));
     }
     metrics.push((
@@ -197,10 +200,7 @@ pub fn extract_metrics(snapshot: &TargetSnapshot) -> Vec<(String, f64)> {
         "containers.count".to_string(),
         snapshot.containers.len() as f64,
     ));
-    metrics.push((
-        "services.count".to_string(),
-        snapshot.services.len() as f64,
-    ));
+    metrics.push(("services.count".to_string(), snapshot.services.len() as f64));
     metrics.push((
         "ports.count".to_string(),
         snapshot.listening_ports.len() as f64,
@@ -214,9 +214,7 @@ fn sanitize_mount(mount: &str) -> String {
     if mount == "/" {
         return "root".to_string();
     }
-    mount
-        .trim_start_matches('/')
-        .replace('/', "_")
+    mount.trim_start_matches('/').replace('/', "_")
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +271,11 @@ pub fn project_disk_full_days(baseline: &MetricBaseline) -> Option<f64> {
     let observations_to_full = remaining_pct / slope;
     let days = observations_to_full / obs_per_day;
 
-    if days > 0.0 { Some(days) } else { None }
+    if days > 0.0 {
+        Some(days)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -313,10 +315,7 @@ impl BaselineStore {
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.file_path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create baselines directory: {}",
-                    parent.display()
-                )
+                format!("Failed to create baselines directory: {}", parent.display())
             })?;
         }
         let json =
@@ -334,9 +333,10 @@ impl BaselineStore {
     pub fn record(&mut self, target: &str, metrics: &[(String, f64)]) {
         for (name, value) in metrics {
             let key = format!("{target}.{name}");
-            let baseline = self.baselines.entry(key).or_insert_with(|| {
-                MetricBaseline::new(name, target, DEFAULT_MAX_POINTS)
-            });
+            let baseline = self
+                .baselines
+                .entry(key)
+                .or_insert_with(|| MetricBaseline::new(name, target, DEFAULT_MAX_POINTS));
             baseline.record(*value);
         }
     }
@@ -595,16 +595,14 @@ mod tests {
                 distro_name: String::new(),
                 distro_version: String::new(),
             },
-            containers: vec![
-                ContainerInfo {
-                    id: "1".into(),
-                    name: "web".into(),
-                    image: "img".into(),
-                    status: "Up".into(),
-                    ports: String::new(),
-                    running_for: String::new(),
-                },
-            ],
+            containers: vec![ContainerInfo {
+                id: "1".into(),
+                name: "web".into(),
+                image: "img".into(),
+                status: "Up".into(),
+                ports: String::new(),
+                running_for: String::new(),
+            }],
             services: vec![],
             listening_ports: vec![],
             disk: vec![DiskInfo {
@@ -721,7 +719,9 @@ mod tests {
         store.record("host1", &[("cpu.load_1".to_string(), 1.0)]);
         store.record("host2", &[("cpu.load_1".to_string(), 2.0)]);
         assert!(store.reset_target("host1"));
-        assert!(store.check_anomalies("host1", &[("cpu.load_1".to_string(), 1.0)], 3.0).is_empty());
+        assert!(store
+            .check_anomalies("host1", &[("cpu.load_1".to_string(), 1.0)], 3.0)
+            .is_empty());
         // host2 should still be present
         assert!(!store.baselines.is_empty());
     }
@@ -733,7 +733,10 @@ mod tests {
 
         let mut store = BaselineStore::load(&path).unwrap();
         for i in 0..10 {
-            store.record("myhost", &[("cpu.load_1".to_string(), 1.0 + f64::from(i) * 0.01)]);
+            store.record(
+                "myhost",
+                &[("cpu.load_1".to_string(), 1.0 + f64::from(i) * 0.01)],
+            );
         }
         let summary = store.summary("myhost");
         assert!(summary.contains("cpu.load_1"));

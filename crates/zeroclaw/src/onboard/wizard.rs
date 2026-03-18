@@ -195,7 +195,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         targets: None,
         notifications: None,
         diagnosis: crate::config::schema::DiagnosisConfig::default(),
-            a2a: None,
+        a2a: None,
     };
 
     println!(
@@ -572,7 +572,7 @@ async fn run_quick_setup_with_home(
         targets: None,
         notifications: None,
         diagnosis: crate::config::schema::DiagnosisConfig::default(),
-            a2a: None,
+        a2a: None,
     };
 
     config.save().await?;

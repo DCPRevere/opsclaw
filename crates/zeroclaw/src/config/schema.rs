@@ -6073,10 +6073,18 @@ pub struct A2aServerConfig {
     pub skills: Vec<A2aAgentSkill>,
 }
 
-fn default_a2a_server_port() -> u16 { 42618 }
-fn default_a2a_server_host() -> String { "127.0.0.1".to_string() }
-fn default_a2a_agent_name() -> String { "ZeroClaw".to_string() }
-fn default_a2a_agent_description() -> String { "ZeroClaw autonomous agent".to_string() }
+fn default_a2a_server_port() -> u16 {
+    42618
+}
+fn default_a2a_server_host() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_a2a_agent_name() -> String {
+    "ZeroClaw".to_string()
+}
+fn default_a2a_agent_description() -> String {
+    "ZeroClaw autonomous agent".to_string()
+}
 
 impl Default for A2aServerConfig {
     fn default() -> Self {
@@ -8701,8 +8709,7 @@ provider_timeout_secs = 300
 
     #[test]
     async fn parse_extra_headers_env_with_url_value() {
-        let headers =
-            parse_extra_headers_env("HTTP-Referer:https://github.com/DCPRevere/opsclaw");
+        let headers = parse_extra_headers_env("HTTP-Referer:https://github.com/DCPRevere/opsclaw");
         assert_eq!(headers.len(), 1);
         // Only splits on first colon, preserving URL colons in value
         assert_eq!(headers[0].0, "HTTP-Referer");

@@ -277,10 +277,7 @@ pub fn parse_docker_event(json: &str) -> anyhow::Result<DockerEvent> {
     let v: serde_json::Value =
         serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
 
-    let time_secs = v
-        .get("time")
-        .and_then(|t| t.as_i64())
-        .unwrap_or_default();
+    let time_secs = v.get("time").and_then(|t| t.as_i64()).unwrap_or_default();
 
     let timestamp = Utc
         .timestamp_opt(time_secs, 0)
@@ -309,10 +306,7 @@ pub fn parse_docker_event(json: &str) -> anyhow::Result<DockerEvent> {
         .unwrap_or_default()
         .to_string();
 
-    let raw_id = v
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let raw_id = v.get("id").and_then(|v| v.as_str()).unwrap_or_default();
     let actor_id = raw_id.chars().take(12).collect();
 
     let exit_code = actor_attrs

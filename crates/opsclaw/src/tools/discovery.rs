@@ -364,26 +364,27 @@ pub fn parse_k8s_pods_json(raw: &str) -> Vec<K8sPod> {
             let phase = status["phase"].as_str().unwrap_or("");
             // Check container statuses for more specific state (e.g. CrashLoopBackOff)
             let container_statuses = status["containerStatuses"].as_array();
-            let (ready_str, restarts, detailed_status) =
-                if let Some(cs) = container_statuses {
-                    let total = cs.len();
-                    let ready_count = cs
-                        .iter()
-                        .filter(|c| c["ready"].as_bool().unwrap_or(false))
-                        .count();
-                    let restarts: u32 = cs
-                        .iter()
-                        .map(|c| c["restartCount"].as_u64().unwrap_or(0) as u32)
-                        .sum();
-                    // Detect waiting reason like CrashLoopBackOff
-                    let waiting_reason = cs.iter().find_map(|c| {
-                        c["state"]["waiting"]["reason"].as_str().map(|s| s.to_string())
-                    });
-                    let st = waiting_reason.unwrap_or_else(|| phase.to_string());
-                    (format!("{}/{}", ready_count, total), restarts, st)
-                } else {
-                    (String::from("0/0"), 0, phase.to_string())
-                };
+            let (ready_str, restarts, detailed_status) = if let Some(cs) = container_statuses {
+                let total = cs.len();
+                let ready_count = cs
+                    .iter()
+                    .filter(|c| c["ready"].as_bool().unwrap_or(false))
+                    .count();
+                let restarts: u32 = cs
+                    .iter()
+                    .map(|c| c["restartCount"].as_u64().unwrap_or(0) as u32)
+                    .sum();
+                // Detect waiting reason like CrashLoopBackOff
+                let waiting_reason = cs.iter().find_map(|c| {
+                    c["state"]["waiting"]["reason"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                });
+                let st = waiting_reason.unwrap_or_else(|| phase.to_string());
+                (format!("{}/{}", ready_count, total), restarts, st)
+            } else {
+                (String::from("0/0"), 0, phase.to_string())
+            };
             let node = item["spec"]["nodeName"].as_str().unwrap_or("");
             K8sPod {
                 name: metadata["name"].as_str().unwrap_or("").to_string(),
@@ -391,7 +392,10 @@ pub fn parse_k8s_pods_json(raw: &str) -> Vec<K8sPod> {
                 status: detailed_status,
                 ready: ready_str,
                 restarts,
-                age: metadata["creationTimestamp"].as_str().unwrap_or("").to_string(),
+                age: metadata["creationTimestamp"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
                 node: node.to_string(),
             }
         })
@@ -423,7 +427,10 @@ pub fn parse_k8s_deployments_json(raw: &str) -> Vec<K8sDeployment> {
                 ready: format!("{}/{}", ready_replicas, desired),
                 up_to_date,
                 available,
-                age: metadata["creationTimestamp"].as_str().unwrap_or("").to_string(),
+                age: metadata["creationTimestamp"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
             }
         })
         .collect()
@@ -445,15 +452,16 @@ pub fn parse_k8s_services_json(raw: &str) -> Vec<K8sService> {
             let spec = &item["spec"];
             let svc_type = spec["type"].as_str().unwrap_or("ClusterIP");
             let cluster_ip = spec["clusterIP"].as_str().unwrap_or("");
-            let external_ip = if let Some(ingress) = item["status"]["loadBalancer"]["ingress"].as_array() {
-                ingress
-                    .iter()
-                    .filter_map(|i| i["ip"].as_str().or_else(|| i["hostname"].as_str()))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            } else {
-                String::from("<none>")
-            };
+            let external_ip =
+                if let Some(ingress) = item["status"]["loadBalancer"]["ingress"].as_array() {
+                    ingress
+                        .iter()
+                        .filter_map(|i| i["ip"].as_str().or_else(|| i["hostname"].as_str()))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                } else {
+                    String::from("<none>")
+                };
             let ports = if let Some(ports_arr) = spec["ports"].as_array() {
                 ports_arr
                     .iter()
@@ -474,7 +482,10 @@ pub fn parse_k8s_services_json(raw: &str) -> Vec<K8sService> {
                 cluster_ip: cluster_ip.to_string(),
                 external_ip,
                 ports,
-                age: metadata["creationTimestamp"].as_str().unwrap_or("").to_string(),
+                age: metadata["creationTimestamp"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
             }
         })
         .collect()
@@ -521,9 +532,7 @@ pub fn parse_k8s_nodes_json(raw: &str) -> Vec<K8sNode> {
                         .join(",")
                 })
                 .unwrap_or_default();
-            let version = status["nodeInfo"]["kubeletVersion"]
-                .as_str()
-                .unwrap_or("");
+            let version = status["nodeInfo"]["kubeletVersion"].as_str().unwrap_or("");
             K8sNode {
                 name: metadata["name"].as_str().unwrap_or("").to_string(),
                 status: node_status.to_string(),
@@ -532,7 +541,10 @@ pub fn parse_k8s_nodes_json(raw: &str) -> Vec<K8sNode> {
                 } else {
                     roles
                 },
-                age: metadata["creationTimestamp"].as_str().unwrap_or("").to_string(),
+                age: metadata["creationTimestamp"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
                 version: version.to_string(),
             }
         })

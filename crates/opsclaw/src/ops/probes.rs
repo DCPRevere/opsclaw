@@ -5,9 +5,9 @@
 
 use anyhow::Result;
 
-use zeroclaw::config::schema::{ProbeConfig, ProbeType};
 use crate::tools::discovery::{CommandRunner, TargetSnapshot};
 use crate::tools::monitoring::{Alert, AlertCategory, AlertSeverity};
+use zeroclaw::config::schema::{ProbeConfig, ProbeType};
 
 // ---------------------------------------------------------------------------
 // Probe result
@@ -29,10 +29,7 @@ pub struct ProbeResult {
 // ---------------------------------------------------------------------------
 
 /// Run a single probe via the given [`CommandRunner`].
-pub async fn run_probe(
-    runner: &dyn CommandRunner,
-    probe: &ProbeConfig,
-) -> Result<ProbeResult> {
+pub async fn run_probe(runner: &dyn CommandRunner, probe: &ProbeConfig) -> Result<ProbeResult> {
     match &probe.probe_type {
         ProbeType::Http {
             url,
@@ -112,8 +109,7 @@ async fn run_dns_probe(
 ) -> Result<ProbeResult> {
     let cmd = format!("dig +short {hostname}");
     let output = runner.run(&cmd).await?;
-    let (success, message, details) =
-        parse_dig_output(&output.stdout, expected_ip);
+    let (success, message, details) = parse_dig_output(&output.stdout, expected_ip);
     Ok(ProbeResult {
         probe_name: name.to_string(),
         probe_type: "dns".to_string(),
@@ -558,8 +554,12 @@ mod tests {
         let probes = discover_probes(&snapshot, None);
         assert!(!probes.is_empty());
         // Should have at least an HTTP probe from the container and a TLS probe from port 443
-        let has_http = probes.iter().any(|p| matches!(p.probe_type, ProbeType::Http { .. }));
-        let has_tls = probes.iter().any(|p| matches!(p.probe_type, ProbeType::TlsCert { .. }));
+        let has_http = probes
+            .iter()
+            .any(|p| matches!(p.probe_type, ProbeType::Http { .. }));
+        let has_tls = probes
+            .iter()
+            .any(|p| matches!(p.probe_type, ProbeType::TlsCert { .. }));
         assert!(has_http, "expected HTTP probe from container");
         assert!(has_tls, "expected TLS probe from port 443");
     }

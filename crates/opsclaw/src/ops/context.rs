@@ -1,9 +1,9 @@
-use zeroclaw::config::schema::{OpsClawAutonomy, TargetConfig, TargetType};
-use zeroclaw::config::Config;
 use crate::security::OpsClawSecretStore;
 use crate::tools::ssh_tool::{SshCommandRunner, TargetEntry};
 use anyhow::{bail, Context, Result};
 use std::path::Path;
+use zeroclaw::config::schema::{OpsClawAutonomy, TargetConfig, TargetType};
+use zeroclaw::config::Config;
 
 /// Central wiring struct that connects Config, secrets, and SSH tooling.
 pub struct OpsClawContext {

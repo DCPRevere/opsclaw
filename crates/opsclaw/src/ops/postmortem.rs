@@ -84,10 +84,7 @@ impl PostMortem {
         // Sort chronologically.
         timeline.sort_by_key(|e| e.timestamp);
 
-        let title = format!(
-            "{} incident on {}",
-            incident.severity, incident.target_name,
-        );
+        let title = format!("{} incident on {}", incident.severity, incident.target_name,);
 
         let impact = if incident.severity == "Act" {
             format!(
@@ -265,10 +262,7 @@ mod tests {
         let pm = PostMortem::generate(&incident, &[]);
 
         assert_eq!(pm.resolution, "Unresolved");
-        assert!(pm
-            .recommendations
-            .iter()
-            .any(|r| r.contains("Investigate")));
+        assert!(pm.recommendations.iter().any(|r| r.contains("Investigate")));
     }
 
     #[test]
@@ -276,9 +270,6 @@ mod tests {
         let incident = make_incident(true);
         let pm = PostMortem::generate(&incident, &[]);
 
-        assert!(pm
-            .recommendations
-            .iter()
-            .any(|r| r.contains("memory")));
+        assert!(pm.recommendations.iter().any(|r| r.contains("memory")));
     }
 }

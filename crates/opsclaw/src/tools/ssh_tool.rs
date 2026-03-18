@@ -1,4 +1,3 @@
-use zeroclaw::tools::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -6,6 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use zeroclaw::tools::traits::{Tool, ToolResult};
 
 /// Default SSH command timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -237,10 +237,15 @@ impl RealSshExecutor {
         // Connect.
         let config = Arc::new(russh::client::Config::default());
         let handler = SshClientHandler;
-        let mut handle =
-            russh::client::connect(config, (&*target.host, target.port), handler)
-                .await
-                .map_err(|e| anyhow::anyhow!("SSH connection to {}:{} failed: {e}", target.host, target.port))?;
+        let mut handle = russh::client::connect(config, (&*target.host, target.port), handler)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "SSH connection to {}:{} failed: {e}",
+                    target.host,
+                    target.port
+                )
+            })?;
 
         // Authenticate.
         let authenticated = handle

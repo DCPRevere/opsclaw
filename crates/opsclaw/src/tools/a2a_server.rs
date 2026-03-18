@@ -127,10 +127,7 @@ fn handle_tasks_send(state: &A2aState, req: &A2aRequest) -> A2aResponse {
     state.tasks.lock().insert(task.id.clone(), task.clone());
     tracing::info!(task_id = %task.id, "A2A task submitted");
 
-    A2aResponse::success(
-        &req.id,
-        serde_json::to_value(&task).unwrap_or_default(),
-    )
+    A2aResponse::success(&req.id, serde_json::to_value(&task).unwrap_or_default())
 }
 
 fn handle_tasks_get(state: &A2aState, req: &A2aRequest) -> A2aResponse {
@@ -146,10 +143,7 @@ fn handle_tasks_get(state: &A2aState, req: &A2aRequest) -> A2aResponse {
 
     let tasks = state.tasks.lock();
     match tasks.get(task_id) {
-        Some(task) => A2aResponse::success(
-            &req.id,
-            serde_json::to_value(task).unwrap_or_default(),
-        ),
+        Some(task) => A2aResponse::success(&req.id, serde_json::to_value(task).unwrap_or_default()),
         None => A2aResponse::error(&req.id, A2A_TASK_NOT_FOUND, "task not found"),
     }
 }
@@ -170,10 +164,7 @@ fn handle_tasks_cancel(state: &A2aState, req: &A2aRequest) -> A2aResponse {
         Some(task) => {
             task.status = TaskStatus::Cancelled;
             tracing::info!(task_id, "A2A task cancelled");
-            A2aResponse::success(
-                &req.id,
-                serde_json::to_value(&*task).unwrap_or_default(),
-            )
+            A2aResponse::success(&req.id, serde_json::to_value(&*task).unwrap_or_default())
         }
         None => A2aResponse::error(&req.id, A2A_TASK_NOT_FOUND, "task not found"),
     }

@@ -96,11 +96,11 @@ pub fn detect_log_level(line: &str) -> Option<LogLevel> {
             if let Ok(pri) = rest[..end].parse::<u8>() {
                 let severity = pri & 0x07; // low 3 bits = severity
                 return match severity {
-                    0 | 1 => Some(LogLevel::Fatal),  // emerg, alert
-                    2 | 3 => Some(LogLevel::Error),  // crit, err
-                    4 => Some(LogLevel::Warn),        // warning
-                    5 | 6 => Some(LogLevel::Info),    // notice, info
-                    _ => Some(LogLevel::Debug),       // debug
+                    0 | 1 => Some(LogLevel::Fatal), // emerg, alert
+                    2 | 3 => Some(LogLevel::Error), // crit, err
+                    4 => Some(LogLevel::Warn),      // warning
+                    5 | 6 => Some(LogLevel::Info),  // notice, info
+                    _ => Some(LogLevel::Debug),     // debug
                 };
             }
         }
@@ -573,7 +573,10 @@ mod tests {
     #[test]
     fn detect_level_syslog_priority() {
         // priority 11 = facility 1, severity 3 (err)
-        assert_eq!(detect_log_level("<11>some error message"), Some(LogLevel::Error));
+        assert_eq!(
+            detect_log_level("<11>some error message"),
+            Some(LogLevel::Error)
+        );
         // priority 4 = severity 4 (warning)
         assert_eq!(detect_log_level("<4>warning message"), Some(LogLevel::Warn));
     }
@@ -649,10 +652,7 @@ mod tests {
     #[tokio::test]
     async fn collect_docker_logs_from_stderr() {
         let mut runner = MockRunner::new();
-        runner.add_stderr_response(
-            "docker logs",
-            "2024-03-17T12:00:00.000000Z ERROR panic\n",
-        );
+        runner.add_stderr_response("docker logs", "2024-03-17T12:00:00.000000Z ERROR panic\n");
 
         let entries = collect_docker_logs(&runner, "app", 10, None).await.unwrap();
         assert_eq!(entries.len(), 1);

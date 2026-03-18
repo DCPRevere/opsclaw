@@ -14,8 +14,6 @@ use axum::{
     Router,
 };
 use parking_lot::Mutex;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;

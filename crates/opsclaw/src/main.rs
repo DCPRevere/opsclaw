@@ -172,37 +172,25 @@ fn pause_after_no_command_help() {
 
 use opsclaw::ops_cli;
 use zeroclaw::agent;
-use zeroclaw::approval;
 use zeroclaw::auth;
 use zeroclaw::channels;
 use zeroclaw::config;
-use zeroclaw::cost;
 use zeroclaw::cron;
 use zeroclaw::daemon;
 use zeroclaw::doctor;
 use zeroclaw::gateway;
 use zeroclaw::hardware;
-use zeroclaw::health;
-use zeroclaw::heartbeat;
-use zeroclaw::hooks;
-use zeroclaw::identity;
 use zeroclaw::integrations;
 use zeroclaw::memory;
 use zeroclaw::migration;
-use zeroclaw::multimodal;
 use zeroclaw::observability;
 use zeroclaw::onboard;
 use zeroclaw::peripherals;
 use zeroclaw::providers;
-use zeroclaw::rag;
-use zeroclaw::runtime;
 use zeroclaw::security;
 use zeroclaw::service;
 mod skillforge;
 use zeroclaw::skills;
-use zeroclaw::tools;
-use zeroclaw::tunnel;
-use zeroclaw::util;
 
 use config::Config;
 

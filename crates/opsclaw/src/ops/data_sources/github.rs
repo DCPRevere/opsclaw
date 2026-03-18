@@ -38,10 +38,7 @@ struct GhRelease {
 
 /// Fetch the latest release for the configured repository.
 pub async fn fetch_latest_release(cfg: &GithubConfig) -> Result<Option<ReleaseInfo>> {
-    let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        cfg.repo
-    );
+    let url = format!("https://api.github.com/repos/{}/releases/latest", cfg.repo);
 
     let client = reqwest::Client::builder()
         .user_agent("opsclaw")
@@ -92,7 +89,8 @@ mod tests {
 
     #[test]
     fn deserialize_gh_release() {
-        let json = r#"{"tag_name":"v1.2.3","name":"Release 1.2.3","published_at":"2024-03-17T12:00:00Z"}"#;
+        let json =
+            r#"{"tag_name":"v1.2.3","name":"Release 1.2.3","published_at":"2024-03-17T12:00:00Z"}"#;
         let rel: GhRelease = serde_json::from_str(json).unwrap();
         assert_eq!(rel.tag_name, "v1.2.3");
         assert_eq!(rel.name.as_deref(), Some("Release 1.2.3"));

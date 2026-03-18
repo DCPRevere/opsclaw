@@ -1078,11 +1078,7 @@ pub async fn handle_runbook(config: &Config, action: RunbookActions) -> Result<(
     Ok(())
 }
 
-pub async fn handle_sources(
-    config: &Config,
-    target: Option<String>,
-    all: bool,
-) -> Result<()> {
+pub async fn handle_sources(config: &Config, target: Option<String>, all: bool) -> Result<()> {
     let targets = resolve_targets(config, target.as_deref(), all)?;
 
     for t in &targets {
@@ -1098,11 +1094,9 @@ pub async fn handle_sources(
             }
         };
 
-        let snap = crate::ops::data_sources::collect_all(
-            &ds_cfg,
-            runner.as_ref().map(|r| r.as_ref()),
-        )
-        .await;
+        let snap =
+            crate::ops::data_sources::collect_all(&ds_cfg, runner.as_ref().map(|r| r.as_ref()))
+                .await;
 
         crate::ops::data_sources::print_summary(&snap);
         println!();
@@ -1112,9 +1106,7 @@ pub async fn handle_sources(
 }
 
 /// Parse the opaque `data_sources` JSON value from a target into our typed config.
-fn parse_data_sources_config(
-    target: &TargetConfig,
-) -> crate::ops::data_sources::DataSourcesConfig {
+fn parse_data_sources_config(target: &TargetConfig) -> crate::ops::data_sources::DataSourcesConfig {
     target
         .data_sources
         .as_ref()

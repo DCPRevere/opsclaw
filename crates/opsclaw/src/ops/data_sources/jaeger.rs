@@ -116,8 +116,8 @@ pub async fn fetch_problem_traces(cfg: &JaegerConfig) -> Result<Vec<TraceSummary
             let has_error = trace.spans.iter().any(|s| {
                 s.tags.iter().any(|t| {
                     t.key == "error"
-                        && matches!(&t.value, serde_json::Value::Bool(true)
-                            | serde_json::Value::String(s) if s == "true")
+                        && (matches!(&t.value, serde_json::Value::Bool(true))
+                            || matches!(&t.value, serde_json::Value::String(s) if s == "true"))
                 })
             });
             let high_latency = duration_us > HIGH_LATENCY_US;

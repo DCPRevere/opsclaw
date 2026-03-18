@@ -1611,9 +1611,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Runbook { action } => ops_cli::handle_runbook(&config, action).await,
-        Commands::Sources { target, all } => {
-            ops_cli::handle_sources(&config, target, all).await
-        }
+        Commands::Sources { target, all } => ops_cli::handle_sources(&config, target, all).await,
 
         Commands::Config { config_command } => match config_command {
             ConfigCommands::Schema => {

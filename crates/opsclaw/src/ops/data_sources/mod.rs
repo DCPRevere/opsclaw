@@ -124,7 +124,10 @@ pub fn print_summary(snap: &DataSourcesSnapshot) {
     }
 
     if !snap.jaeger_traces.is_empty() {
-        println!("\n── Jaeger problem traces ({}) ──", snap.jaeger_traces.len());
+        println!(
+            "\n── Jaeger problem traces ({}) ──",
+            snap.jaeger_traces.len()
+        );
         for t in &snap.jaeger_traces {
             let flags: Vec<&str> = [
                 t.has_error.then_some("error"),

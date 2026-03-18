@@ -4,6 +4,7 @@ use std::fs;
 
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
+use tokio::signal;
 use tracing::info;
 
 use zeroclaw::config::schema::{TargetConfig, TargetType};
@@ -589,7 +590,14 @@ pub async fn handle_monitor(
             break;
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
+        // Wait for the next interval OR a shutdown signal.
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)) => {}
+            _ = shutdown_signal() => {
+                eprintln!("Shutting down OpsClaw...");
+                break;
+            }
+        }
     }
 
     Ok(())
@@ -639,19 +647,28 @@ pub async fn handle_watch(config: &Config, target: Option<String>) -> Result<()>
         }
     });
 
-    // Read events from the channel and print / alert.
-    while let Some(event) = rx.recv().await {
-        let line = event_stream::format_event(&event);
-        println!("{line}");
+    // Read events from the channel until shutdown.
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                let Some(event) = event else { break };
+                let line = event_stream::format_event(&event);
+                println!("{line}");
 
-        if let Some(alert_msg) = event_stream::event_to_alert(&event) {
-            tracing::warn!("ALERT: {alert_msg}");
-            let target_str = targets.first().map_or("unknown", |t| t.name.as_str());
-            let _ = notifier.notify_text(target_str, &alert_msg).await;
+                if let Some(alert_msg) = event_stream::event_to_alert(&event) {
+                    tracing::warn!("ALERT: {alert_msg}");
+                    let target_str = targets.first().map_or("unknown", |t| t.name.as_str());
+                    let _ = notifier.notify_text(target_str, &alert_msg).await;
+                }
+            }
+            _ = shutdown_signal() => {
+                eprintln!("Shutting down OpsClaw...");
+                break;
+            }
         }
     }
 
-    let _ = manager_handle.await;
+    manager_handle.abort();
     Ok(())
 }
 
@@ -1082,5 +1099,29 @@ fn resolve_targets<'a>(
         Ok(targets.iter().collect())
     } else {
         bail!("Specify a target name or use --all");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown signal
+// ---------------------------------------------------------------------------
+
+/// Wait for SIGINT (Ctrl+C) or SIGTERM (Unix only).
+async fn shutdown_signal() {
+    let ctrl_c = signal::ctrl_c();
+
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            signal::unix::signal(signal::unix::SignalKind::terminate()).expect("SIGTERM listener");
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.ok();
     }
 }

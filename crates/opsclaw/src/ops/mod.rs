@@ -15,3 +15,4 @@ pub mod probes;
 pub mod runbooks;
 pub mod setup;
 pub mod snapshots;
+pub mod status;

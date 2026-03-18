@@ -300,7 +300,14 @@ Examples:
     },
 
     /// Show system status (full details)
-    Status,
+    Status {
+        /// Show status for a specific target only.
+        #[arg(long)]
+        target: Option<String>,
+        /// Output raw JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Engage, inspect, and resume emergency-stop states.
     ///
@@ -1268,147 +1275,54 @@ async fn main() -> Result<()> {
             Box::pin(daemon::run(config, host, port)).await
         }
 
-        Commands::Status => {
-            println!("🦀 OpsClaw Status");
-            println!();
-            println!("Version:     {}", env!("CARGO_PKG_VERSION"));
-            println!("Workspace:   {}", config.workspace_dir.display());
-            println!("Config:      {}", config.config_path.display());
-            println!();
-            println!(
-                "🤖 Provider:      {}",
-                config.default_provider.as_deref().unwrap_or("openrouter")
-            );
-            println!(
-                "   Model:         {}",
-                config.default_model.as_deref().unwrap_or("(default)")
-            );
-            println!("📊 Observability:  {}", config.observability.backend);
-            println!(
-                "🧾 Trace storage:  {} ({})",
-                config.observability.runtime_trace_mode, config.observability.runtime_trace_path
-            );
-            println!("🛡️  Autonomy:      {:?}", config.autonomy.level);
-            println!("⚙️  Runtime:       {}", config.runtime.kind);
-            let effective_memory_backend = memory::effective_memory_backend_name(
-                &config.memory.backend,
-                Some(&config.storage.provider.config),
-            );
-            println!(
-                "💓 Heartbeat:      {}",
-                if config.heartbeat.enabled {
-                    format!("every {}min", config.heartbeat.interval_minutes)
-                } else {
-                    "disabled".into()
-                }
-            );
-            println!(
-                "🧠 Memory:         {} (auto-save: {})",
-                effective_memory_backend,
-                if config.memory.auto_save { "on" } else { "off" }
-            );
+        Commands::Status { target, json } => {
+            use opsclaw::ops::status;
 
-            println!();
-            println!("Security:");
-            println!("  Workspace only:    {}", config.autonomy.workspace_only);
-            println!(
-                "  Allowed roots:     {}",
-                if config.autonomy.allowed_roots.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    config.autonomy.allowed_roots.join(", ")
-                }
-            );
-            println!(
-                "  Allowed commands:  {}",
-                config.autonomy.allowed_commands.join(", ")
-            );
-            println!(
-                "  Max actions/hour:  {}",
-                config.autonomy.max_actions_per_hour
-            );
-            println!(
-                "  Max cost/day:      ${:.2}",
-                f64::from(config.autonomy.max_cost_per_day_cents) / 100.0
-            );
-            println!("  OTP enabled:       {}", config.security.otp.enabled);
-            println!("  E-stop enabled:    {}", config.security.estop.enabled);
-            println!();
-            println!("Channels:");
-            println!("  CLI:      ✅ always");
-            for (channel, configured) in config.channels_config.channels() {
-                println!(
-                    "  {:9} {}",
-                    channel.name(),
-                    if configured {
-                        "✅ configured"
-                    } else {
-                        "❌ not configured"
-                    }
-                );
-            }
-            println!();
-            println!("Peripherals:");
-            println!(
-                "  Enabled:   {}",
-                if config.peripherals.enabled {
-                    "yes"
-                } else {
-                    "no"
-                }
-            );
-            println!("  Boards:    {}", config.peripherals.boards.len());
+            let targets = config.targets.as_deref().unwrap_or_default();
 
-            // OpsClaw targets
-            if let Some(targets) = &config.targets {
-                if !targets.is_empty() {
-                    println!();
-                    println!("OpsClaw Targets:");
-                    for t in targets {
-                        let host = t.host.as_deref().unwrap_or("localhost");
-                        let snap_info = match opsclaw::ops::snapshots::load_snapshot(&t.name) {
-                            Ok(Some(snap)) => {
-                                let ts = snap.scanned_at.format("%Y-%m-%d %H:%M");
-                                format!(
-                                    "last scan: {}  ({} containers, {} services)",
-                                    ts,
-                                    snap.containers.len(),
-                                    snap.services.len()
-                                )
-                            }
-                            _ => "no snapshot".to_string(),
-                        };
-                        println!(
-                            "  {:<12} {:?}  host: {:<20} autonomy: {:?}  {}",
-                            t.name, t.target_type, host, t.autonomy, snap_info
-                        );
+            // Collect the targets to display.
+            let selected: Vec<&zeroclaw::config::schema::TargetConfig> =
+                if let Some(ref name) = target {
+                    match targets.iter().find(|t| t.name == *name) {
+                        Some(t) => vec![t],
+                        None => bail!(
+                            "Target '{}' not found in config. Available: {}",
+                            name,
+                            targets
+                                .iter()
+                                .map(|t| t.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
                     }
+                } else {
+                    targets.iter().collect()
+                };
+
+            if selected.is_empty() {
+                if json {
+                    println!("[]");
+                } else {
+                    println!("No targets configured. Add [[targets]] to your opsclaw.toml.");
                 }
+                return Ok(());
             }
 
-            // Monitoring status
-            println!();
-            println!("Monitoring:    stopped (run `opsclaw monitor` to start)");
+            let statuses: Vec<status::TargetStatus> = selected
+                .iter()
+                .map(|t| status::gather_target_status(t))
+                .collect::<Result<Vec<_>>>()?;
 
-            // Notification config
-            let telegram_configured = config.notifications.as_ref().map_or(false, |n| {
-                n.telegram_bot_token.is_some() && n.telegram_chat_id.is_some()
-            });
-            println!(
-                "Notifications: telegram {}",
-                if telegram_configured { "yes" } else { "no" }
-            );
-
-            // Diagnosis config
-            let diagnosis_key_present = config.diagnosis.api_key.is_some()
-                || std::env::var("ANTHROPIC_API_KEY")
-                    .ok()
-                    .filter(|k| !k.is_empty())
-                    .is_some();
-            println!(
-                "Diagnosis:     API key {}",
-                if diagnosis_key_present { "yes" } else { "no" }
-            );
+            if json {
+                println!("{}", serde_json::to_string_pretty(&statuses)?);
+            } else {
+                for (i, s) in statuses.iter().enumerate() {
+                    if i > 0 {
+                        println!();
+                    }
+                    print!("{}", status::render_status(s));
+                }
+            }
 
             Ok(())
         }

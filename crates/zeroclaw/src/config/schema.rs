@@ -418,6 +418,9 @@ pub struct TargetConfig {
     /// External probes to run against this target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probes: Option<Vec<ProbeConfig>>,
+    /// Optional pull-based data sources (Seq, Jaeger, GitHub, Docker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_sources: Option<serde_json::Value>,
 }
 
 /// Configuration for a single external probe.

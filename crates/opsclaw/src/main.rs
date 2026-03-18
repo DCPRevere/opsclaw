@@ -48,16 +48,115 @@ fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
 }
 
 fn print_no_command_help() -> Result<()> {
-    println!("No command provided.");
-    println!("Try `opsclaw onboard` to initialize your workspace.");
+    println!("OpsClaw — autonomous SRE agent");
     println!();
+    println!("No command specified. Common commands:");
+    println!("  opsclaw setup              Configure your first target");
+    println!("  opsclaw scan --target <n>  Scan a target for issues");
+    println!("  opsclaw monitor            Run continuous monitoring");
+    println!("  opsclaw status             Show current status");
+    println!();
+    println!("Run `opsclaw --help` for all commands.");
 
-    let mut cmd = Cli::command();
-    cmd.print_help()?;
-    println!();
+    // Check if config exists; if not, nudge the user toward setup.
+    let has_config = directories::UserDirs::new()
+        .map(|u| u.home_dir().join(".opsclaw").join("config.toml").exists())
+        .unwrap_or(false);
+    if !has_config {
+        println!();
+        println!("No targets configured yet. Run `opsclaw setup` to get started.");
+    }
 
     #[cfg(windows)]
     pause_after_no_command_help();
+
+    Ok(())
+}
+
+/// Validate OpsClaw-specific config concerns and give clear, actionable errors.
+///
+/// Commands that operate on targets require at least one target to be configured.
+/// The provider (if set) must be a known provider name.
+fn validate_opsclaw_config(config: &Config, command: &Commands) -> Result<()> {
+    let config_path = &config.config_path;
+
+    // Validate the default provider if one is explicitly set.
+    if let Some(ref provider_name) = config.default_provider {
+        let known = providers::list_providers();
+        let is_known = known.iter().any(|p| {
+            p.name.eq_ignore_ascii_case(provider_name)
+                || p.aliases
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(provider_name))
+        });
+        // Allow custom:* and anthropic-custom:* prefixed providers.
+        let is_custom =
+            provider_name.starts_with("custom:") || provider_name.starts_with("anthropic-custom:");
+        if !is_known && !is_custom {
+            let canonical_names: Vec<&str> = known.iter().map(|p| p.name).collect();
+            bail!(
+                "Unknown provider \"{}\" in config. Valid providers: {}",
+                provider_name,
+                canonical_names.join(", ")
+            );
+        }
+    }
+
+    // Commands that need at least one target configured.
+    let needs_target = matches!(
+        command,
+        Commands::Scan { .. }
+            | Commands::Monitor { .. }
+            | Commands::Probe { .. }
+            | Commands::Watch { .. }
+            | Commands::Baseline { .. }
+            | Commands::Incidents { .. }
+    );
+
+    if needs_target {
+        match &config.targets {
+            None => {
+                bail!(
+                    "No targets configured in {}\nRun `opsclaw setup` to add a target.",
+                    config_path.display()
+                );
+            }
+            Some(t) if t.is_empty() => {
+                bail!(
+                    "No targets configured in {}\nRun `opsclaw setup` to add a target.",
+                    config_path.display()
+                );
+            }
+            Some(targets) => {
+                // Validate each target has required fields for its type.
+                for target in targets {
+                    if target.target_type == config::schema::TargetType::Ssh {
+                        if target.host.is_none() {
+                            bail!(
+                                "Target \"{}\" is missing required field: host\nFix your config at {}",
+                                target.name,
+                                config_path.display()
+                            );
+                        }
+                        if target.user.is_none() {
+                            bail!(
+                                "Target \"{}\" is missing required field: user\nFix your config at {}",
+                                target.name,
+                                config_path.display()
+                            );
+                        }
+                        if target.key_secret.is_none() {
+                            bail!(
+                                "Target \"{}\" is missing required field: key_secret\nFix your config at {}",
+                                target.name,
+                                config_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Ok(())
 }
@@ -1121,6 +1220,7 @@ async fn main() -> Result<()> {
     // All other commands need config loaded first
     let mut config = Box::pin(Config::load_or_init()).await?;
     config.apply_env_overrides();
+    validate_opsclaw_config(&config, &cli.command)?;
     observability::runtime_trace::init_from_config(&config.observability, &config.workspace_dir);
     if config.security.otp.enabled {
         let config_dir = config

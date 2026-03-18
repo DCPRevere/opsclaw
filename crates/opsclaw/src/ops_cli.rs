@@ -517,6 +517,8 @@ pub async fn handle_monitor(
                                     eprintln!("   Diagnosis skipped (LLM error): {e}");
                                 }
                             }
+                        } else {
+                            tracing::info!("no LLM provider configured, skipping diagnosis");
                         }
 
                         // --- Runbook matching ---

@@ -2,6 +2,7 @@
 
 pub mod baseline;
 pub mod context;
+pub mod data_sources;
 pub mod diagnosis;
 pub mod digest;
 

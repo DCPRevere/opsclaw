@@ -61,7 +61,7 @@ async fn run_http_probe(
     timeout_secs: u64,
 ) -> Result<ProbeResult> {
     let cmd = format!(
-        "curl -sS -o /dev/null -w '%{{http_code}} %{{time_total}}' --max-time {timeout_secs} '{url}'"
+        "curl -sSL -o /dev/null -w '%{{http_code}} %{{time_total}}' --max-time {timeout_secs} '{url}'"
     );
     let output = runner.run(&cmd).await?;
     let (success, latency_ms, message, details) =
@@ -128,8 +128,17 @@ async fn run_tls_probe(
     warn_days: u32,
 ) -> Result<ProbeResult> {
     let check_secs = u64::from(warn_days) * 86400;
+    let is_bare_ip = hostname.parse::<std::net::IpAddr>().is_ok();
+    if is_bare_ip {
+        tracing::warn!("TLS hostname check skipped for bare IP");
+    }
+    let sni_flag = if is_bare_ip {
+        String::new()
+    } else {
+        format!("-servername {hostname} ")
+    };
     let cmd = format!(
-        "echo | openssl s_client -servername {hostname} -connect {hostname}:{port} 2>/dev/null \
+        "echo | openssl s_client {sni_flag}-connect {hostname}:{port} 2>/dev/null \
          | openssl x509 -noout -enddate -checkend {check_secs}"
     );
     let output = runner.run(&cmd).await?;

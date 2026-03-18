@@ -212,6 +212,7 @@ async fn step_ssh_target() -> Result<TargetResult> {
         autonomy: OpsClawAutonomy::default(),
         context_file: None,
         probes: None,
+        data_sources: None,
     };
 
     Ok(TargetResult { config, runner })
@@ -238,6 +239,7 @@ fn step_local_target() -> Result<TargetResult> {
         autonomy: OpsClawAutonomy::default(),
         context_file: None,
         probes: None,
+        data_sources: None,
     };
 
     Ok(TargetResult { config, runner })
@@ -489,6 +491,7 @@ mod tests {
             autonomy: OpsClawAutonomy::DryRun,
             context_file: None,
             probes: None,
+            data_sources: None,
         };
 
         write_config(&path, &target, &NotificationChoice::Skip).unwrap();
@@ -514,6 +517,7 @@ mod tests {
             autonomy: OpsClawAutonomy::Approve,
             context_file: None,
             probes: None,
+            data_sources: None,
         };
 
         let notif = NotificationChoice::Telegram {
@@ -546,6 +550,7 @@ mod tests {
             autonomy: OpsClawAutonomy::DryRun,
             context_file: None,
             probes: None,
+            data_sources: None,
         };
         write_config(&path, &t1, &NotificationChoice::Skip).unwrap();
 
@@ -559,6 +564,7 @@ mod tests {
             autonomy: OpsClawAutonomy::Auto,
             context_file: None,
             probes: None,
+            data_sources: None,
         };
         write_config(&path, &t2, &NotificationChoice::Skip).unwrap();
 
@@ -583,6 +589,7 @@ mod tests {
             autonomy: OpsClawAutonomy::DryRun,
             context_file: None,
             probes: None,
+            data_sources: None,
         };
         write_config(&path, &t1, &NotificationChoice::Skip).unwrap();
 
@@ -596,6 +603,7 @@ mod tests {
             autonomy: OpsClawAutonomy::Auto,
             context_file: None,
             probes: None,
+            data_sources: None,
         };
         write_config(&path, &t1_updated, &NotificationChoice::Skip).unwrap();
 

@@ -700,6 +700,24 @@ Examples:
         action: RunbookActions,
     },
 
+    /// Query configured data sources (Seq, Jaeger, GitHub, Docker)
+    #[command(long_about = "\
+Query all configured pull-based data sources for a target and print \
+a summary. Sources include Seq structured logs, Jaeger traces, GitHub \
+releases, and Docker container start times.
+
+Examples:
+  opsclaw sources --target sacra          # query all sources for a target
+  opsclaw sources --all                   # query all targets")]
+    Sources {
+        /// Target name (from config [[targets]])
+        #[arg(long)]
+        target: Option<String>,
+        /// Query all configured targets
+        #[arg(long)]
+        all: bool,
+    },
+
     /// Generate shell completion script to stdout
     #[command(long_about = "\
 Generate shell completion scripts for `opsclaw`.
@@ -1579,6 +1597,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Runbook { action } => ops_cli::handle_runbook(&config, action).await,
+        Commands::Sources { target, all } => ops_cli::handle_sources(&config, target, all).await,
 
         Commands::Config { config_command } => match config_command {
             ConfigCommands::Schema => {

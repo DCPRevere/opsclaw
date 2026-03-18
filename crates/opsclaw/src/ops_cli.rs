@@ -1061,6 +1061,42 @@ pub async fn handle_runbook(config: &Config, action: RunbookActions) -> Result<(
     Ok(())
 }
 
+pub async fn handle_sources(config: &Config, target: Option<String>, all: bool) -> Result<()> {
+    let targets = resolve_targets(config, target.as_deref(), all)?;
+
+    for t in &targets {
+        println!("━━ {} ━━", t.name);
+
+        let ds_cfg = parse_data_sources_config(t);
+
+        let runner: Option<Box<dyn CommandRunner>> = match make_runner(t) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!("could not create runner for {}: {e:#}", t.name);
+                None
+            }
+        };
+
+        let snap =
+            crate::ops::data_sources::collect_all(&ds_cfg, runner.as_ref().map(|r| r.as_ref()))
+                .await;
+
+        crate::ops::data_sources::print_summary(&snap);
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Parse the opaque `data_sources` JSON value from a target into our typed config.
+fn parse_data_sources_config(target: &TargetConfig) -> crate::ops::data_sources::DataSourcesConfig {
+    target
+        .data_sources
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
 fn resolve_targets<'a>(
     config: &'a Config,
     target_name: Option<&str>,

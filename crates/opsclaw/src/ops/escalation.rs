@@ -121,9 +121,7 @@ pub enum EscalationAction {
         next_contact: EscalationContact,
     },
     /// All contacts exhausted with no ack.
-    Expired {
-        escalation_id: String,
-    },
+    Expired { escalation_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -254,11 +252,10 @@ impl EscalationManager {
                             // All contacts exhausted.
                             let esc_mut = self.active.get_mut(&id).unwrap();
                             esc_mut.status = EscalationStatus::Expired;
-                            actions.push(EscalationAction::Expired {
-                                escalation_id: id,
-                            });
+                            actions.push(EscalationAction::Expired { escalation_id: id });
                         }
-                    } else if time_since_creation >= repeat_interval && since_last >= repeat_interval
+                    } else if time_since_creation >= repeat_interval
+                        && since_last >= repeat_interval
                     {
                         // Repeat notification to current contact.
                         if let Some(contact) = sorted.get(current_idx) {
@@ -305,10 +302,7 @@ impl EscalationManager {
             .get_mut(escalation_id)
             .context("Escalation not found")?;
         if esc.status != EscalationStatus::Active {
-            bail!(
-                "Cannot acknowledge escalation in {:?} state",
-                esc.status
-            );
+            bail!("Cannot acknowledge escalation in {:?} state", esc.status);
         }
         esc.status = EscalationStatus::Acknowledged {
             by: by.to_string(),
@@ -318,12 +312,7 @@ impl EscalationManager {
     }
 
     /// Mark an escalation as resolved.
-    pub fn resolve(
-        &mut self,
-        escalation_id: &str,
-        by: &str,
-        resolution: &str,
-    ) -> Result<()> {
+    pub fn resolve(&mut self, escalation_id: &str, by: &str, resolution: &str) -> Result<()> {
         let esc = self
             .active
             .get_mut(escalation_id)
@@ -354,7 +343,12 @@ impl EscalationManager {
     pub fn list_active(&self) -> Vec<&Escalation> {
         self.active
             .values()
-            .filter(|e| matches!(e.status, EscalationStatus::Active | EscalationStatus::Acknowledged { .. }))
+            .filter(|e| {
+                matches!(
+                    e.status,
+                    EscalationStatus::Active | EscalationStatus::Acknowledged { .. }
+                )
+            })
             .collect()
     }
 
@@ -373,8 +367,12 @@ impl EscalationManager {
         if let Some(parent) = self.store_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.store_path, json)
-            .with_context(|| format!("Failed to save escalation state to {}", self.store_path.display()))?;
+        std::fs::write(&self.store_path, json).with_context(|| {
+            format!(
+                "Failed to save escalation state to {}",
+                self.store_path.display()
+            )
+        })?;
         Ok(())
     }
 
@@ -438,7 +436,11 @@ pub fn format_escalation_message(
             .iter()
             .map(|c| c.name.as_str())
             .collect();
-        let _ = writeln!(buf, "Previously notified: {} (no response).", previous.join(", "));
+        let _ = writeln!(
+            buf,
+            "Previously notified: {} (no response).",
+            previous.join(", ")
+        );
     }
 
     let _ = writeln!(buf);
@@ -593,7 +595,9 @@ mod tests {
         // Trigger timeout → expire (single contact).
         let now = Utc::now() + Duration::seconds(600);
         let actions = mgr.check_timeouts(now);
-        assert!(actions.iter().any(|a| matches!(a, EscalationAction::Expired { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, EscalationAction::Expired { .. })));
 
         let result = mgr.resolve(&id, "bob", "too late");
         assert!(result.is_err());
@@ -614,10 +618,7 @@ mod tests {
 
         assert_eq!(actions.len(), 1);
         match &actions[0] {
-            EscalationAction::EscalateToNext {
-                next_contact,
-                ..
-            } => {
+            EscalationAction::EscalateToNext { next_contact, .. } => {
                 assert_eq!(next_contact.name, "Secondary");
             }
             other => panic!("Expected EscalateToNext, got {:?}", other),
@@ -659,7 +660,9 @@ mod tests {
         // Second timeout → expire.
         let t2 = Utc::now() + Duration::seconds(720);
         let actions = mgr.check_timeouts(t2);
-        assert!(actions.iter().any(|a| matches!(a, EscalationAction::Expired { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, EscalationAction::Expired { .. })));
 
         let esc = mgr.get(&id).unwrap();
         assert_eq!(esc.status, EscalationStatus::Expired);
@@ -685,7 +688,9 @@ mod tests {
         // Next timeout should expire, not escalate to Tertiary.
         let t2 = Utc::now() + Duration::seconds(720);
         let actions = mgr.check_timeouts(t2);
-        assert!(actions.iter().any(|a| matches!(a, EscalationAction::Expired { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, EscalationAction::Expired { .. })));
     }
 
     #[test]

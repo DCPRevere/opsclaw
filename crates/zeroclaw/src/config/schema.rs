@@ -421,6 +421,9 @@ pub struct TargetConfig {
     /// Optional pull-based data sources (Seq, Jaeger, GitHub, Docker).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_sources: Option<serde_json::Value>,
+    /// Optional escalation policy for tiered on-call notification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<serde_json::Value>,
 }
 
 /// Configuration for a single external probe.

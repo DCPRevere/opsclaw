@@ -1631,7 +1631,14 @@ async fn main() -> Result<()> {
             lines,
             level,
         } => ops_cli::handle_logs(&config, target, source, lines, level).await,
-        Commands::Watch { target } => ops_cli::handle_watch(&config, target).await,
+        Commands::Watch { target } => {
+            let opsclaw_dir = config
+                .config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let secrets = opsclaw::security::OpsClawSecretStore::new(opsclaw_dir);
+            ops_cli::handle_watch(&config, &secrets, target).await
+        }
         Commands::Baseline { target, reset } => {
             ops_cli::handle_baseline(&config, target, reset).await
         }

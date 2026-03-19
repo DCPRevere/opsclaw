@@ -42,6 +42,39 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
+/// Copy OPSCLAW_* env vars → ZEROCLAW_* so the upstream zeroclaw library
+/// reads values the user set under the OpsClaw-branded names.
+/// If ZEROCLAW_* is already set explicitly, it wins (no overwrite).
+fn shim_env_vars() {
+    const VARS: &[&str] = &[
+        "CONFIG_DIR",
+        "AUTOSTART_CHANNELS",
+        "API_KEY",
+        "PROVIDER",
+        "PROVIDER_URL",
+        "MODEL",
+        "TEMPERATURE",
+        "REASONING_ENABLED",
+        "WORKSPACE",
+        "GATEWAY_PORT",
+        "GATEWAY_HOST",
+        "ALLOW_PUBLIC_BIND",
+    ];
+    for name in VARS {
+        let opsclaw_key = format!("OPSCLAW_{name}");
+        let zeroclaw_key = format!("ZEROCLAW_{name}");
+        if let Ok(val) = std::env::var(&opsclaw_key) {
+            if std::env::var(&zeroclaw_key).is_err() {
+                // SAFETY: single-threaded at startup, before async runtime spawns work.
+                #[allow(deprecated)]
+                unsafe {
+                    std::env::set_var(&zeroclaw_key, &val);
+                }
+            }
+        }
+    }
+}
+
 fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     let t: f64 = s.parse().map_err(|e| format!("{e}"))?;
     config::schema::validate_temperature(t)
@@ -1031,34 +1064,9 @@ async fn main() -> Result<()> {
         return print_no_command_help();
     }
 
-    // Mirror OPSCLAW_* env vars → ZEROCLAW_* for upstream zeroclaw library compat.
-    // Users set OPSCLAW_* names; zeroclaw internals read ZEROCLAW_* names.
-    // If both are set, the user's explicit ZEROCLAW_* value wins.
-    for (opsclaw_var, zeroclaw_var) in &[
-        ("OPSCLAW_API_KEY", "ZEROCLAW_API_KEY"),
-        ("OPSCLAW_PROVIDER", "ZEROCLAW_PROVIDER"),
-        ("OPSCLAW_PROVIDER_URL", "ZEROCLAW_PROVIDER_URL"),
-        ("OPSCLAW_MODEL", "ZEROCLAW_MODEL"),
-        ("OPSCLAW_TEMPERATURE", "ZEROCLAW_TEMPERATURE"),
-        ("OPSCLAW_REASONING_ENABLED", "ZEROCLAW_REASONING_ENABLED"),
-        ("OPSCLAW_WORKSPACE", "ZEROCLAW_WORKSPACE"),
-        ("OPSCLAW_GATEWAY_PORT", "ZEROCLAW_GATEWAY_PORT"),
-        ("OPSCLAW_GATEWAY_HOST", "ZEROCLAW_GATEWAY_HOST"),
-        ("OPSCLAW_ALLOW_PUBLIC_BIND", "ZEROCLAW_ALLOW_PUBLIC_BIND"),
-        ("OPSCLAW_AUTOSTART_CHANNELS", "ZEROCLAW_AUTOSTART_CHANNELS"),
-    ] {
-        if let Ok(val) = std::env::var(opsclaw_var) {
-            if std::env::var(zeroclaw_var).is_err() {
-                // SAFETY: single-threaded at startup
-                #[allow(deprecated)]
-                unsafe {
-                    std::env::set_var(zeroclaw_var, &val)
-                };
-            }
-        }
-    }
-
     let cli = Cli::parse();
+
+    shim_env_vars();
 
     if let Some(config_dir) = &cli.config_dir {
         if config_dir.trim().is_empty() {

@@ -465,6 +465,12 @@ pub async fn handle_monitor(
                         let error_log_context =
                             collect_error_logs_for_diagnosis(runner.as_ref(), &current).await;
 
+                        // Collect git deploy correlation context.
+                        let deploy_context = {
+                            let ds_cfg = parse_data_sources_config(t);
+                            collect_deploy_context(runner.as_ref(), &ds_cfg).await
+                        };
+
                         if let Err(e) = notifier.notify(&t.name, &hc).await {
                             eprintln!("   Warning: notification failed: {e}");
                         }
@@ -483,6 +489,12 @@ pub async fn handle_monitor(
                                 context_content = Some(format!(
                                     "{combined}\n\n## Recent Error Logs\n\n{error_log_context}"
                                 ));
+                            }
+
+                            // Append deploy correlation context for the LLM.
+                            if !deploy_context.is_empty() {
+                                let combined = context_content.unwrap_or_default();
+                                context_content = Some(format!("{combined}\n\n{deploy_context}"));
                             }
 
                             // Append baseline summary to context.
@@ -956,6 +968,41 @@ async fn collect_error_logs_for_diagnosis(
     }
 
     error_lines.join("\n")
+}
+
+/// Collect git deploy correlation context for LLM diagnosis.
+async fn collect_deploy_context(
+    runner: &dyn CommandRunner,
+    ds_cfg: &crate::ops::data_sources::DataSourcesConfig,
+) -> String {
+    let paths = match &ds_cfg.git_paths {
+        Some(p) if !p.is_empty() => p,
+        _ => return String::new(),
+    };
+
+    // Fetch docker deploy timestamps if containers are configured.
+    let docker_deploys = if let Some(containers) = &ds_cfg.docker_containers {
+        crate::ops::data_sources::docker_inspect::fetch_start_times(runner, containers)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    match crate::ops::data_sources::git_deploy::fetch_git_deploy_snapshot(
+        runner,
+        paths,
+        &docker_deploys,
+        None,
+    )
+    .await
+    {
+        Ok(snap) => crate::ops::data_sources::git_deploy::format_as_markdown(&snap, 24),
+        Err(e) => {
+            tracing::warn!("git deploy context failed: {e:#}");
+            String::new()
+        }
+    }
 }
 
 /// Build a notifier from config. Returns `TelegramNotifier` if configured, `NullNotifier` otherwise.

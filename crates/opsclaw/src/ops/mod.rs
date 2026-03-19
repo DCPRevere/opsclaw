@@ -6,6 +6,7 @@ pub mod context;
 pub mod data_sources;
 pub mod diagnosis;
 pub mod digest;
+pub mod doctor;
 pub mod escalation;
 
 pub mod event_stream;

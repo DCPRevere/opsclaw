@@ -1252,9 +1252,51 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Onboard { .. } | Commands::Completions { .. } => unreachable!(),
-        Commands::A2a { .. } => {
-            eprintln!("A2A commands not yet wired. Modules available at src/tools/a2a_*.rs");
-            Ok(())
+        Commands::A2a { a2a_command } => {
+            let a2a_cfg = config.a2a.clone().unwrap_or_default();
+            match a2a_command {
+                A2aCommands::Discover { url } => {
+                    let client = opsclaw::tools::a2a_tool::A2aClient::new();
+                    let card = client.discover(&url).await?;
+                    println!("{}", serde_json::to_string_pretty(&card)?);
+                    Ok(())
+                }
+                A2aCommands::Send { peer, message } => {
+                    let p = a2a_cfg
+                        .peers
+                        .iter()
+                        .find(|p| p.name == peer)
+                        .with_context(|| format!("unknown A2A peer '{peer}'"))?;
+                    let client = opsclaw::tools::a2a_tool::A2aClient::new();
+                    let task = client.send_task(&p.url, &p.token, &message).await?;
+                    println!("{}", serde_json::to_string_pretty(&task)?);
+                    Ok(())
+                }
+                A2aCommands::Status { peer, task_id } => {
+                    let p = a2a_cfg
+                        .peers
+                        .iter()
+                        .find(|p| p.name == peer)
+                        .with_context(|| format!("unknown A2A peer '{peer}'"))?;
+                    let client = opsclaw::tools::a2a_tool::A2aClient::new();
+                    let task = client.get_task(&p.url, &p.token, &task_id).await?;
+                    println!("{}", serde_json::to_string_pretty(&task)?);
+                    Ok(())
+                }
+                A2aCommands::Server => {
+                    opsclaw::tools::a2a_server::run_a2a_server(a2a_cfg.server).await
+                }
+                A2aCommands::Peers => {
+                    if a2a_cfg.peers.is_empty() {
+                        println!("No A2A peers configured.");
+                    } else {
+                        for p in &a2a_cfg.peers {
+                            println!("{:16} {}", p.name, p.url);
+                        }
+                    }
+                    Ok(())
+                }
+            }
         }
 
         Commands::Agent {

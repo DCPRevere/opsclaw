@@ -146,6 +146,138 @@ impl EventSource for SystemdEventSource {
 }
 
 // ---------------------------------------------------------------------------
+// SSH event source
+// ---------------------------------------------------------------------------
+
+/// Streams Docker events and systemd journal entries from a remote host over SSH.
+///
+/// Spawns two child processes:
+///   - `ssh … docker events --format json`
+///   - `ssh … journalctl -f -n 0 -o json`
+///
+/// Each line of stdout is parsed and forwarded as a [`StreamEvent`].
+pub struct SshEventSource {
+    host: String,
+    user: String,
+    key_path: String,
+    port: u16,
+    name: String,
+}
+
+impl SshEventSource {
+    pub fn new(host: String, user: String, key_path: String, port: u16, name: String) -> Self {
+        Self {
+            host,
+            user,
+            key_path,
+            port,
+            name,
+        }
+    }
+
+    /// Build the base SSH command with common flags.
+    fn ssh_command(&self, remote_cmd: &str) -> Command {
+        let mut cmd = Command::new("ssh");
+        cmd.args([
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "BatchMode=yes",
+            "-i",
+            &self.key_path,
+            "-p",
+            &self.port.to_string(),
+            &format!("{}@{}", self.user, self.host),
+        ])
+        .args(remote_cmd.split_whitespace())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+        cmd
+    }
+}
+
+#[async_trait]
+impl EventSource for SshEventSource {
+    async fn stream(&self, tx: mpsc::Sender<StreamEvent>) -> anyhow::Result<()> {
+        // Spawn both Docker events and journalctl streams concurrently.
+        let docker_tx = tx.clone();
+        let name = self.name.clone();
+
+        let mut docker_child = self
+            .ssh_command("docker events --format {{json .}}")
+            .spawn()
+            .map_err(|e| {
+                anyhow::anyhow!("failed to spawn SSH docker-events for '{}': {e}", name)
+            })?;
+
+        let docker_stdout = docker_child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("failed to capture SSH docker stdout"))?;
+
+        let docker_handle = tokio::spawn(async move {
+            let mut lines = BufReader::new(docker_stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match parse_docker_event(&line) {
+                    Ok(ev) => {
+                        if docker_tx.send(StreamEvent::Docker(ev)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("SSH docker event parse error: {e}");
+                    }
+                }
+            }
+        });
+
+        let journal_tx = tx;
+        let name2 = self.name.clone();
+
+        let mut journal_child = self
+            .ssh_command("journalctl -f -n 0 -o json")
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to spawn SSH journalctl for '{}': {e}", name2))?;
+
+        let journal_stdout = journal_child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("failed to capture SSH journalctl stdout"))?;
+
+        let journal_handle = tokio::spawn(async move {
+            let mut lines = BufReader::new(journal_stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match parse_systemd_event(&line) {
+                    Ok(ev) => {
+                        if ev.priority > 4 {
+                            continue;
+                        }
+                        if journal_tx.send(StreamEvent::Systemd(ev)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("SSH journalctl parse error: {e}");
+                    }
+                }
+            }
+        });
+
+        // Wait for both to finish (they run until the SSH connection drops or
+        // the receiver is closed).
+        let _ = tokio::join!(docker_handle, journal_handle);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EventStreamManager
 // ---------------------------------------------------------------------------
 
@@ -166,6 +298,19 @@ impl EventStreamManager {
 
     pub fn add_systemd_source(&mut self) {
         self.sources.push(Box::new(SystemdEventSource));
+    }
+
+    pub fn add_ssh_source(
+        &mut self,
+        host: String,
+        user: String,
+        key_path: String,
+        port: u16,
+        name: String,
+    ) {
+        self.sources.push(Box::new(SshEventSource::new(
+            host, user, key_path, port, name,
+        )));
     }
 
     /// Start all sources, multiplexing events onto a single channel.
@@ -542,5 +687,61 @@ mod tests {
         let formatted = format_event(&ev);
         assert!(formatted.contains("nginx.service"));
         assert!(formatted.contains("Failed"));
+    }
+
+    #[test]
+    fn ssh_event_source_constructs() {
+        let source = SshEventSource::new(
+            "10.0.0.1".into(),
+            "deploy".into(),
+            "/tmp/test-key".into(),
+            2222,
+            "prod-web".into(),
+        );
+        assert_eq!(source.host, "10.0.0.1");
+        assert_eq!(source.user, "deploy");
+        assert_eq!(source.key_path, "/tmp/test-key");
+        assert_eq!(source.port, 2222);
+        assert_eq!(source.name, "prod-web");
+    }
+
+    #[test]
+    fn ssh_event_source_ssh_command_args() {
+        let source = SshEventSource::new(
+            "10.0.0.1".into(),
+            "deploy".into(),
+            "/tmp/test-key".into(),
+            2222,
+            "prod-web".into(),
+        );
+        let cmd = source.ssh_command("docker events --format json");
+        let prog = cmd.as_std().get_program();
+        assert_eq!(prog, "ssh");
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy())
+            .collect();
+        assert!(args.contains(&"-i".into()));
+        assert!(args.contains(&"/tmp/test-key".into()));
+        assert!(args.contains(&"-p".into()));
+        assert!(args.contains(&"2222".into()));
+        assert!(args.contains(&"deploy@10.0.0.1".into()));
+        assert!(args.contains(&"docker".into()));
+        assert!(args.contains(&"events".into()));
+    }
+
+    #[test]
+    fn manager_add_ssh_source() {
+        let mut manager = EventStreamManager::new();
+        assert_eq!(manager.sources.len(), 0);
+        manager.add_ssh_source(
+            "host".into(),
+            "user".into(),
+            "/key".into(),
+            22,
+            "test".into(),
+        );
+        assert_eq!(manager.sources.len(), 1);
     }
 }

@@ -1,12 +1,15 @@
 //! OpsClaw CLI command handlers: scan, monitor, watch.
 
 use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use tokio::signal;
 use tracing::info;
 
+use crate::security::OpsClawSecretStore;
 use zeroclaw::config::schema::{TargetConfig, TargetType};
 use zeroclaw::config::Config;
 
@@ -609,7 +612,11 @@ pub async fn handle_monitor(
 // watch command
 // ---------------------------------------------------------------------------
 
-pub async fn handle_watch(config: &Config, target: Option<String>) -> Result<()> {
+pub async fn handle_watch(
+    config: &Config,
+    secrets: &OpsClawSecretStore,
+    target: Option<String>,
+) -> Result<()> {
     let targets = resolve_targets(config, target.as_deref(), target.is_none())?;
 
     if targets.is_empty() {
@@ -619,6 +626,9 @@ pub async fn handle_watch(config: &Config, target: Option<String>) -> Result<()>
     let notifier = make_notifier(config);
 
     let mut manager = EventStreamManager::new();
+
+    // Temp key files cleaned up when the watch session ends.
+    let mut ssh_key_paths: Vec<PathBuf> = Vec::new();
 
     for t in &targets {
         match t.target_type {
@@ -631,10 +641,57 @@ pub async fn handle_watch(config: &Config, target: Option<String>) -> Result<()>
                 manager.add_systemd_source();
             }
             TargetType::Ssh => {
-                // SSH streaming not yet wired — skip with a warning.
-                eprintln!(
-                    "Warning: SSH event streaming not yet supported, skipping target '{}'",
-                    t.name
+                let host = t
+                    .host
+                    .as_deref()
+                    .context(format!("SSH target '{}' missing host", t.name))?;
+                let user = t
+                    .user
+                    .as_deref()
+                    .context(format!("SSH target '{}' missing user", t.name))?;
+                let key_secret_name = t
+                    .key_secret
+                    .as_deref()
+                    .context(format!("SSH target '{}' missing key_secret", t.name))?;
+                let port = t.port.unwrap_or(22);
+
+                let pem = secrets
+                    .get(key_secret_name)?
+                    .context(format!("secret '{}' not found", key_secret_name))?;
+
+                // Write the PEM to a temp file so `ssh -i` can use it.
+                let key_path = std::env::temp_dir().join(format!(
+                    "opsclaw-watch-key-{}-{}",
+                    t.name,
+                    std::process::id()
+                ));
+                {
+                    let mut f = fs::File::create(&key_path)
+                        .context("failed to create temp file for SSH key")?;
+                    f.write_all(pem.as_bytes())?;
+                    f.flush()?;
+                }
+
+                // Restrict permissions (ssh refuses keys with open perms).
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+                }
+
+                let key_path_str = key_path.to_string_lossy().to_string();
+                ssh_key_paths.push(key_path);
+
+                info!(
+                    "Adding SSH event sources for target '{}' ({}@{}:{})",
+                    t.name, user, host, port
+                );
+                manager.add_ssh_source(
+                    host.to_string(),
+                    user.to_string(),
+                    key_path_str,
+                    port,
+                    t.name.clone(),
                 );
             }
         }
@@ -671,6 +728,12 @@ pub async fn handle_watch(config: &Config, target: Option<String>) -> Result<()>
     }
 
     manager_handle.abort();
+
+    // Clean up temp SSH key files.
+    for path in &ssh_key_paths {
+        let _ = fs::remove_file(path);
+    }
+
     Ok(())
 }
 

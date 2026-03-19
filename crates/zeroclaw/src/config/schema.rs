@@ -387,6 +387,8 @@ pub enum TargetType {
     Ssh,
     /// The local machine.
     Local,
+    /// Kubernetes cluster (via kube-rs API client).
+    Kubernetes,
 }
 
 /// Configuration for a single OpsClaw SRE target host.
@@ -427,6 +429,12 @@ pub struct TargetConfig {
     /// Optional database instances for diagnostic health queries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub databases: Option<serde_json::Value>,
+    /// Path to a kubeconfig file (Kubernetes targets only; defaults to ~/.kube/config).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubeconfig: Option<String>,
+    /// Default namespace for Kubernetes operations (defaults to all namespaces).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 /// Configuration for a single external probe.
@@ -591,6 +599,26 @@ pub fn validate_targets(targets: &[TargetConfig]) -> Result<()> {
                 if target.key_secret.is_some() {
                     anyhow::bail!(
                         "Local target '{}' must not have 'key_secret' field",
+                        target.name
+                    );
+                }
+            }
+            TargetType::Kubernetes => {
+                if target.host.is_some() {
+                    anyhow::bail!(
+                        "Kubernetes target '{}' must not have 'host' field",
+                        target.name
+                    );
+                }
+                if target.user.is_some() {
+                    anyhow::bail!(
+                        "Kubernetes target '{}' must not have 'user' field",
+                        target.name
+                    );
+                }
+                if target.key_secret.is_some() {
+                    anyhow::bail!(
+                        "Kubernetes target '{}' must not have 'key_secret' field",
                         target.name
                     );
                 }

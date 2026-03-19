@@ -25,6 +25,9 @@ fn sacra_target() -> TargetConfig {
         probes: None,
         data_sources: None,
         escalation: None,
+        databases: None,
+        kubeconfig: None,
+        namespace: None,
     }
 }
 
@@ -127,6 +130,9 @@ fn ssh_runner_for_local_target_errors() {
         probes: None,
         data_sources: None,
         escalation: None,
+        databases: None,
+        kubeconfig: None,
+        namespace: None,
     }]);
     let ctx = OpsClawContext::new(config, secrets);
 

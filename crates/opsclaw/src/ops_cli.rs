@@ -49,7 +49,8 @@ use crate::ops::log_sources::{self, LogLevel, LogSourceType};
 use crate::ops::notifier::{AlertNotifier, NullNotifier, TelegramNotifier};
 use crate::ops::runbooks::{self, RunbookStore};
 use crate::ops::{monitor_log, probes, snapshots};
-use crate::tools::discovery::{self, CommandRunner};
+use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
+use crate::tools::kube_tool::KubeClient;
 use crate::tools::monitoring::{self, HealthCheck};
 use crate::tools::ssh_command_runner::{DryRunCommandRunner, LocalCommandRunner, SshCommandRunner};
 use crate::tools::ssh_tool::{OpsClawAutonomy, RealSshExecutor, TargetEntry};
@@ -80,6 +81,9 @@ fn make_runner(target: &TargetConfig) -> Result<Box<dyn CommandRunner>> {
 
     let runner: Box<dyn CommandRunner> = match target.target_type {
         TargetType::Local => Box::new(LocalCommandRunner::new(autonomy, target.name.clone())),
+        TargetType::Kubernetes => {
+            bail!("Kubernetes targets use the kube API client, not a command runner");
+        }
         TargetType::Ssh => {
             let host = target.host.clone().unwrap_or_default();
             let user = target.user.clone().unwrap_or_default();
@@ -133,6 +137,17 @@ fn opsclaw_dir() -> Result<std::path::PathBuf> {
         .map(|u| u.home_dir().to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     Ok(home.join(".opsclaw"))
+}
+
+/// Run a discovery scan for a target, using the kube API for Kubernetes
+/// targets and a [`CommandRunner`] for everything else.
+async fn scan_target(target: &TargetConfig) -> Result<TargetSnapshot> {
+    if target.target_type == TargetType::Kubernetes {
+        let kube = KubeClient::new(target.kubeconfig.as_deref()).await?;
+        return kube.discover_snapshot().await;
+    }
+    let runner = make_runner(target)?;
+    discovery::run_discovery_scan(runner.as_ref()).await
 }
 
 /// Convert config schema autonomy to ssh_tool autonomy.
@@ -205,8 +220,7 @@ pub async fn handle_scan(config: &Config, target: Option<String>, all: bool) -> 
 
     for t in &targets {
         info!("Scanning target: {}", t.name);
-        let runner = make_runner(t)?;
-        let snapshot = discovery::run_discovery_scan(runner.as_ref())
+        let snapshot = scan_target(t)
             .await
             .with_context(|| format!("Scan failed for target '{}'", t.name))?;
 
@@ -240,17 +254,23 @@ pub async fn handle_logs(
         .transpose()?;
 
     for t in &targets {
-        let runner = make_runner(t)?;
-
         // Try loading an existing snapshot; fall back to a fresh scan.
         let snapshot = match snapshots::load_snapshot(&t.name)? {
             Some(snap) => snap,
             None => {
                 info!("No snapshot for '{}', running discovery scan…", t.name);
-                let snap = discovery::run_discovery_scan(runner.as_ref()).await?;
+                let snap = scan_target(t).await?;
                 snapshots::save_snapshot(&t.name, &snap)?;
                 snap
             }
+        };
+        let runner = match make_runner(t) {
+            Ok(r) => r,
+            Err(_) if t.target_type == TargetType::Kubernetes => {
+                info!("Kubernetes target '{}': use `opsclaw logs` with kube API (skipping shell-based log collection)", t.name);
+                continue;
+            }
+            Err(e) => return Err(e),
         };
 
         let all_sources = log_sources::discover_log_sources(&snapshot);
@@ -356,8 +376,15 @@ pub async fn handle_monitor(
 
     loop {
         for t in &targets {
-            let runner = make_runner(t)?;
-            let current = match discovery::run_discovery_scan(runner.as_ref()).await {
+            // Build a command runner for targets that support it (SSH/local).
+            // Kubernetes targets use the kube API for scanning, so runner is None.
+            let runner: Option<Box<dyn CommandRunner>> = match make_runner(t) {
+                Ok(r) => Some(r),
+                Err(_) if t.target_type == TargetType::Kubernetes => None,
+                Err(e) => return Err(e),
+            };
+
+            let current = match scan_target(t).await {
                 Ok(snap) => {
                     failure_counts.remove(&t.name);
                     snap
@@ -406,6 +433,7 @@ pub async fn handle_monitor(
 
                     let mut probe_results = Vec::new();
                     for probe in configured_probes.iter().chain(discovered.iter()) {
+                        let Some(ref runner) = runner else { continue };
                         match probes::run_probe(runner.as_ref(), probe).await {
                             Ok(result) => {
                                 if let Some(alert) = probes::probe_result_to_alert(&result) {
@@ -463,13 +491,18 @@ pub async fn handle_monitor(
                         eprintln!("{md}");
 
                         // Collect recent error logs for diagnosis context.
-                        let error_log_context =
-                            collect_error_logs_for_diagnosis(runner.as_ref(), &current).await;
+                        let error_log_context = if let Some(ref r) = runner {
+                            collect_error_logs_for_diagnosis(r.as_ref(), &current).await
+                        } else {
+                            String::new()
+                        };
 
                         // Collect git deploy correlation context.
-                        let deploy_context = {
+                        let deploy_context = if let Some(ref r) = runner {
                             let ds_cfg = parse_data_sources_config(t);
-                            collect_deploy_context(runner.as_ref(), &ds_cfg).await
+                            collect_deploy_context(r.as_ref(), &ds_cfg).await
+                        } else {
+                            String::new()
                         };
 
                         if let Err(e) = notifier.notify(&t.name, &hc).await {
@@ -564,8 +597,15 @@ pub async fn handle_monitor(
                             tracing::info!("no LLM provider configured, skipping diagnosis");
                         }
 
-                        // --- Runbook matching ---
-                        if let Ok(store) = RunbookStore::default_dir().map(RunbookStore::new) {
+                        // --- Runbook matching (requires a command runner) ---
+                        if runner.is_none() {
+                            tracing::info!(
+                                "Skipping runbook execution for Kubernetes target '{}'",
+                                t.name
+                            );
+                        } else if let Ok(store) = RunbookStore::default_dir().map(RunbookStore::new)
+                        {
+                            let runner = runner.as_ref().unwrap();
                             if let Ok(matched) = store.match_alerts(&hc.alerts, &t.name) {
                                 for rb in &matched {
                                     match t.autonomy {
@@ -824,6 +864,12 @@ pub async fn handle_watch(
                     port,
                     t.name.clone(),
                 );
+            }
+            TargetType::Kubernetes => {
+                info!("Adding Kubernetes event source for target '{}'", t.name);
+                // Kubernetes events are polled via the kube API at each
+                // monitor interval rather than streamed here.  Log intent
+                // so operators see the target was recognised.
             }
         }
     }
@@ -1435,8 +1481,7 @@ pub async fn handle_digest(
             Ok(bl_path) => match BaselineStore::load(&bl_path) {
                 Ok(store) => {
                     // Run a quick discovery to get current metrics for anomaly check
-                    let runner = make_runner(t)?;
-                    let snapshot = discovery::run_discovery_scan(runner.as_ref()).await?;
+                    let snapshot = scan_target(t).await?;
                     let metrics = extract_metrics(&snapshot);
                     store.check_anomalies(&t.name, &metrics, 3.0)
                 }

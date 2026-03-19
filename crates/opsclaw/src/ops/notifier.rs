@@ -1,8 +1,25 @@
 use std::fmt::Write;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::tools::monitoring::{Alert, AlertSeverity, HealthCheck};
+
+/// A single inline keyboard button for Telegram-style interactive messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineButton {
+    pub text: String,
+    pub callback_data: String,
+}
+
+impl InlineButton {
+    pub fn new(text: impl Into<String>, callback_data: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            callback_data: callback_data.into(),
+        }
+    }
+}
 
 /// Delivers alerts and health-check summaries to an external notification channel.
 #[async_trait]
@@ -15,6 +32,22 @@ pub trait AlertNotifier: Send + Sync {
 
     /// Send a plain-text alert message (for event streams and one-off alerts).
     async fn notify_text(&self, target_name: &str, message: &str) -> anyhow::Result<()>;
+
+    /// Send a message with inline keyboard buttons.
+    ///
+    /// Channels that don't support buttons fall back to `notify_text` with a
+    /// plain-text hint asking the user to reply with one of the button labels.
+    async fn notify_with_buttons(
+        &self,
+        target_name: &str,
+        message: &str,
+        buttons: &[InlineButton],
+    ) -> anyhow::Result<()> {
+        // Default: append button labels as text hints and send as plain text.
+        let hints: Vec<&str> = buttons.iter().map(|b| b.text.as_str()).collect();
+        let fallback = format!("{message}\n\nReply with one of: {}", hints.join(" / "));
+        self.notify_text(target_name, &fallback).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -47,6 +80,46 @@ impl TelegramNotifier {
                 "chat_id": self.chat_id,
                 "text": text,
                 "parse_mode": "Markdown",
+            }))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Telegram API error {status}: {body}");
+        }
+        Ok(())
+    }
+
+    /// Send a message with an inline keyboard (one row of buttons).
+    async fn send_message_with_buttons(
+        &self,
+        text: &str,
+        buttons: &[InlineButton],
+    ) -> anyhow::Result<()> {
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
+
+        let keyboard_buttons: Vec<serde_json::Value> = buttons
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "text": b.text,
+                    "callback_data": b.callback_data,
+                })
+            })
+            .collect();
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({
+                "chat_id": self.chat_id,
+                "text": text,
+                "parse_mode": "Markdown",
+                "reply_markup": {
+                    "inline_keyboard": [keyboard_buttons]
+                }
             }))
             .send()
             .await?;
@@ -92,6 +165,20 @@ impl AlertNotifier for TelegramNotifier {
             escape_markdown(message)
         );
         self.send_message(&text).await
+    }
+
+    async fn notify_with_buttons(
+        &self,
+        target_name: &str,
+        message: &str,
+        buttons: &[InlineButton],
+    ) -> anyhow::Result<()> {
+        let text = format!(
+            "\u{1f534} *{}*\n{}",
+            escape_markdown(target_name),
+            escape_markdown(message)
+        );
+        self.send_message_with_buttons(&text, buttons).await
     }
 }
 

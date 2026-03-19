@@ -46,6 +46,8 @@ console = "0.16"
 toml = "1.0"
 glob = "0.3"
 which = "8.0"
+kube = { version = "0.98", default-features = false, features = ["client", "runtime", "rustls-tls"] }
+k8s-openapi = { version = "0.24", features = ["v1_32"] }
 
 [dev-dependencies]
 tempfile = "3.26"

@@ -110,20 +110,20 @@ async fn test_ssh_connection(host: &str, user: &str, port: u16) -> bool {
 
 struct TargetResult {
     config: TargetConfig,
-    runner: Box<dyn CommandRunner>,
+    runner: Option<Box<dyn CommandRunner>>,
 }
 
 fn step_target_type() -> Result<TargetType> {
-    let items = &["Remote (SSH)", "Local (this machine)"];
+    let items = &["Remote (SSH)", "Local (this machine)", "Kubernetes cluster"];
     let selection = Select::new()
         .with_prompt("Where is the server you want to monitor?")
         .items(items)
         .default(0)
         .interact()?;
-    Ok(if selection == 0 {
-        TargetType::Ssh
-    } else {
-        TargetType::Local
+    Ok(match selection {
+        0 => TargetType::Ssh,
+        1 => TargetType::Local,
+        _ => TargetType::Kubernetes,
     })
 }
 
@@ -215,9 +215,14 @@ async fn step_ssh_target() -> Result<TargetResult> {
         data_sources: None,
         escalation: None,
         databases: None,
+        kubeconfig: None,
+        namespace: None,
     };
 
-    Ok(TargetResult { config, runner })
+    Ok(TargetResult {
+        config,
+        runner: Some(runner),
+    })
 }
 
 fn step_local_target() -> Result<TargetResult> {
@@ -244,9 +249,61 @@ fn step_local_target() -> Result<TargetResult> {
         data_sources: None,
         escalation: None,
         databases: None,
+        kubeconfig: None,
+        namespace: None,
     };
 
-    Ok(TargetResult { config, runner })
+    Ok(TargetResult {
+        config,
+        runner: Some(runner),
+    })
+}
+
+fn step_kubernetes_target() -> Result<TargetResult> {
+    let name: String = Input::new()
+        .with_prompt("Target name")
+        .default("k8s-cluster".into())
+        .interact_text()?;
+
+    let kubeconfig: String = Input::new()
+        .with_prompt("Path to kubeconfig (leave blank for default)")
+        .allow_empty(true)
+        .interact_text()?;
+
+    let namespace: String = Input::new()
+        .with_prompt("Default namespace (leave blank for all namespaces)")
+        .allow_empty(true)
+        .interact_text()?;
+
+    let config = TargetConfig {
+        name,
+        target_type: TargetType::Kubernetes,
+        host: None,
+        port: None,
+        user: None,
+        key_secret: None,
+        autonomy: OpsClawAutonomy::default(),
+        context_file: None,
+        probes: None,
+        data_sources: None,
+        escalation: None,
+        databases: None,
+        kubeconfig: if kubeconfig.is_empty() {
+            None
+        } else {
+            Some(kubeconfig)
+        },
+        namespace: if namespace.is_empty() {
+            None
+        } else {
+            Some(namespace)
+        },
+    };
+
+    Ok(TargetResult {
+        config,
+        runner: None,
+    })
 }
 
 fn step_autonomy() -> Result<OpsClawAutonomy> {
@@ -419,6 +476,7 @@ pub async fn run_opsclaw_setup() -> Result<()> {
     let mut target_result = match target_type {
         TargetType::Ssh => step_ssh_target().await?,
         TargetType::Local => step_local_target()?,
+        TargetType::Kubernetes => step_kubernetes_target()?,
     };
 
     // Step 3: Autonomy level
@@ -427,7 +485,11 @@ pub async fn run_opsclaw_setup() -> Result<()> {
 
     // Step 4: Discovery scan
     print_step(3, 5, "Discovery Scan");
-    step_discovery_scan(&target_result.config.name, target_result.runner.as_ref()).await;
+    if let Some(ref runner) = target_result.runner {
+        step_discovery_scan(&target_result.config.name, runner.as_ref()).await;
+    } else {
+        println!("Skipping shell-based discovery scan (Kubernetes targets use kube API).");
+    }
 
     // Step 5: Notification channel
     print_step(4, 5, "Notification Channel");
@@ -498,6 +560,8 @@ mod tests {
             data_sources: None,
             escalation: None,
             databases: None,
+            kubeconfig: None,
+            namespace: None,
         };
 
         write_config(&path, &target, &NotificationChoice::Skip).unwrap();
@@ -526,6 +590,8 @@ mod tests {
             data_sources: None,
             escalation: None,
             databases: None,
+            kubeconfig: None,
+            namespace: None,
         };
 
         let notif = NotificationChoice::Telegram {
@@ -561,6 +627,8 @@ mod tests {
             data_sources: None,
             escalation: None,
             databases: None,
+            kubeconfig: None,
+            namespace: None,
         };
         write_config(&path, &t1, &NotificationChoice::Skip).unwrap();
 
@@ -577,6 +645,8 @@ mod tests {
             data_sources: None,
             escalation: None,
             databases: None,
+            kubeconfig: None,
+            namespace: None,
         };
         write_config(&path, &t2, &NotificationChoice::Skip).unwrap();
 
@@ -604,6 +674,8 @@ mod tests {
             data_sources: None,
             escalation: None,
             databases: None,
+            kubeconfig: None,
+            namespace: None,
         };
         write_config(&path, &t1, &NotificationChoice::Skip).unwrap();
 
@@ -620,6 +692,8 @@ mod tests {
             data_sources: None,
             escalation: None,
             databases: None,
+            kubeconfig: None,
+            namespace: None,
         };
         write_config(&path, &t1_updated, &NotificationChoice::Skip).unwrap();
 

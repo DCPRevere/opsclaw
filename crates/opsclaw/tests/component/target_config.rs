@@ -13,6 +13,9 @@ fn ssh_target(name: &str) -> TargetConfig {
         probes: None,
         data_sources: None,
         escalation: None,
+        databases: None,
+        kubeconfig: None,
+        namespace: None,
     }
 }
 
@@ -29,6 +32,9 @@ fn local_target(name: &str) -> TargetConfig {
         probes: None,
         data_sources: None,
         escalation: None,
+        databases: None,
+        kubeconfig: None,
+        namespace: None,
     }
 }
 

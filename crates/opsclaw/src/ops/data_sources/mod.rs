@@ -5,6 +5,7 @@
 //! target they are silently skipped.
 
 pub mod docker_inspect;
+pub mod git_deploy;
 pub mod github;
 pub mod jaeger;
 pub mod prometheus;
@@ -26,6 +27,7 @@ pub struct DataSourcesSnapshot {
     pub github_release: Option<github::ReleaseInfo>,
     pub docker_deploys: Vec<docker_inspect::ContainerStartTime>,
     pub prometheus: Option<prometheus::PrometheusSnapshot>,
+    pub git_deploy: Option<git_deploy::GitDeploySnapshot>,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,9 @@ pub struct DataSourcesConfig {
     pub docker_containers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prometheus: Option<PrometheusConfig>,
+    /// Paths to git repositories on the target for deployment correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +123,14 @@ pub async fn collect_all(
         match docker_inspect::fetch_start_times(runner, containers).await {
             Ok(times) => snap.docker_deploys = times,
             Err(e) => tracing::warn!("docker inspect source failed: {e:#}"),
+        }
+    }
+
+    if let (Some(paths), Some(runner)) = (&cfg.git_paths, runner) {
+        match git_deploy::fetch_git_deploy_snapshot(runner, paths, &snap.docker_deploys, None).await
+        {
+            Ok(gs) => snap.git_deploy = Some(gs),
+            Err(e) => tracing::warn!("git deploy source failed: {e:#}"),
         }
     }
 
@@ -215,11 +228,35 @@ pub fn print_summary(snap: &DataSourcesSnapshot) {
         }
     }
 
+    if let Some(gs) = &snap.git_deploy {
+        if !gs.recent_commits.is_empty() {
+            println!("\n── Git recent commits ({}) ──", gs.recent_commits.len());
+            for c in &gs.recent_commits {
+                println!(
+                    "  {} {} ({})",
+                    c.hash,
+                    c.message,
+                    c.date.format("%Y-%m-%dT%H:%M:%SZ")
+                );
+            }
+        }
+        if !gs.correlations.is_empty() {
+            println!("\n── Deploy correlations ({}) ──", gs.correlations.len());
+            for c in &gs.correlations {
+                println!(
+                    "  {} {} → container {} ({}s before start)",
+                    c.commit.hash, c.commit.message, c.container, c.lag_seconds
+                );
+            }
+        }
+    }
+
     if snap.seq_logs.is_empty()
         && snap.jaeger_traces.is_empty()
         && snap.github_release.is_none()
         && snap.docker_deploys.is_empty()
         && snap.prometheus.is_none()
+        && snap.git_deploy.is_none()
     {
         println!("  (no data sources configured or returned data)");
     }

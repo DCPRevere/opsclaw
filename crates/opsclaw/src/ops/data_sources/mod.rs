@@ -5,6 +5,7 @@
 //! target they are silently skipped.
 
 pub mod docker_inspect;
+pub mod elasticsearch;
 pub mod git_deploy;
 pub mod github;
 pub mod jaeger;
@@ -28,6 +29,7 @@ pub struct DataSourcesSnapshot {
     pub docker_deploys: Vec<docker_inspect::ContainerStartTime>,
     pub prometheus: Option<prometheus::PrometheusSnapshot>,
     pub git_deploy: Option<git_deploy::GitDeploySnapshot>,
+    pub elasticsearch_logs: Vec<LogEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -50,6 +52,8 @@ pub struct DataSourcesConfig {
     /// Paths to git repositories on the target for deployment correlation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elasticsearch: Option<ElasticsearchConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +80,19 @@ pub struct PrometheusConfig {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElasticsearchConfig {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_pattern: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +133,13 @@ pub async fn collect_all(
         match prometheus::fetch_prometheus_snapshot(prom_cfg, start, end).await {
             Ok(psnap) => snap.prometheus = Some(psnap),
             Err(e) => tracing::warn!("prometheus source failed: {e:#}"),
+        }
+    }
+
+    if let Some(es_cfg) = &cfg.elasticsearch {
+        match elasticsearch::fetch_error_logs(es_cfg).await {
+            Ok(logs) => snap.elasticsearch_logs = logs,
+            Err(e) => tracing::warn!("elasticsearch source failed: {e:#}"),
         }
     }
 
@@ -251,12 +275,32 @@ pub fn print_summary(snap: &DataSourcesSnapshot) {
         }
     }
 
+    if !snap.elasticsearch_logs.is_empty() {
+        println!(
+            "\n── Elasticsearch error logs ({}) ──",
+            snap.elasticsearch_logs.len()
+        );
+        for entry in &snap.elasticsearch_logs {
+            let ts = entry
+                .timestamp
+                .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_else(|| "----".into());
+            let lvl = entry
+                .level
+                .as_ref()
+                .map(|l| format!("[{l}]"))
+                .unwrap_or_default();
+            println!("  {ts} {lvl} {}", entry.message);
+        }
+    }
+
     if snap.seq_logs.is_empty()
         && snap.jaeger_traces.is_empty()
         && snap.github_release.is_none()
         && snap.docker_deploys.is_empty()
         && snap.prometheus.is_none()
         && snap.git_deploy.is_none()
+        && snap.elasticsearch_logs.is_empty()
     {
         println!("  (no data sources configured or returned data)");
     }

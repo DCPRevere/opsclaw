@@ -39,6 +39,9 @@ pub enum RunbookActions {
 // types are fine because they don't reference Config.
 use crate::ops::baseline::{self, anomalies_to_alerts, extract_metrics, BaselineStore};
 use crate::ops::diagnosis::{Diagnosis, MonitoringAgent};
+use crate::ops::escalation::{
+    format_escalation_message, EscalationAction, EscalationManager, EscalationPolicy,
+};
 use crate::ops::event_stream::{self, EventStreamManager};
 use crate::ops::incident_search::IncidentIndex;
 use crate::ops::log_sources::{self, LogLevel, LogSourceType};
@@ -325,6 +328,30 @@ pub async fn handle_monitor(
     let notifier = make_notifier(config);
     let mut failure_counts: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
+
+    // Initialise escalation managers for targets that have an escalation policy.
+    let mut escalation_managers: std::collections::HashMap<String, EscalationManager> =
+        std::collections::HashMap::new();
+    for t in &targets {
+        if let Some(policy) = parse_escalation_policy(t) {
+            let store_path = escalation_store_path(&t.name)?;
+            let mgr = if store_path.exists() {
+                match EscalationManager::load(&store_path) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!(
+                            "   Warning: failed to load escalation state for '{}': {e}",
+                            t.name
+                        );
+                        EscalationManager::new(policy, store_path)
+                    }
+                }
+            } else {
+                EscalationManager::new(policy, store_path)
+            };
+            escalation_managers.insert(t.name.clone(), mgr);
+        }
+    }
 
     loop {
         for t in &targets {
@@ -639,7 +666,45 @@ pub async fn handle_monitor(
                             }
                         }
                         // --- End runbook matching ---
+
+                        // --- Escalation: create for unhealthy targets ---
+                        if let Some(mgr) = escalation_managers.get_mut(&t.name) {
+                            let alert_summary: Vec<String> =
+                                hc.alerts.iter().map(|a| a.message.clone()).collect();
+                            let diagnosis_text = alert_summary.join("; ");
+                            let incident_id = format!(
+                                "{}-{}",
+                                t.name,
+                                chrono::Utc::now().format("%Y%m%dT%H%M%S")
+                            );
+                            mgr.create(&incident_id, &t.name, &diagnosis_text, &alert_summary);
+
+                            // Send initial notification to the first contact.
+                            let actions = mgr.check_timeouts(chrono::Utc::now());
+                            for action in actions {
+                                process_escalation_action(notifier.as_ref(), mgr, action).await;
+                            }
+                            if let Err(e) = mgr.save() {
+                                eprintln!("   Warning: failed to save escalation state: {e}");
+                            }
+                        }
+                        // --- End escalation ---
                     }
+                }
+            }
+        }
+
+        // --- Escalation: check timeouts for all managers ---
+        for (target_name, mgr) in &mut escalation_managers {
+            let actions = mgr.check_timeouts(chrono::Utc::now());
+            if !actions.is_empty() {
+                for action in actions {
+                    process_escalation_action(notifier.as_ref(), mgr, action).await;
+                }
+                if let Err(e) = mgr.save() {
+                    eprintln!(
+                        "   Warning: failed to save escalation state for '{target_name}': {e}"
+                    );
                 }
             }
         }
@@ -1221,6 +1286,70 @@ pub async fn handle_sources(config: &Config, target: Option<String>, all: bool) 
     }
 
     Ok(())
+}
+
+/// Process a single [`EscalationAction`] by sending the appropriate notification.
+async fn process_escalation_action(
+    notifier: &dyn AlertNotifier,
+    mgr: &mut EscalationManager,
+    action: EscalationAction,
+) {
+    match action {
+        EscalationAction::NotifyContact {
+            ref escalation_id,
+            ref contact,
+            ref message,
+        } => {
+            eprintln!(
+                "   Escalation: notifying {} via {}",
+                contact.name, contact.channel
+            );
+            if let Err(e) = notifier.notify_text(&contact.name, message).await {
+                eprintln!("   Warning: escalation notification failed: {e}");
+            }
+            let _ = mgr.record_notification(escalation_id, &contact.name, &contact.channel, None);
+        }
+        EscalationAction::EscalateToNext {
+            ref escalation_id,
+            ref next_contact,
+        } => {
+            eprintln!(
+                "   Escalation: escalating to {} via {}",
+                next_contact.name, next_contact.channel
+            );
+            // Build message from the escalation record.
+            if let Some(esc) = mgr.get(escalation_id) {
+                let msg = format_escalation_message(esc, &[next_contact.clone()], false);
+                if let Err(e) = notifier.notify_text(&next_contact.name, &msg).await {
+                    eprintln!("   Warning: escalation notification failed: {e}");
+                }
+            }
+            let _ = mgr.record_notification(
+                escalation_id,
+                &next_contact.name,
+                &next_contact.channel,
+                None,
+            );
+        }
+        EscalationAction::Expired { ref escalation_id } => {
+            eprintln!("   Escalation {escalation_id}: all contacts exhausted, marking expired");
+        }
+    }
+}
+
+/// Parse the opaque `escalation` JSON value from a target into an [`EscalationPolicy`].
+fn parse_escalation_policy(target: &TargetConfig) -> Option<EscalationPolicy> {
+    target
+        .escalation
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .filter(|p: &EscalationPolicy| !p.contacts.is_empty())
+}
+
+/// Return the path where escalation state is persisted for a target.
+fn escalation_store_path(target_name: &str) -> Result<std::path::PathBuf> {
+    let dir = opsclaw_dir()?.join("escalations");
+    Ok(dir.join(format!("{target_name}.json")))
 }
 
 /// Parse the opaque `data_sources` JSON value from a target into our typed config.

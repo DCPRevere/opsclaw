@@ -12,6 +12,7 @@ fn ssh_target(name: &str) -> TargetConfig {
         context_file: None,
         probes: None,
         data_sources: None,
+        escalation: None,
     }
 }
 
@@ -27,6 +28,7 @@ fn local_target(name: &str) -> TargetConfig {
         context_file: Some(format!("context/{name}.md")),
         probes: None,
         data_sources: None,
+        escalation: None,
     }
 }
 

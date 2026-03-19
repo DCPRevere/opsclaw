@@ -24,6 +24,7 @@ fn sacra_target() -> TargetConfig {
         context_file: None,
         probes: None,
         data_sources: None,
+        escalation: None,
     }
 }
 
@@ -125,6 +126,7 @@ fn ssh_runner_for_local_target_errors() {
         context_file: None,
         probes: None,
         data_sources: None,
+        escalation: None,
     }]);
     let ctx = OpsClawContext::new(config, secrets);
 

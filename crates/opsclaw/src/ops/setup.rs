@@ -213,6 +213,7 @@ async fn step_ssh_target() -> Result<TargetResult> {
         context_file: None,
         probes: None,
         data_sources: None,
+        escalation: None,
     };
 
     Ok(TargetResult { config, runner })
@@ -240,6 +241,7 @@ fn step_local_target() -> Result<TargetResult> {
         context_file: None,
         probes: None,
         data_sources: None,
+        escalation: None,
     };
 
     Ok(TargetResult { config, runner })
@@ -492,6 +494,7 @@ mod tests {
             context_file: None,
             probes: None,
             data_sources: None,
+            escalation: None,
         };
 
         write_config(&path, &target, &NotificationChoice::Skip).unwrap();
@@ -518,6 +521,7 @@ mod tests {
             context_file: None,
             probes: None,
             data_sources: None,
+            escalation: None,
         };
 
         let notif = NotificationChoice::Telegram {
@@ -551,6 +555,7 @@ mod tests {
             context_file: None,
             probes: None,
             data_sources: None,
+            escalation: None,
         };
         write_config(&path, &t1, &NotificationChoice::Skip).unwrap();
 
@@ -565,6 +570,7 @@ mod tests {
             context_file: None,
             probes: None,
             data_sources: None,
+            escalation: None,
         };
         write_config(&path, &t2, &NotificationChoice::Skip).unwrap();
 
@@ -590,6 +596,7 @@ mod tests {
             context_file: None,
             probes: None,
             data_sources: None,
+            escalation: None,
         };
         write_config(&path, &t1, &NotificationChoice::Skip).unwrap();
 
@@ -604,6 +611,7 @@ mod tests {
             context_file: None,
             probes: None,
             data_sources: None,
+            escalation: None,
         };
         write_config(&path, &t1_updated, &NotificationChoice::Skip).unwrap();
 

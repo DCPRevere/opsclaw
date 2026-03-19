@@ -7,9 +7,12 @@ import {
   Activity,
   DollarSign,
   Radio,
+  Server,
+  AlertTriangle,
 } from 'lucide-react';
 import type { StatusResponse, CostSummary } from '@/types/api';
-import { getStatus, getCost } from '@/lib/api';
+import type { Target, Incident } from '@/types/opsclaw';
+import { getStatus, getCost, getOpsclawTargets, getOpsclawIncidents } from '@/lib/api';
 
 function formatUptime(seconds: number): string {
   const d = Math.floor(seconds / 86400);
@@ -55,13 +58,17 @@ function healthBorder(status: string): string {
 export default function Dashboard() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [cost, setCost] = useState<CostSummary | null>(null);
+  const [targets, setTargets] = useState<Target[]>([]);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([getStatus(), getCost()])
-      .then(([s, c]) => {
+    Promise.all([getStatus(), getCost(), getOpsclawTargets(), getOpsclawIncidents()])
+      .then(([s, c, t, i]) => {
         setStatus(s);
         setCost(c);
+        setTargets(t);
+        setIncidents(i);
       })
       .catch((err) => setError(err.message));
   }, []);
@@ -107,6 +114,58 @@ export default function Dashboard() {
             <p className="text-sm text-[#556080] truncate">{sub}</p>
           </div>
         ))}
+      </div>
+
+      {/* OpsClaw Overview */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 stagger-children">
+        <div className="glass-card p-5 animate-slide-in-up">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="p-2 rounded-xl bg-[#0080ff15]">
+              <Server className="h-5 w-5 text-[#0080ff]" />
+            </div>
+            <span className="text-xs text-[#556080] uppercase tracking-wider font-medium">Targets</span>
+          </div>
+          <p className="text-2xl font-bold text-white">{targets.length}</p>
+          <p className="text-sm text-[#556080]">
+            {targets.filter((t) => t.health_status === 'Healthy').length} healthy
+            {targets.filter((t) => t.health_status === 'Warning').length > 0 &&
+              `, ${targets.filter((t) => t.health_status === 'Warning').length} warning`}
+            {targets.filter((t) => t.health_status === 'Critical').length > 0 &&
+              `, ${targets.filter((t) => t.health_status === 'Critical').length} critical`}
+          </p>
+        </div>
+        <div className="glass-card p-5 animate-slide-in-up">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="p-2 rounded-xl bg-[#ffaa0015]">
+              <AlertTriangle className="h-5 w-5 text-[#ffaa00]" />
+            </div>
+            <span className="text-xs text-[#556080] uppercase tracking-wider font-medium">Incidents</span>
+          </div>
+          <p className="text-2xl font-bold text-white">{incidents.length}</p>
+          <p className="text-sm text-[#556080]">
+            {incidents.filter((i) => !i.resolution).length} open
+            {incidents.filter((i) => i.resolution).length > 0 &&
+              `, ${incidents.filter((i) => i.resolution).length} resolved`}
+          </p>
+        </div>
+        <div className="glass-card p-5 animate-slide-in-up">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="p-2 rounded-xl bg-[#00e68a15]">
+              <Activity className="h-5 w-5 text-[#00e68a]" />
+            </div>
+            <span className="text-xs text-[#556080] uppercase tracking-wider font-medium">Health</span>
+          </div>
+          <p className="text-2xl font-bold text-white">
+            {targets.length > 0
+              ? targets.some((t) => t.health_status === 'Critical')
+                ? 'Critical'
+                : targets.some((t) => t.health_status === 'Warning')
+                  ? 'Warning'
+                  : 'Healthy'
+              : 'N/A'}
+          </p>
+          <p className="text-sm text-[#556080]">Overall fleet status</p>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 stagger-children">

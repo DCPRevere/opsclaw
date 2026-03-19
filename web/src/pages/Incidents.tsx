@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { AlertTriangle, ChevronDown, ChevronUp, Filter } from 'lucide-react';
-import { mockIncidents } from '@/lib/mockData';
+import { getOpsclawIncidents } from '@/lib/api';
 import type { Incident } from '@/types/opsclaw';
 
 function severityColor(severity: string): string {
@@ -24,8 +24,14 @@ function formatTime(iso: string): string {
 }
 
 export default function Incidents() {
-  // TODO: replace with real API call
-  const [incidents, setIncidents] = useState<Incident[]>(mockIncidents);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getOpsclawIncidents()
+      .then(setIncidents)
+      .catch((err) => setError(err.message));
+  }, []);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [filterTarget, setFilterTarget] = useState<string>('all');
   const [filterSeverity, setFilterSeverity] = useState<string>('all');
@@ -51,6 +57,16 @@ export default function Incidents() {
     );
     setResolveText((prev) => ({ ...prev, [id]: '' }));
   };
+
+  if (error) {
+    return (
+      <div className="p-6 animate-fade-in">
+        <div className="rounded-xl bg-[#ff446615] border border-[#ff446630] p-4 text-[#ff6680]">
+          Failed to load incidents: {error}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6 animate-fade-in">

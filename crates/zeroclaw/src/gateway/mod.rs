@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod nodes;
+pub mod opsclaw_data;
 pub mod sse;
 pub mod static_files;
 pub mod ws;
@@ -727,6 +728,23 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/cost", get(api::handle_api_cost))
         .route("/api/cli-tools", get(api::handle_api_cli_tools))
         .route("/api/health", get(api::handle_api_health))
+        // ── OpsClaw data routes ──
+        .route(
+            "/api/opsclaw/targets",
+            get(opsclaw_data::handle_opsclaw_targets),
+        )
+        .route(
+            "/api/opsclaw/incidents",
+            get(opsclaw_data::handle_opsclaw_incidents),
+        )
+        .route(
+            "/api/opsclaw/status",
+            get(opsclaw_data::handle_opsclaw_status),
+        )
+        .route(
+            "/api/opsclaw/audit",
+            get(opsclaw_data::handle_opsclaw_audit),
+        )
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         // ── WebSocket agent chat ──

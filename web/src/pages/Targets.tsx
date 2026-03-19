@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Server, Wifi, Monitor, Box } from 'lucide-react';
-import { mockTargets } from '@/lib/mockData';
+import { getOpsclawTargets } from '@/lib/api';
 import type { Target } from '@/types/opsclaw';
 
 function statusColor(status: Target['health_status']): string {
@@ -50,9 +50,25 @@ function formatTime(iso?: string): string {
 }
 
 export default function Targets() {
-  // TODO: replace with real API call
-  const [targets] = useState<Target[]>(mockTargets);
+  const [targets, setTargets] = useState<Target[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    getOpsclawTargets()
+      .then(setTargets)
+      .catch((err) => setError(err.message));
+  }, []);
+
+  if (error) {
+    return (
+      <div className="p-6 animate-fade-in">
+        <div className="rounded-xl bg-[#ff446615] border border-[#ff446630] p-4 text-[#ff6680]">
+          Failed to load targets: {error}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6 animate-fade-in">

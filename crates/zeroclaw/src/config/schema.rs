@@ -424,6 +424,9 @@ pub struct TargetConfig {
     /// Optional escalation policy for tiered on-call notification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalation: Option<serde_json::Value>,
+    /// Optional database instances for diagnostic health queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub databases: Option<serde_json::Value>,
 }
 
 /// Configuration for a single external probe.

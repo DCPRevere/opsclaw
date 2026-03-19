@@ -545,9 +545,62 @@ pub async fn handle_monitor(
                                         }
                                         zeroclaw::config::schema::OpsClawAutonomy::Approve => {
                                             eprintln!(
-                                                "   Found matching runbook '{}'. Execute? (approval flow pending)",
+                                                "   Found matching runbook '{}'. Requesting approval...",
                                                 rb.name
                                             );
+                                            let action_desc = format!(
+                                                "runbook '{}': {}",
+                                                rb.name, rb.description
+                                            );
+                                            let approved = crate::ops::approval::request_approval(
+                                                notifier.as_ref(),
+                                                &t.name,
+                                                &action_desc,
+                                                120,
+                                            )
+                                            .await
+                                            .unwrap_or(false);
+
+                                            if approved {
+                                                eprintln!(
+                                                    "   Approved — executing runbook: {} ...",
+                                                    rb.name
+                                                );
+                                                match runbooks::execute_runbook(
+                                                    runner.as_ref(),
+                                                    rb,
+                                                    &t.name,
+                                                    &hc.alerts,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(exec) => {
+                                                        let exec_md =
+                                                            runbooks::execution_to_markdown(
+                                                                &exec, &rb.name,
+                                                            );
+                                                        eprintln!("{exec_md}");
+                                                        if let Err(e) = notifier
+                                                            .notify_text(&t.name, &exec_md)
+                                                            .await
+                                                        {
+                                                            eprintln!(
+                                                                "   Warning: runbook notification failed: {e}"
+                                                            );
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!(
+                                                            "   Runbook execution failed: {e}"
+                                                        );
+                                                    }
+                                                }
+                                            } else {
+                                                eprintln!(
+                                                    "   Approval denied/timed out for runbook '{}' — skipping",
+                                                    rb.name
+                                                );
+                                            }
                                         }
                                         zeroclaw::config::schema::OpsClawAutonomy::Auto => {
                                             eprintln!("   Executing runbook: {} ...", rb.name);

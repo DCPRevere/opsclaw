@@ -1,5 +1,6 @@
 //! OpsClaw operational modules: context, notifications, snapshot persistence and monitor logging.
 
+pub mod approval;
 pub mod baseline;
 pub mod context;
 pub mod data_sources;

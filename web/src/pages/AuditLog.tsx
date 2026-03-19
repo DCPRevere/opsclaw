@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Shield, Search, Link } from 'lucide-react';
-import { mockAuditEntries } from '@/lib/mockData';
+import { getOpsclawAudit } from '@/lib/api';
 import type { AuditEntry } from '@/types/opsclaw';
 
 function formatTime(iso: string): string {
@@ -27,8 +27,14 @@ function resultColor(result: string): string {
 }
 
 export default function AuditLog() {
-  // TODO: replace with real API call
-  const [entries] = useState<AuditEntry[]>(mockAuditEntries);
+  const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getOpsclawAudit()
+      .then(setEntries)
+      .catch((err) => setError(err.message));
+  }, []);
   const [search, setSearch] = useState('');
   const [filterTarget, setFilterTarget] = useState<string>('all');
   const [filterAction, setFilterAction] = useState<string>('all');
@@ -56,6 +62,16 @@ export default function AuditLog() {
     const prev = entries[i - 1];
     return prev != null && e.prev_hash === prev.hash;
   });
+
+  if (error) {
+    return (
+      <div className="p-6 animate-fade-in">
+        <div className="rounded-xl bg-[#ff446615] border border-[#ff446630] p-4 text-[#ff6680]">
+          Failed to load audit log: {error}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6 animate-fade-in">

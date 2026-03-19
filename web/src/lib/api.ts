@@ -259,3 +259,36 @@ export function getCliTools(): Promise<CliTool[]> {
     unwrapField(data, 'cli_tools'),
   );
 }
+
+// ---------------------------------------------------------------------------
+// OpsClaw Data
+// ---------------------------------------------------------------------------
+
+import type { Target, Incident, AuditEntry } from '../types/opsclaw';
+
+export function getOpsclawTargets(): Promise<Target[]> {
+  return apiFetch<Target[] | { targets: Target[] }>('/api/opsclaw/targets').then((data) =>
+    unwrapField(data, 'targets'),
+  );
+}
+
+export function getOpsclawIncidents(target?: string): Promise<Incident[]> {
+  const params = new URLSearchParams();
+  if (target) params.set('target', target);
+  const qs = params.toString();
+  return apiFetch<Incident[] | { incidents: Incident[] }>(
+    `/api/opsclaw/incidents${qs ? `?${qs}` : ''}`,
+  ).then((data) => unwrapField(data, 'incidents'));
+}
+
+export function getOpsclawStatus(
+  target: string,
+): Promise<{ target_name: string; health_status: string; snapshot: unknown }> {
+  return apiFetch(`/api/opsclaw/status?target=${encodeURIComponent(target)}`);
+}
+
+export function getOpsclawAudit(limit: number = 100): Promise<AuditEntry[]> {
+  return apiFetch<AuditEntry[] | { entries: AuditEntry[] }>(
+    `/api/opsclaw/audit?limit=${limit}`,
+  ).then((data) => unwrapField(data, 'entries'));
+}

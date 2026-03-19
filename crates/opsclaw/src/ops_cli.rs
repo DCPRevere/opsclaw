@@ -39,6 +39,7 @@ pub enum RunbookActions {
 // types are fine because they don't reference Config.
 use crate::ops::baseline::{self, anomalies_to_alerts, extract_metrics, BaselineStore};
 use crate::ops::diagnosis::{Diagnosis, MonitoringAgent};
+use crate::ops::digest::{DigestReport, TargetInput};
 use crate::ops::escalation::{
     format_escalation_message, EscalationAction, EscalationManager, EscalationPolicy,
 };
@@ -1359,6 +1360,80 @@ fn parse_data_sources_config(target: &TargetConfig) -> crate::ops::data_sources:
         .as_ref()
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Digest
+// ---------------------------------------------------------------------------
+
+pub async fn handle_digest(
+    config: &Config,
+    target: Option<String>,
+    hours: u32,
+    notify: bool,
+) -> Result<()> {
+    let targets = resolve_targets(config, target.as_deref(), true)?;
+
+    let mut inputs: Vec<TargetInput> = Vec::new();
+
+    for t in &targets {
+        // Incidents
+        let incidents = match IncidentIndex::load(&t.name) {
+            Ok(index) => index.incidents().to_vec(),
+            Err(_) => Vec::new(),
+        };
+
+        // Baseline anomalies
+        let anomalies = match baseline::baseline_path(&t.name) {
+            Ok(bl_path) => match BaselineStore::load(&bl_path) {
+                Ok(store) => {
+                    // Run a quick discovery to get current metrics for anomaly check
+                    let runner = make_runner(t)?;
+                    let snapshot = discovery::run_discovery_scan(runner.as_ref()).await?;
+                    let metrics = extract_metrics(&snapshot);
+                    store.check_anomalies(&t.name, &metrics, 3.0)
+                }
+                Err(_) => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+
+        // Derive health status from incidents and anomalies
+        let health = if incidents
+            .iter()
+            .any(|i| i.severity == "critical" && i.resolution.is_none())
+        {
+            monitoring::HealthStatus::Critical
+        } else if !anomalies.is_empty() || incidents.iter().any(|i| i.resolution.is_none()) {
+            monitoring::HealthStatus::Warning
+        } else {
+            monitoring::HealthStatus::Healthy
+        };
+
+        // Collect alert strings from recent anomalies
+        let alerts: Vec<String> = anomalies.iter().map(|a| a.message.clone()).collect();
+
+        inputs.push(TargetInput {
+            name: t.name.clone(),
+            health_status: health,
+            incidents,
+            alerts,
+            baseline_anomalies: anomalies,
+            probe_failures: 0,
+        });
+    }
+
+    let report = DigestReport::generate(inputs, hours);
+    println!("{}", report.to_markdown());
+
+    if notify {
+        let notifier = make_notifier(config);
+        let summary = report.to_short_summary();
+        notifier.notify_text("digest", &summary).await?;
+        println!("Digest sent via notifier.");
+    }
+
+    Ok(())
 }
 
 fn resolve_targets<'a>(

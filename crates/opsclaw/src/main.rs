@@ -845,6 +845,28 @@ Examples:
         all: bool,
     },
 
+    /// Generate a daily digest report summarising monitoring activity
+    #[command(long_about = "\
+Generate a digest report summarising incidents, anomalies, and health \
+status across all (or one) configured targets for a rolling time window.
+
+Examples:
+  opsclaw digest                         # last 24 hours, all targets
+  opsclaw digest --hours 8               # last 8 hours
+  opsclaw digest --target sacra          # single target
+  opsclaw digest --notify                # also send via notifier")]
+    Digest {
+        /// Target name (from config [[targets]])
+        #[arg(long)]
+        target: Option<String>,
+        /// Rolling window in hours (default: 24)
+        #[arg(long, default_value = "24")]
+        hours: u32,
+        /// Send the digest via the configured notifier
+        #[arg(long)]
+        notify: bool,
+    },
+
     /// Generate shell completion script to stdout
     #[command(long_about = "\
 Generate shell completion scripts for `opsclaw`.
@@ -1657,6 +1679,12 @@ async fn main() -> Result<()> {
 
         Commands::Runbook { action } => ops_cli::handle_runbook(&config, action).await,
         Commands::Sources { target, all } => ops_cli::handle_sources(&config, target, all).await,
+
+        Commands::Digest {
+            target,
+            hours,
+            notify,
+        } => ops_cli::handle_digest(&config, target, hours, notify).await,
 
         Commands::Config { config_command } => match config_command {
             ConfigCommands::Schema => {

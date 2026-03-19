@@ -209,7 +209,6 @@ use zeroclaw::auth;
 use zeroclaw::channels;
 use zeroclaw::config;
 use zeroclaw::cron;
-use zeroclaw::daemon;
 use zeroclaw::doctor;
 use zeroclaw::gateway;
 use zeroclaw::hardware;
@@ -1450,7 +1449,7 @@ async fn main() -> Result<()> {
             } else {
                 info!("🧠 Starting OpsClaw Daemon on {host}:{port}");
             }
-            Box::pin(daemon::run(config, host, port)).await
+            Box::pin(opsclaw::ops::daemon::start_daemon(&config, host, port)).await
         }
 
         Commands::Status { target, json } => {

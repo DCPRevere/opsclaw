@@ -253,6 +253,16 @@ fn check_targets(config: &Config, results: &mut Vec<CheckResult>) {
                     format!("target \"{}\" (local)", target.name),
                 ));
             }
+            TargetType::Kubernetes => {
+                results.push(CheckResult::ok(
+                    cat,
+                    format!(
+                        "target \"{}\" (kubernetes, ns={})",
+                        target.name,
+                        target.namespace.as_deref().unwrap_or("default"),
+                    ),
+                ));
+            }
         }
     }
 }

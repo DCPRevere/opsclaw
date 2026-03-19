@@ -3,6 +3,7 @@
 pub mod approval;
 pub mod baseline;
 pub mod context;
+pub mod daemon;
 pub mod data_sources;
 pub mod diagnosis;
 pub mod digest;

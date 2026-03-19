@@ -7,6 +7,7 @@
 pub mod docker_inspect;
 pub mod github;
 pub mod jaeger;
+pub mod prometheus;
 pub mod seq;
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,7 @@ pub struct DataSourcesSnapshot {
     pub jaeger_traces: Vec<jaeger::TraceSummary>,
     pub github_release: Option<github::ReleaseInfo>,
     pub docker_deploys: Vec<docker_inspect::ContainerStartTime>,
+    pub prometheus: Option<prometheus::PrometheusSnapshot>,
 }
 
 // ---------------------------------------------------------------------------
@@ -41,6 +43,8 @@ pub struct DataSourcesConfig {
     pub github: Option<GithubConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_containers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prometheus: Option<PrometheusConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +62,13 @@ pub struct JaegerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GithubConfig {
     pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrometheusConfig {
+    pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
@@ -91,6 +102,15 @@ pub async fn collect_all(
         match github::fetch_latest_release(gh_cfg).await {
             Ok(release) => snap.github_release = release,
             Err(e) => tracing::warn!("github source failed: {e:#}"),
+        }
+    }
+
+    if let Some(prom_cfg) = &cfg.prometheus {
+        let end = chrono::Utc::now();
+        let start = end - chrono::Duration::minutes(15);
+        match prometheus::fetch_prometheus_snapshot(prom_cfg, start, end).await {
+            Ok(psnap) => snap.prometheus = Some(psnap),
+            Err(e) => tracing::warn!("prometheus source failed: {e:#}"),
         }
     }
 
@@ -172,10 +192,34 @@ pub fn print_summary(snap: &DataSourcesSnapshot) {
         }
     }
 
+    if let Some(psnap) = &snap.prometheus {
+        if !psnap.up_samples.is_empty() {
+            println!("\n── Prometheus up/down ({}) ──", psnap.up_samples.len());
+            for s in &psnap.up_samples {
+                let last_val = s
+                    .values
+                    .last()
+                    .map(|(_, v)| if *v >= 1.0 { "UP" } else { "DOWN" })
+                    .unwrap_or("?");
+                println!("  {} ({}) = {last_val}", s.metric_name, s.labels);
+            }
+        }
+        if !psnap.active_alerts.is_empty() {
+            println!(
+                "\n── Prometheus active alerts ({}) ──",
+                psnap.active_alerts.len()
+            );
+            for a in &psnap.active_alerts {
+                println!("  [{}] {} ({}) val={}", a.state, a.name, a.labels, a.value);
+            }
+        }
+    }
+
     if snap.seq_logs.is_empty()
         && snap.jaeger_traces.is_empty()
         && snap.github_release.is_none()
         && snap.docker_deploys.is_empty()
+        && snap.prometheus.is_none()
     {
         println!("  (no data sources configured or returned data)");
     }

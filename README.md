@@ -36,11 +36,16 @@ OBSERVE → CORRELATE → DIAGNOSE → ACT → LEARN → REPEAT
 - **Living runbooks** — Executable remediation procedures that OpsClaw follows and updates as it discovers better approaches.
 - **Append-only audit log** — Every command, every restart, every alert. Immutable. Non-negotiable.
 - **Encrypted secret store** — SSH keys, tokens, DB passwords stored encrypted on disk. Config references secrets by name, never by value.
+- **Approval flow** — Telegram inline buttons for approve/reject when OpsClaw wants to act. One tap to greenlight a restart or rollback.
 - **Alerting** — Telegram, Slack, Discord, email, webhooks. Multiple channels with different roles (email for digests, Telegram for urgent).
-- **Pull-based observability** — Queries existing telemetry backends (Seq, Jaeger, Prometheus, Grafana) and CI/CD APIs (GitHub, GitLab) during diagnosis. No changes to monitored infrastructure. No OTLP receivers, no agents on targets.
-- **Escalation** — If OpsClaw can't fix it, it packages a diagnosis and escalates to on-call. No response? It tries the next person.
+- **Pull-based observability** — Queries existing telemetry backends (Seq, Jaeger, Prometheus, Grafana) and CI/CD APIs (GitHub, GitLab) during diagnosis. Enriches diagnoses with PromQL queries, active alerts, Elasticsearch/OpenSearch error log searches, and deploy correlation via git log + docker inspect. No changes to monitored infrastructure.
+- **Database diagnostics** — Read-only Postgres and Redis health queries over SSH. Connection counts, slow queries, replication lag, memory usage — without direct DB credentials on the OpsClaw host.
+- **Escalation engine** — Configurable contact chain with timeout-based escalation. If the first on-call doesn't respond within N minutes, OpsClaw tries the next person. Keeps going until someone acknowledges.
+- **Digest command** — Periodic summary reports across all targets. What happened, what was fixed, what needs attention. Schedule via cron or run on demand with `opsclaw digest`.
+- **Web dashboard** — Real-time API endpoints for targets, incidents, system status, and audit log. Lightweight UI for when you want a browser instead of a terminal.
+- **Doctor command** — `opsclaw doctor` runs self-diagnostic checks: config validation, SSH connectivity, notification channel health, LLM reachability, disk space. First thing to run when something seems off.
 - **BYOK** — Bring your own API keys. OpsClaw runs on your infrastructure with your LLM provider. No data leaves your network unless you want it to.
-- **A2A protocol** — OpsClaw exposes a standard Agent-to-Agent API card and client. Delegate monitoring tasks to peer agents, chain OpsClaw into multi-agent workflows, or expose its capabilities to orchestrators.
+- **A2A protocol** — OpsClaw exposes a standard Agent-to-Agent API card and client. CLI commands for discover, send, status, server, and peers. Delegate monitoring tasks to peer agents, chain OpsClaw into multi-agent workflows, or expose its capabilities to orchestrators.
 
 ## Deployment Models
 
@@ -126,18 +131,24 @@ OpsClaw extends this with:
 
 - `SshTool` — async SSH via `russh`, with audit logging and autonomy enforcement
 - `KubeTool` — Kubernetes API access via `kube-rs` with RBAC-scoped permissions
-- `DatabaseTool` — read-only diagnostic queries (connection counts, slow queries, replication lag)
+- `DatabaseTool` — read-only Postgres/Redis diagnostic queries over SSH
+- `DataSourceTool` — pull-based queries against Prometheus, Grafana, Elasticsearch, OpenSearch, git log, docker inspect
 - Target config schema (`[[targets]]` in TOML)
 - Discovery scan engine
 - Incident memory and living runbooks
-- Escalation state machine
+- Escalation engine with configurable contact chains and timeouts
+- Approval flow (Telegram inline buttons)
+- Digest report generator
+- Web dashboard with REST API
+- `opsclaw doctor` self-diagnostics
 - `opsclaw setup` interactive onboarding
+- A2A protocol server and client
 
 ## Monitoring Layers
 
 | Layer | What | How |
 |---|---|---|
-| **Event streams** | Real-time state changes | `docker events`, `journalctl -f`, Kubernetes watch |
+| **Event streams** | Real-time state changes | `docker events` + `journalctl -f` over SSH, Kubernetes watch |
 | **Periodic sweeps** | Scheduled health checks | Cron-driven SSH commands, compare against baselines |
 | **External probes** | Endpoint reachability | HTTP health checks, TLS cert expiry, DNS resolution |
 
@@ -152,11 +163,11 @@ Event streams (Docker events, journalctl -f), log source integration, KubeTool (
 ### Phase 3: Diagnosis & Remediation ✅
 Incident memory (keyword search, past incident context for LLM), living runbooks (trigger matching, step execution), three autonomy levels (dry-run/approve/auto), A2A protocol, escalation engine, daily digest.
 
-### Phase 4: External Data Sources 🔨
-Pull-based integration with existing telemetry backends and CI/CD — no changes required to monitored infrastructure. Seq, Jaeger/Tempo, Prometheus/Grafana APIs. GitHub/GitLab release and deployment history. Deploy timestamp detection via docker inspect.
+### Phase 4: External Data Sources ✅
+Pull-based integration with existing telemetry backends and CI/CD — no changes required to monitored infrastructure. Seq, Jaeger/Tempo, Prometheus/Grafana APIs (PromQL + active alerts), Elasticsearch/OpenSearch error log queries. Deploy correlation via git log and docker inspect.
 
-### Phase 5: Polish
-Web dashboard, database diagnostic tools, documentation, public release.
+### Phase 5: Production Readiness ✅
+Web dashboard (REST API for targets, incidents, status, audit log), database diagnostics (read-only Postgres/Redis health queries via SSH), `opsclaw doctor` self-diagnostic command, approval flow via Telegram inline buttons, A2A protocol CLI (discover, send, status, server, peers).
 
 ## Getting Started
 

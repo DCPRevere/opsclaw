@@ -1347,6 +1347,33 @@ fn search_all_targets(query: &str) -> Result<Vec<crate::ops::incident_search::In
 }
 
 // ---------------------------------------------------------------------------
+// postmortem command
+// ---------------------------------------------------------------------------
+
+pub async fn handle_postmortem(incident_id: &str, output: Option<&std::path::Path>) -> Result<()> {
+    use crate::ops::postmortem::PostMortem;
+
+    let all = load_all_targets()?;
+    let incident = all
+        .iter()
+        .find(|inc| inc.incident_id == incident_id)
+        .ok_or_else(|| anyhow::anyhow!("Incident '{incident_id}' not found"))?;
+
+    let pm = PostMortem::generate(incident, &[]);
+    let md = pm.to_markdown();
+
+    if let Some(path) = output {
+        std::fs::write(path, &md)
+            .with_context(|| format!("Failed to write to {}", path.display()))?;
+        println!("Post-mortem written to {}", path.display());
+    } else {
+        print!("{md}");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // runbook command
 // ---------------------------------------------------------------------------
 

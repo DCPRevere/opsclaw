@@ -176,14 +176,17 @@ async fn step_ssh_target() -> Result<TargetResult> {
         }
     }
 
-    let runner: Box<dyn CommandRunner> = match fs::read_to_string(expand_tilde(&key_path)) {
+    // Read the SSH key content — stored inline (encrypted by Config::save()).
+    let key_pem_result = fs::read_to_string(expand_tilde(&key_path));
+
+    let runner: Box<dyn CommandRunner> = match &key_pem_result {
         Ok(key_pem) => {
             let entry = TargetEntry {
                 name: name.clone(),
                 host: host.clone(),
                 port,
                 user: user.clone(),
-                private_key_pem: key_pem,
+                private_key_pem: key_pem.clone(),
                 autonomy: crate::tools::ssh_tool::OpsClawAutonomy::DryRun,
             };
             Box::new(SshCommandRunner::new(entry, Box::new(RealSshExecutor)))
@@ -202,13 +205,16 @@ async fn step_ssh_target() -> Result<TargetResult> {
         }
     };
 
+    // Store key PEM content (plain text here; Config::save() encrypts it as enc2:...).
+    let key_secret = key_pem_result.ok();
+
     let config = TargetConfig {
         name,
         target_type: TargetType::Ssh,
         host: Some(host),
         port: Some(port),
         user: Some(user),
-        key_secret: Some(key_path),
+        key_secret,
         autonomy: OpsClawAutonomy::default(),
         context_file: None,
         probes: None,

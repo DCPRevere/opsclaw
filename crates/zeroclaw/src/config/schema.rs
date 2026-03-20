@@ -403,7 +403,7 @@ pub struct TargetConfig {
     /// SSH username (required for SSH targets).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    /// Reference to a secret name in the OpsClaw secret store (SSH key, required for SSH targets).
+    /// SSH private key PEM content (encrypted inline as `enc2:...`, decrypted at config load).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_secret: Option<String>,
     /// Autonomy level for this target.
@@ -6781,6 +6781,17 @@ impl Config {
                 )?;
             }
 
+            // Decrypt target SSH key secrets
+            if let Some(ref mut targets) = config.targets {
+                for target in targets.iter_mut() {
+                    decrypt_optional_secret(
+                        &store,
+                        &mut target.key_secret,
+                        "config.targets.*.key_secret",
+                    )?;
+                }
+            }
+
             #[cfg(feature = "channel-nostr")]
             if let Some(ref mut ns) = config.channels_config.nostr {
                 decrypt_secret(
@@ -7944,6 +7955,17 @@ impl Config {
                 &mut google.api_key,
                 "config.transcription.google.api_key",
             )?;
+        }
+
+        // Encrypt target SSH key secrets
+        if let Some(ref mut targets) = config_to_save.targets {
+            for target in targets.iter_mut() {
+                encrypt_optional_secret(
+                    &store,
+                    &mut target.key_secret,
+                    "config.targets.*.key_secret",
+                )?;
+            }
         }
 
         #[cfg(feature = "channel-nostr")]

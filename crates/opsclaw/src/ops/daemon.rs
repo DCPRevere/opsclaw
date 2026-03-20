@@ -7,7 +7,6 @@ use tracing::{error, info};
 use zeroclaw::config::Config;
 
 use crate::ops_cli;
-use crate::security::OpsClawSecretStore;
 
 /// Start the OpsClaw daemon: spawns monitor loops, event watchers, periodic
 /// digest generation, and the full ZeroClaw runtime (gateway, channels,
@@ -48,14 +47,9 @@ pub async fn start_daemon(config: &Config, host: String, port: u16) -> Result<()
     // --- Watch (event streaming) for all targets ---
     {
         let cfg = config.clone();
-        let opsclaw_dir = cfg
-            .config_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let secrets = OpsClawSecretStore::new(opsclaw_dir);
         tasks.spawn(async move {
             info!("Starting event watch for all targets");
-            if let Err(e) = ops_cli::handle_watch(&cfg, &secrets, None).await {
+            if let Err(e) = ops_cli::handle_watch(&cfg, None).await {
                 error!("Watch task exited with error: {e:#}");
             }
         });

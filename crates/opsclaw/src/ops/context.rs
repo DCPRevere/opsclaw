@@ -1,31 +1,23 @@
-use crate::security::OpsClawSecretStore;
 use crate::tools::ssh_tool::{SshCommandRunner, TargetEntry};
 use anyhow::{bail, Context, Result};
-use std::path::Path;
 use zeroclaw::config::schema::{OpsClawAutonomy, TargetConfig, TargetType};
 use zeroclaw::config::Config;
 
-/// Central wiring struct that connects Config, secrets, and SSH tooling.
+/// Central wiring struct that connects Config and SSH tooling.
 pub struct OpsClawContext {
     pub config: Config,
-    pub secrets: OpsClawSecretStore,
 }
 
 impl OpsClawContext {
-    /// Load config and secrets from disk using default paths.
+    /// Load config from disk using default paths.
     pub async fn load() -> Result<Self> {
         let config = Box::pin(Config::load_or_init()).await?;
-        let opsclaw_dir = config
-            .config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."));
-        let secrets = OpsClawSecretStore::new(opsclaw_dir);
-        Ok(Self { config, secrets })
+        Ok(Self { config })
     }
 
-    /// Construct from pre-built config and secret store (useful for testing).
-    pub fn new(config: Config, secrets: OpsClawSecretStore) -> Self {
-        Self { config, secrets }
+    /// Construct from pre-built config (useful for testing).
+    pub fn new(config: Config) -> Self {
+        Self { config }
     }
 
     /// Return the configured targets (empty slice if none).
@@ -36,7 +28,7 @@ impl OpsClawContext {
         }
     }
 
-    /// Look up a target by name, resolve its SSH key from the secret store,
+    /// Look up a target by name, read the decrypted SSH key from config,
     /// and return a configured `SshCommandRunner` ready to execute commands.
     pub fn ssh_runner_for(&self, target_name: &str) -> Result<SshCommandRunner> {
         let target = self.find_target(target_name)?;
@@ -53,15 +45,10 @@ impl OpsClawContext {
             .user
             .as_deref()
             .context(format!("SSH target '{}' missing user", target_name))?;
-        let key_secret_name = target
+        let private_key_pem = target
             .key_secret
-            .as_deref()
+            .clone()
             .context(format!("SSH target '{}' missing key_secret", target_name))?;
-
-        let private_key_pem = self.secrets.get(key_secret_name)?.context(format!(
-            "secret '{}' not found in secret store",
-            key_secret_name
-        ))?;
 
         let entry = TargetEntry {
             name: target.name.clone(),

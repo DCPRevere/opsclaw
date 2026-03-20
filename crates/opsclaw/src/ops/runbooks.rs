@@ -360,8 +360,11 @@ pub async fn execute_runbook(
                                         execute_step(runner, &resolved, step).await
                                     {
                                         if retry_result.success {
-                                            let last =
-                                                execution.steps_completed.last_mut().unwrap();
+                                            let Some(last) =
+                                                execution.steps_completed.last_mut()
+                                            else {
+                                                break;
+                                            };
                                             *last = StepResult {
                                                 step_index: i,
                                                 description: step.description.clone(),

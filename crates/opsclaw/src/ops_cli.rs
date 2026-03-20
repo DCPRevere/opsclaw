@@ -1555,7 +1555,10 @@ pub async fn handle_digest(
         // Incidents
         let incidents = match IncidentIndex::load(&t.name) {
             Ok(index) => index.incidents().to_vec(),
-            Err(_) => Vec::new(),
+            Err(e) => {
+                tracing::warn!("digest: failed to load incidents for {}: {e:#}", t.name);
+                Vec::new()
+            }
         };
 
         // Baseline anomalies
@@ -1567,9 +1570,15 @@ pub async fn handle_digest(
                     let metrics = extract_metrics(&snapshot);
                     store.check_anomalies(&t.name, &metrics, 3.0)
                 }
-                Err(_) => Vec::new(),
+                Err(e) => {
+                    tracing::warn!("digest: failed to load baseline for {}: {e:#}", t.name);
+                    Vec::new()
+                }
             },
-            Err(_) => Vec::new(),
+            Err(e) => {
+                tracing::warn!("digest: failed to resolve baseline path for {}: {e:#}", t.name);
+                Vec::new()
+            }
         };
 
         // Derive health status from incidents and anomalies

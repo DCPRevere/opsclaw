@@ -17,6 +17,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::notifier::{AlertNotifier, InlineButton};
+use crate::openshell::{self, OpenShellContext};
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -138,6 +139,10 @@ fn approval_buttons(request_id: &str) -> Vec<InlineButton> {
 ///
 /// Returns `true` if the action was approved, `false` if rejected or timed out.
 ///
+/// When running inside an OpenShell sandbox, the policy engine is consulted
+/// first.  If the policy engine denies the action the function returns `false`
+/// immediately without sending a notification.
+///
 /// When the notifier supports buttons the message is sent with an inline
 /// keyboard. The function then polls the file-based approval state for a
 /// response until `timeout_secs` elapses.
@@ -146,7 +151,30 @@ pub async fn request_approval(
     target: &str,
     action: &str,
     timeout_secs: u64,
+    openshell_ctx: &OpenShellContext,
 ) -> Result<bool> {
+    // If OpenShell is active, check its policy engine first.
+    if openshell_ctx.is_active() {
+        let allowed =
+            openshell::policy::check_policy(openshell_ctx, action, target).await?;
+        if !allowed {
+            warn!("OpenShell policy denied: {action} on {target}");
+            return Ok(false);
+        }
+        // Emit audit event for the approved policy check.
+        openshell::audit::emit_audit_event(
+            openshell_ctx,
+            &openshell::audit::AuditEvent {
+                timestamp: Utc::now().to_rfc3339(),
+                action: action.to_owned(),
+                target: target.to_owned(),
+                outcome: "approved".into(),
+                details: serde_json::json!({"stage": "policy_check"}),
+            },
+        )
+        .await;
+    }
+
     let mut req = ApprovalRequest::new(target, action);
 
     let message = format!(
@@ -285,11 +313,20 @@ mod tests {
         }
     }
 
+    fn inactive_openshell() -> OpenShellContext {
+        OpenShellContext {
+            active: false,
+            sandbox_id: None,
+            policy_endpoint: None,
+            audit_endpoint: None,
+        }
+    }
+
     #[tokio::test]
     async fn request_approval_times_out_and_returns_false() {
         let notifier = RecordingNotifier::new();
 
-        let result = request_approval(&notifier, "web-1", "restart nginx", 1)
+        let result = request_approval(&notifier, "web-1", "restart nginx", 1, &inactive_openshell())
             .await
             .unwrap();
 
@@ -304,7 +341,7 @@ mod tests {
     async fn request_approval_sends_buttons() {
         let notifier = RecordingNotifier::new();
 
-        let _ = request_approval(&notifier, "web-1", "restart nginx", 1)
+        let _ = request_approval(&notifier, "web-1", "restart nginx", 1, &inactive_openshell())
             .await
             .unwrap();
 

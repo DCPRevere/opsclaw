@@ -35,6 +35,7 @@
     dead_code
 )]
 
+pub mod openshell;
 pub mod ops;
 pub mod ops_cli;
 pub mod skillforge;

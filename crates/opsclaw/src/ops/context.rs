@@ -1,3 +1,4 @@
+use crate::openshell::OpenShellContext;
 use crate::tools::ssh_tool::{SshCommandRunner, TargetEntry};
 use anyhow::{bail, Context, Result};
 use zeroclaw::config::schema::{OpsClawAutonomy, TargetConfig, TargetType};
@@ -6,18 +7,23 @@ use zeroclaw::config::Config;
 /// Central wiring struct that connects Config and SSH tooling.
 pub struct OpsClawContext {
     pub config: Config,
+    pub openshell: OpenShellContext,
 }
 
 impl OpsClawContext {
     /// Load config from disk using default paths.
     pub async fn load() -> Result<Self> {
         let config = Box::pin(Config::load_or_init()).await?;
-        Ok(Self { config })
+        let openshell = OpenShellContext::detect();
+        Ok(Self { config, openshell })
     }
 
     /// Construct from pre-built config (useful for testing).
     pub fn new(config: Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            openshell: OpenShellContext::detect(),
+        }
     }
 
     /// Return the configured targets (empty slice if none).

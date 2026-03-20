@@ -410,6 +410,7 @@ pub async fn handle_monitor(
     target: Option<String>,
     interval_secs: u64,
     once: bool,
+    openshell_ctx: &crate::openshell::OpenShellContext,
 ) -> Result<()> {
     let targets = resolve_targets(config, target.as_deref(), target.is_none())?;
 
@@ -721,6 +722,7 @@ pub async fn handle_monitor(
                                                 &t.name,
                                                 &action_desc,
                                                 120,
+                                                openshell_ctx,
                                             )
                                             .await
                                             .unwrap_or(false);

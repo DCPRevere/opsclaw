@@ -13,7 +13,12 @@ use crate::ops_cli;
 /// Start the OpsClaw daemon: spawns monitor loops, event watchers, periodic
 /// digest generation, and the full ZeroClaw runtime (gateway, channels,
 /// heartbeat, scheduler).
-pub async fn start_daemon(config: &Config, host: String, port: u16) -> Result<()> {
+pub async fn start_daemon(
+    config: &Config,
+    host: String,
+    port: u16,
+    openshell_ctx: &crate::openshell::OpenShellContext,
+) -> Result<()> {
     let targets = config.targets.as_deref().unwrap_or_default();
     if targets.is_empty() {
         info!("No targets configured — running ZeroClaw runtime only");
@@ -36,7 +41,8 @@ pub async fn start_daemon(config: &Config, host: String, port: u16) -> Result<()
     for t in targets {
         let target_name = t.name.clone();
         let cfg = config.clone();
-        tasks.spawn(run_monitor_with_backoff(target_name, cfg));
+        let os_ctx = openshell_ctx.clone();
+        tasks.spawn(run_monitor_with_backoff(target_name, cfg, os_ctx));
     }
 
     // --- Watch (event streaming) for all targets ---
@@ -90,14 +96,18 @@ fn backoff_delay(attempt: u32) -> Duration {
     }
 }
 
-async fn run_monitor_with_backoff(target: String, config: Config) {
+async fn run_monitor_with_backoff(
+    target: String,
+    config: Config,
+    openshell_ctx: crate::openshell::OpenShellContext,
+) {
     let mut consecutive_failures: u32 = 0;
     let mut window_start = Instant::now();
 
     loop {
         info!("Starting monitor loop for target '{target}'");
         if let Err(e) =
-            ops_cli::handle_monitor(&config, Some(target.clone()), 300, false).await
+            ops_cli::handle_monitor(&config, Some(target.clone()), 300, false, &openshell_ctx).await
         {
             error!("Monitor task for '{target}' exited with error: {e:#}");
         }

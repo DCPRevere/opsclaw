@@ -1305,6 +1305,15 @@ async fn main() -> Result<()> {
     let mut config = Box::pin(Config::load_or_init()).await?;
     config.apply_env_overrides();
     validate_opsclaw_config(&config, &cli.command)?;
+
+    // Detect OpenShell sandbox (optional — no-op when not present).
+    let openshell = opsclaw::openshell::OpenShellContext::detect();
+    if openshell.is_active() {
+        info!(
+            sandbox_id = ?openshell.sandbox_id,
+            "Running inside OpenShell sandbox"
+        );
+    }
     observability::runtime_trace::init_from_config(&config.observability, &config.workspace_dir);
     if config.security.otp.enabled {
         let config_dir = config
@@ -1498,7 +1507,7 @@ async fn main() -> Result<()> {
             } else {
                 info!("🧠 Starting OpsClaw Daemon on {host}:{port}");
             }
-            Box::pin(opsclaw::ops::daemon::start_daemon(&config, host, port)).await
+            Box::pin(opsclaw::ops::daemon::start_daemon(&config, host, port, &openshell)).await
         }
 
         Commands::Status { target, json } => {
@@ -1689,7 +1698,7 @@ async fn main() -> Result<()> {
             target,
             interval,
             once,
-        } => ops_cli::handle_monitor(&config, target, interval, once).await,
+        } => ops_cli::handle_monitor(&config, target, interval, once, &openshell).await,
 
         Commands::Probe { target, all, url } => {
             ops_cli::handle_probe(&config, target, all, url).await

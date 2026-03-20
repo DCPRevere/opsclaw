@@ -1,0 +1,15 @@
+[llm]
+provider = "anthropic"
+# key read from OPSCLAW_LLM_API_KEY env var
+
+[[targets]]
+name = "sandbox"
+host = "sandbox-sshd"
+port = 22
+user = "root"
+key_file = "/root/.ssh/sandbox_ed25519"
+autonomy = "Notify"
+
+[targets.data_sources]
+seq = { url = "http://sandbox-seq:80", api_key = "" }
+jaeger = { url = "http://sandbox-jaeger:16686" }

@@ -888,6 +888,25 @@ Examples:
         shell: CompletionShell,
     },
 
+    /// Generate a post-mortem report for an incident
+    #[command(long_about = "\
+Generate a structured post-mortem report from a recorded incident.
+
+Looks up the incident by ID across all targets, builds a timeline, \
+and renders the report as Markdown. Output goes to stdout by default \
+or to a file with --output.
+
+Examples:
+  opsclaw postmortem inc-42
+  opsclaw postmortem inc-42 -o report.md")]
+    Postmortem {
+        /// Incident ID to generate report for
+        incident_id: String,
+        /// Output file path (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
     /// Infrastructure helpers
     Infra {
         #[command(subcommand)]
@@ -1698,6 +1717,11 @@ async fn main() -> Result<()> {
             };
             ops_cli::handle_incidents(target, search_query, resolve_id, resolve_msg)
         }
+
+        Commands::Postmortem {
+            incident_id,
+            output,
+        } => ops_cli::handle_postmortem(&incident_id, output.as_deref()).await,
 
         Commands::Runbook { action } => ops_cli::handle_runbook(&config, action).await,
         Commands::Sources { target, all } => ops_cli::handle_sources(&config, target, all).await,

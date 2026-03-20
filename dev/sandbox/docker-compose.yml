@@ -1,0 +1,102 @@
+networks:
+  sandbox-net:
+    driver: bridge
+    internal: true
+
+services:
+  sandbox-sshd:
+    image: ubuntu:22.04
+    container_name: sandbox-sshd
+    networks:
+      - sandbox-net
+    ports:
+      - "2222:22"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./keys/sandbox_ed25519.pub:/root/.ssh/authorized_keys:ro
+    command: >
+      bash -c '
+        apt-get update &&
+        apt-get install -y openssh-server curl &&
+
+        # Install Docker CLI
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker.gpg &&
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable" > /etc/apt/sources.list.d/docker.list &&
+        apt-get update &&
+        apt-get install -y docker-ce-cli &&
+
+        # Create journalctl stub
+        cat > /usr/local/bin/journalctl <<STUB
+        #!/bin/bash
+        echo "{\"__REALTIME_TIMESTAMP\":\"$(date +%s%6N)\",\"_HOSTNAME\":\"sandbox-sshd\",\"SYSLOG_IDENTIFIER\":\"nginx\",\"MESSAGE\":\"stub: no real journal in container\",\"PRIORITY\":\"6\"}"
+        echo "{\"__REALTIME_TIMESTAMP\":\"$(date +%s%6N)\",\"_HOSTNAME\":\"sandbox-sshd\",\"SYSLOG_IDENTIFIER\":\"postgres\",\"MESSAGE\":\"stub: database system is ready to accept connections\",\"PRIORITY\":\"6\"}"
+        echo "{\"__REALTIME_TIMESTAMP\":\"$(date +%s%6N)\",\"_HOSTNAME\":\"sandbox-sshd\",\"SYSLOG_IDENTIFIER\":\"sshd\",\"MESSAGE\":\"stub: Server listening on 0.0.0.0 port 22\",\"PRIORITY\":\"6\"}"
+      STUB
+        chmod +x /usr/local/bin/journalctl &&
+
+        # Configure SSH: key auth only
+        mkdir -p /run/sshd /root/.ssh &&
+        chmod 700 /root/.ssh &&
+        chmod 600 /root/.ssh/authorized_keys &&
+        sed -i "s/#PasswordAuthentication yes/PasswordAuthentication no/" /etc/ssh/sshd_config &&
+        sed -i "s/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/" /etc/ssh/sshd_config &&
+
+        echo "SSH server starting..." &&
+        /usr/sbin/sshd -D
+      '
+
+  sandbox-app:
+    image: nginx:alpine
+    container_name: sandbox-app
+    networks:
+      - sandbox-net
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+
+  sandbox-db:
+    image: postgres:16-alpine
+    container_name: sandbox-db
+    networks:
+      - sandbox-net
+    environment:
+      POSTGRES_USER: sandbox
+      POSTGRES_PASSWORD: sandbox
+      POSTGRES_DB: sandbox
+
+  sandbox-seq:
+    image: datalust/seq:latest
+    container_name: sandbox-seq
+    networks:
+      - sandbox-net
+    environment:
+      ACCEPT_EULA: "Y"
+
+  sandbox-jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: sandbox-jaeger
+    networks:
+      - sandbox-net
+
+  opsclaw-remote:
+    build:
+      context: ../../
+      dockerfile: dev/sandbox/Dockerfile.opsclaw
+    container_name: opsclaw-remote
+    networks:
+      - sandbox-net
+    volumes:
+      - ./opsclaw-remote.toml:/etc/opsclaw/config.toml:ro
+      - ./keys/sandbox_ed25519:/root/.ssh/sandbox_ed25519:ro
+    command: ["sleep", "infinity"]
+
+  opsclaw-sidecar:
+    build:
+      context: ../../
+      dockerfile: dev/sandbox/Dockerfile.opsclaw
+    container_name: opsclaw-sidecar
+    networks:
+      - sandbox-net
+    volumes:
+      - ./opsclaw-sidecar.toml:/etc/opsclaw/config.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ["sleep", "infinity"]

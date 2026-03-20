@@ -881,6 +881,21 @@ Examples:
         #[arg(value_enum)]
         shell: CompletionShell,
     },
+
+    /// Infrastructure helpers
+    Infra {
+        #[command(subcommand)]
+        command: InfraCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum InfraCommands {
+    /// Provision an `opsclaw` SSH service account on a remote target
+    SetupUser {
+        /// Target name from config (uses SSH connection details)
+        target: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1686,6 +1701,12 @@ async fn main() -> Result<()> {
                     serde_json::to_string_pretty(&schema).expect("failed to serialize JSON Schema")
                 );
                 Ok(())
+            }
+        },
+
+        Commands::Infra { command } => match command {
+            InfraCommands::SetupUser { target } => {
+                ops_cli::handle_infra_setup_user(&config, &target).await
             }
         },
     }

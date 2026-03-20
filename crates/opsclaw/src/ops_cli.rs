@@ -1556,6 +1556,148 @@ fn resolve_targets<'a>(
 // Shutdown signal
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// infra setup-user
+// ---------------------------------------------------------------------------
+
+/// Provision a restricted `opsclaw` SSH service account on a remote target.
+///
+/// Connects to the target as the currently configured user, creates the
+/// `opsclaw` user, generates a local ed25519 keypair, uploads the public
+/// key, and configures a minimal sudoers policy.
+pub async fn handle_infra_setup_user(config: &Config, target_name: &str) -> Result<()> {
+    let targets = config.targets.as_deref().unwrap_or_default();
+    let target = targets
+        .iter()
+        .find(|t| t.name == target_name)
+        .with_context(|| format!("Target '{target_name}' not found in config"))?;
+
+    if target.target_type != TargetType::Ssh {
+        bail!("infra setup-user only works on SSH targets (target '{target_name}' is {:?})", target.target_type);
+    }
+
+    // Build a runner that bypasses dry-run (this is an explicit admin action).
+    let runner = make_runner_for_setup(target)?;
+
+    println!("Connecting to {target_name}…");
+
+    // 1. Create the opsclaw user (skip if it already exists).
+    println!("  Creating user 'opsclaw'…");
+    let out = runner
+        .run("id -u opsclaw >/dev/null 2>&1 || useradd -m -s /bin/bash opsclaw")
+        .await?;
+    if !out.stderr.is_empty() {
+        info!("useradd stderr: {}", out.stderr.trim());
+    }
+
+    // 2. Ensure .ssh directory exists with correct permissions.
+    println!("  Setting up /home/opsclaw/.ssh…");
+    runner
+        .run("mkdir -p /home/opsclaw/.ssh && chmod 700 /home/opsclaw/.ssh")
+        .await?;
+
+    // 3. Generate a local ed25519 keypair.
+    let keys_dir = opsclaw_dir()?.join("keys");
+    fs::create_dir_all(&keys_dir)
+        .with_context(|| format!("failed to create {}", keys_dir.display()))?;
+
+    let key_stem = format!("{target_name}_opsclaw_ed25519");
+    let private_key_path = keys_dir.join(&key_stem);
+    let public_key_path = keys_dir.join(format!("{key_stem}.pub"));
+
+    if private_key_path.exists() {
+        println!("  Keypair already exists at {}", private_key_path.display());
+    } else {
+        println!("  Generating ed25519 keypair…");
+        let status = std::process::Command::new("ssh-keygen")
+            .args([
+                "-t", "ed25519",
+                "-f", &private_key_path.to_string_lossy(),
+                "-N", "",
+                "-C", &format!("opsclaw@{target_name}"),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("failed to run ssh-keygen")?;
+        if !status.success() {
+            bail!("ssh-keygen exited with status {status}");
+        }
+    }
+
+    // 4. Upload the public key.
+    let pubkey = fs::read_to_string(&public_key_path)
+        .with_context(|| format!("failed to read {}", public_key_path.display()))?;
+    let pubkey = pubkey.trim();
+
+    println!("  Uploading public key…");
+    // Append if not already present, then fix ownership.
+    let upload_cmd = format!(
+        "grep -qF '{pubkey}' /home/opsclaw/.ssh/authorized_keys 2>/dev/null \
+         || echo '{pubkey}' >> /home/opsclaw/.ssh/authorized_keys"
+    );
+    runner.run(&upload_cmd).await?;
+
+    // 5. Set permissions.
+    println!("  Setting permissions…");
+    runner
+        .run("chown -R opsclaw:opsclaw /home/opsclaw/.ssh && chmod 600 /home/opsclaw/.ssh/authorized_keys")
+        .await?;
+
+    // 6. Add sudoers rule.
+    println!("  Configuring sudoers…");
+    runner
+        .run(
+            "echo 'opsclaw ALL=(ALL) NOPASSWD: /usr/bin/docker, /bin/journalctl, /bin/systemctl status *' \
+             > /etc/sudoers.d/opsclaw && chmod 440 /etc/sudoers.d/opsclaw",
+        )
+        .await?;
+
+    println!();
+    println!("Done! The opsclaw service account is ready on '{target_name}'.");
+    println!();
+    println!("Private key: {}", private_key_path.display());
+    println!();
+    println!("Update your target config to use the new account:");
+    println!("  [[targets]]");
+    println!("  name = \"{target_name}\"");
+    println!("  user = \"opsclaw\"");
+    println!(
+        "  key_file = \"~/.opsclaw/keys/{key_stem}\""
+    );
+
+    Ok(())
+}
+
+/// Build an [`SshCommandRunner`] for infra provisioning.
+///
+/// Uses `Auto` autonomy so that write commands are not blocked — this is an
+/// explicit administrator action, not an autonomous agent decision.
+fn make_runner_for_setup(target: &TargetConfig) -> Result<Box<dyn CommandRunner>> {
+    let host = target.host.clone().unwrap_or_default();
+    let user = target.user.clone().unwrap_or_default();
+    let port = target.port.unwrap_or(22);
+
+    let key_pem = target
+        .key_secret
+        .clone()
+        .context("SSH target requires key_secret (encrypted PEM in config)")?;
+
+    let entry = TargetEntry {
+        name: target.name.clone(),
+        host,
+        port,
+        user,
+        private_key_pem: key_pem,
+        autonomy: OpsClawAutonomy::Auto,
+    };
+
+    Ok(Box::new(SshCommandRunner::new(
+        entry,
+        Box::new(RealSshExecutor),
+    )))
+}
+
 /// Wait for SIGINT (Ctrl+C) or SIGTERM (Unix only).
 async fn shutdown_signal() {
     let ctrl_c = signal::ctrl_c();

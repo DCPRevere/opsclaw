@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn high_latency_threshold() {
-        assert!(3_000_000u64 > HIGH_LATENCY_US);
-        assert!(1_000_000u64 <= HIGH_LATENCY_US);
+        const _: () = assert!(3_000_000u64 > HIGH_LATENCY_US);
+        const _: () = assert!(1_000_000u64 <= HIGH_LATENCY_US);
     }
 }

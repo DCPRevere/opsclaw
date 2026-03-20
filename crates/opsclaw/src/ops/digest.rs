@@ -62,14 +62,17 @@ impl DigestReport {
         let target_digests: Vec<TargetDigest> = targets
             .into_iter()
             .map(|input| {
-                let count = input.incidents.len() as u32;
+                let count = u32::try_from(input.incidents.len()).unwrap_or(u32::MAX);
                 total_incidents += count;
 
-                let resolved = input
-                    .incidents
-                    .iter()
-                    .filter(|i| i.resolution.is_some())
-                    .count() as u32;
+                let resolved = u32::try_from(
+                    input
+                        .incidents
+                        .iter()
+                        .filter(|i| i.resolution.is_some())
+                        .count(),
+                )
+                .unwrap_or(u32::MAX);
                 auto_resolved += resolved;
                 pending += count - resolved;
 

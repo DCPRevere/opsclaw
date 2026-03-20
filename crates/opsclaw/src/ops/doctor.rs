@@ -578,7 +578,10 @@ mod tests {
 
     #[test]
     fn check_config_reports_missing_provider() {
-        let config = Config::default();
+        let config = Config {
+            default_provider: None,
+            ..Config::default()
+        };
         let mut results = Vec::new();
         check_config(&config, &mut results);
         let provider_item = results

@@ -73,6 +73,7 @@ pub mod tunnel;
 pub mod util;
 
 pub use config::Config;
+pub use security::OpsClawSecretStore;
 
 /// A2A (Agent-to-Agent) protocol subcommands
 #[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

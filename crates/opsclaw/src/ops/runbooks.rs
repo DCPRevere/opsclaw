@@ -324,7 +324,7 @@ pub async fn execute_runbook(
             }
         };
 
-        let elapsed = start.elapsed().as_millis() as u64;
+        let elapsed = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         match result {
             Ok(mut sr) => {
@@ -368,7 +368,7 @@ pub async fn execute_runbook(
                                                 command: Some(resolved),
                                                 output: retry_result.output,
                                                 success: true,
-                                                duration_ms: start.elapsed().as_millis() as u64,
+                                                duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                                             };
                                             retried = true;
                                             break;

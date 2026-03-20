@@ -1,5 +1,6 @@
 //! OpsClaw CLI command handlers: scan, monitor, watch.
 
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -124,10 +125,9 @@ fn make_runner(target: &TargetConfig) -> Result<Box<dyn CommandRunner>> {
             let dry_run_log = opsclaw_dir.join("dry-run.log");
             Ok(Box::new(DryRunCommandRunner::new(runner, dry_run_log)))
         }
-        // Approve: approval gate is at a higher level (Phase 3); pass through.
-        zeroclaw::config::schema::OpsClawAutonomy::Approve => Ok(runner),
-        // Auto: no restrictions.
-        zeroclaw::config::schema::OpsClawAutonomy::Auto => Ok(runner),
+        // Approve / Auto: pass through (approval gate is at a higher level).
+        zeroclaw::config::schema::OpsClawAutonomy::Approve
+        | zeroclaw::config::schema::OpsClawAutonomy::Auto => Ok(runner),
     }
 }
 
@@ -598,14 +598,9 @@ pub async fn handle_monitor(
                         }
 
                         // --- Runbook matching (requires a command runner) ---
-                        if runner.is_none() {
-                            tracing::info!(
-                                "Skipping runbook execution for Kubernetes target '{}'",
-                                t.name
-                            );
-                        } else if let Ok(store) = RunbookStore::default_dir().map(RunbookStore::new)
+                        if let Some(runner) = &runner {
+                            if let Ok(store) = RunbookStore::default_dir().map(RunbookStore::new)
                         {
-                            let runner = runner.as_ref().unwrap();
                             if let Ok(matched) = store.match_alerts(&hc.alerts, &t.name) {
                                 for rb in &matched {
                                     match t.autonomy {
@@ -718,6 +713,12 @@ pub async fn handle_monitor(
                                 }
                             }
                         }
+                        } else {
+                            tracing::info!(
+                                "Skipping runbook execution for Kubernetes target '{}'",
+                                t.name
+                            );
+                        }
                         // --- End runbook matching ---
 
                         // --- Escalation: create for unhealthy targets ---
@@ -768,8 +769,8 @@ pub async fn handle_monitor(
 
         // Wait for the next interval OR a shutdown signal.
         tokio::select! {
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)) => {}
-            _ = shutdown_signal() => {
+            () = tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)) => {}
+            () = shutdown_signal() => {
                 eprintln!("Shutting down OpsClaw...");
                 break;
             }
@@ -897,7 +898,7 @@ pub async fn handle_watch(
                     let _ = notifier.notify_text(target_str, &alert_msg).await;
                 }
             }
-            _ = shutdown_signal() => {
+            () = shutdown_signal() => {
                 eprintln!("Shutting down OpsClaw...");
                 break;
             }
@@ -1003,7 +1004,7 @@ async fn collect_error_logs_for_diagnosis(
         match log_sources::collect_logs(runner, source, 50, None).await {
             Ok(entries) => {
                 for entry in entries {
-                    if matches!(entry.level, Some(LogLevel::Error) | Some(LogLevel::Fatal)) {
+                    if matches!(entry.level, Some(LogLevel::Error | LogLevel::Fatal)) {
                         error_lines.push(log_sources::format_log_entry(&entry));
                     }
                 }
@@ -1090,15 +1091,15 @@ fn make_monitoring_agent(config: &Config) -> Option<MonitoringAgent> {
 /// Format a Telegram-friendly diagnosis alert combining health summary and LLM assessment.
 fn format_diagnosis_alert(hc: &HealthCheck, diag: &Diagnosis) -> String {
     let mut msg = format!("🔍 *Diagnosis* — {}\n", hc.target_name);
-    msg.push_str(&format!("Severity: *{}*\n\n", diag.severity));
+    let _ = write!(msg, "Severity: *{}*\n\n", diag.severity);
     msg.push_str(&diag.llm_assessment);
     if !diag.suggested_actions.is_empty() {
         msg.push_str("\n\n*Suggested actions:*\n");
         for action in &diag.suggested_actions {
-            msg.push_str(&format!("• {action}\n"));
+            let _ = writeln!(msg, "• {action}");
         }
     }
-    msg.push_str(&format!("\nIncident: `{}`", diag.incident_id));
+    let _ = write!(msg, "\nIncident: `{}`", diag.incident_id);
     msg
 }
 
@@ -1106,7 +1107,7 @@ fn format_diagnosis_alert(hc: &HealthCheck, diag: &Diagnosis) -> String {
 // baseline command
 // ---------------------------------------------------------------------------
 
-pub async fn handle_baseline(config: &Config, target: Option<String>, reset: bool) -> Result<()> {
+pub fn handle_baseline(config: &Config, target: Option<String>, reset: bool) -> Result<()> {
     let targets = config.targets.as_deref().unwrap_or_default();
 
     if targets.is_empty() {
@@ -1183,7 +1184,7 @@ pub fn handle_incidents(
     } else {
         let all = load_all_targets()?;
         let recent: Vec<_> = all.iter().rev().take(20).collect();
-        print_incidents(&recent.iter().copied().collect::<Vec<_>>());
+        print_incidents(&recent.to_vec());
     }
 
     Ok(())
@@ -1279,8 +1280,8 @@ pub async fn handle_runbook(config: &Config, action: RunbookActions) -> Result<(
                 return Ok(());
             }
             println!(
-                "{:<22} {:<25} {:<6} {}",
-                "ID", "NAME", "RUNS", "DESCRIPTION"
+                "{:<22} {:<25} {:<6} DESCRIPTION",
+                "ID", "NAME", "RUNS"
             );
             println!("{}", "-".repeat(80));
             for rb in &runbooks {
@@ -1413,7 +1414,7 @@ async fn process_escalation_action(
             );
             // Build message from the escalation record.
             if let Some(esc) = mgr.get(escalation_id) {
-                let msg = format_escalation_message(esc, &[next_contact.clone()], false);
+                let msg = format_escalation_message(esc, std::slice::from_ref(next_contact), false);
                 if let Err(e) = notifier.notify_text(&next_contact.name, &msg).await {
                     eprintln!("   Warning: escalation notification failed: {e}");
                 }

@@ -50,10 +50,15 @@ kube = { version = "0.98", default-features = false, features = ["client", "runt
 k8s-openapi = { version = "0.24", features = ["v1_32"] }
 
 [dev-dependencies]
+tower = "0.5"
 tempfile = "3.26"
 criterion = { version = "0.8", features = ["async_tokio"] }
 wiremock = "0.6"
 scopeguard = "1.2"
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [[test]]
 name = "component"

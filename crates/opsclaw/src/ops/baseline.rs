@@ -677,7 +677,7 @@ mod tests {
 
         // Record 10 observations with slight variance so stddev > 0.
         for i in 0..10 {
-            let val = 1.0 + (i % 3) as f64 * 0.1; // 1.0, 1.1, 1.2, 1.0, 1.1, ...
+            let val = 1.0 + f64::from(i % 3) * 0.1; // 1.0, 1.1, 1.2, 1.0, 1.1, ...
             store.record("myhost", &[("cpu.load_1".to_string(), val)]);
         }
 

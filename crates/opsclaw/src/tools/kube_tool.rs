@@ -9,6 +9,7 @@ use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Event, Namespace, Node, Pod, Service};
 use kube::api::{Api, ListParams, LogParams, Patch, PatchParams};
+use kube::config::KubeConfigOptions;
 use kube::Client;
 use serde::Serialize;
 
@@ -59,7 +60,7 @@ impl KubeClient {
             Some(path) => {
                 let kubeconfig = kube::config::Kubeconfig::read_from(path)
                     .context("failed to read kubeconfig")?;
-                kube::Config::from_custom_kubeconfig(kubeconfig, &Default::default())
+                kube::Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
                     .await
                     .context("failed to build kube config")?
             }
@@ -280,7 +281,7 @@ fn pod_to_snapshot(pod: Pod) -> K8sPod {
     let ready_count = container_statuses.iter().filter(|c| c.ready).count();
     let restarts: u32 = container_statuses
         .iter()
-        .map(|c| c.restart_count as u32)
+        .map(|c| c.restart_count.max(0).cast_unsigned())
         .sum();
 
     let waiting_reason = container_statuses.iter().find_map(|c| {
@@ -312,8 +313,8 @@ fn deployment_to_snapshot(dep: Deployment) -> K8sDeployment {
     let status = dep.status.unwrap_or_default();
     let desired = spec.replicas.unwrap_or(0);
     let ready_replicas = status.ready_replicas.unwrap_or(0);
-    let up_to_date = status.updated_replicas.unwrap_or(0) as u32;
-    let available = status.available_replicas.unwrap_or(0) as u32;
+    let up_to_date = status.updated_replicas.unwrap_or(0).max(0).cast_unsigned();
+    let available = status.available_replicas.unwrap_or(0).max(0).cast_unsigned();
 
     K8sDeployment {
         name: meta.name.unwrap_or_default(),

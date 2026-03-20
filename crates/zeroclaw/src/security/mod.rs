@@ -57,7 +57,7 @@ pub use otp::OtpValidator;
 pub use pairing::PairingGuard;
 pub use policy::{AutonomyLevel, SecurityPolicy};
 #[allow(unused_imports)]
-pub use secrets::SecretStore;
+pub use secrets::{OpsClawSecretStore, SecretStore};
 #[allow(unused_imports)]
 pub use traits::{NoopSandbox, Sandbox};
 // Nevis IAM integration

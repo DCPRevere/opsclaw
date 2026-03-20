@@ -180,7 +180,8 @@ pub fn parse_curl_output(
 
     let status_code: u16 = parts[0].parse().unwrap_or(0);
     let time_total: f64 = parts[1].parse().unwrap_or(0.0);
-    let latency_ms = (time_total * 1000.0) as u64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let latency_ms = (time_total * 1000.0).max(0.0) as u64;
 
     let expected = expected_status.unwrap_or(200);
     let success = status_code == expected;
@@ -212,7 +213,7 @@ pub fn parse_dig_output(stdout: &str, expected_ip: Option<&str>) -> (bool, Strin
 
     match expected_ip {
         Some(ip) => {
-            let found = lines.iter().any(|l| *l == ip);
+            let found = lines.contains(&ip);
             if found {
                 (
                     true,

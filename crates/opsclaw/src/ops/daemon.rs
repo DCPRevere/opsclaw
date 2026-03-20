@@ -80,7 +80,7 @@ pub async fn start_daemon(config: &Config, host: String, port: u16) -> Result<()
 
     // --- ZeroClaw runtime (gateway, channels, heartbeat, scheduler) ---
     // This blocks until shutdown signal is received.
-    let runtime_result = zeroclaw::daemon::run(config.clone(), host, port).await;
+    let runtime_result = Box::pin(zeroclaw::daemon::run(config.clone(), host, port)).await;
 
     // ZeroClaw runtime exited (shutdown signal received) — abort all OpsClaw tasks.
     tasks.abort_all();

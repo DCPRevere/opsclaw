@@ -14,7 +14,7 @@ pub struct OpsClawContext {
 impl OpsClawContext {
     /// Load config and secrets from disk using default paths.
     pub async fn load() -> Result<Self> {
-        let config = Config::load_or_init().await?;
+        let config = Box::pin(Config::load_or_init()).await?;
         let opsclaw_dir = config
             .config_path
             .parent()

@@ -482,7 +482,7 @@ pub fn parse_systemd_event(json: &str) -> anyhow::Result<SystemdEvent> {
         .unwrap_or_default();
 
     let secs = usec / 1_000_000;
-    let nsecs = ((usec % 1_000_000) * 1_000) as u32;
+    let nsecs = u32::try_from((usec % 1_000_000) * 1_000).unwrap_or(0);
     let timestamp = Utc
         .timestamp_opt(secs, nsecs)
         .single()
@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(ev.actor_name, "my-container");
         assert_eq!(ev.actor_id, "abc123def456");
         assert_eq!(ev.exit_code, Some(137));
-        assert_eq!(ev.timestamp.timestamp(), 1710000000);
+        assert_eq!(ev.timestamp.timestamp(), 1_710_000_000);
     }
 
     #[test]
@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(ev.unit, "nginx.service");
         assert_eq!(ev.priority, 3);
         assert_eq!(ev.message, "Failed with result 'exit-code'");
-        assert_eq!(ev.timestamp.timestamp(), 1710000000);
+        assert_eq!(ev.timestamp.timestamp(), 1_710_000_000);
     }
 
     #[test]

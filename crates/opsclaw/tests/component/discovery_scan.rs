@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use zeroclaw::tools::discovery::*;
+use opsclaw::tools::discovery::*;
 
 // ---------------------------------------------------------------------------
 // Mock runner

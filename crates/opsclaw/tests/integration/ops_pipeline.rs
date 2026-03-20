@@ -62,6 +62,7 @@ struct MockNotifier {
 }
 
 impl MockNotifier {
+    #[allow(clippy::type_complexity)]
     fn new() -> (
         Self,
         Arc<Mutex<Vec<String>>>,

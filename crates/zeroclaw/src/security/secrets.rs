@@ -280,6 +280,117 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
+/// Higher-level named-secret manager backed by [`SecretStore`] encryption.
+///
+/// Stores named key-value secrets in a `secrets.enc` file, one per line in the
+/// format `name=encrypted_value`. The file is written with restrictive
+/// permissions (0600 on Unix).
+#[derive(Debug, Clone)]
+pub struct OpsClawSecretStore {
+    dir: PathBuf,
+    store: SecretStore,
+}
+
+impl OpsClawSecretStore {
+    /// Create a new named-secret store rooted at the given directory.
+    /// Encryption is always enabled.
+    pub fn new(dir: &Path) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            store: SecretStore::new(dir, true),
+        }
+    }
+
+    fn secrets_path(&self) -> PathBuf {
+        self.dir.join("secrets.enc")
+    }
+
+    fn load_entries(&self) -> Result<Vec<(String, String)>> {
+        let path = self.secrets_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = fs::read_to_string(&path).context("Failed to read secrets.enc")?;
+        let mut entries = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((name, value)) = line.split_once('=') {
+                entries.push((name.to_string(), value.to_string()));
+            }
+        }
+        Ok(entries)
+    }
+
+    fn save_entries(&self, entries: &[(String, String)]) -> Result<()> {
+        let path = self.secrets_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut content = String::new();
+        for (name, value) in entries {
+            content.push_str(name);
+            content.push('=');
+            content.push_str(value);
+            content.push('\n');
+        }
+        fs::write(&path, &content).context("Failed to write secrets.enc")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .context("Failed to set secrets.enc permissions")?;
+        }
+
+        Ok(())
+    }
+
+    /// Store a named secret (overwrites if it already exists).
+    pub fn set(&self, name: &str, value: &str) -> Result<()> {
+        let encrypted = self.store.encrypt(value)?;
+        let mut entries = self.load_entries()?;
+        if let Some(entry) = entries.iter_mut().find(|(n, _)| n == name) {
+            entry.1 = encrypted;
+        } else {
+            entries.push((name.to_string(), encrypted));
+        }
+        self.save_entries(&entries)
+    }
+
+    /// Retrieve a secret by name. Returns `None` if not found.
+    pub fn get(&self, name: &str) -> Result<Option<String>> {
+        let entries = self.load_entries()?;
+        for (n, v) in &entries {
+            if n == name {
+                let decrypted = self.store.decrypt(v)?;
+                return Ok(Some(decrypted));
+            }
+        }
+        Ok(None)
+    }
+
+    /// List all stored secret names.
+    pub fn list(&self) -> Result<Vec<String>> {
+        let entries = self.load_entries()?;
+        Ok(entries.into_iter().map(|(name, _)| name).collect())
+    }
+
+    /// Remove a secret by name. Returns `true` if it existed.
+    pub fn remove(&self, name: &str) -> Result<bool> {
+        let entries = self.load_entries()?;
+        let original_len = entries.len();
+        let filtered: Vec<_> = entries.into_iter().filter(|(n, _)| n != name).collect();
+        let removed = filtered.len() < original_len;
+        if removed {
+            self.save_entries(&filtered)?;
+        }
+        Ok(removed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

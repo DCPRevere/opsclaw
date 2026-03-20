@@ -29,7 +29,8 @@ struct HitsEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct Hit {
-    _source: HitSource,
+    #[serde(rename = "_source")]
+    source: HitSource,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,7 +85,7 @@ pub async fn fetch_error_logs(cfg: &ElasticsearchConfig) -> Result<Vec<LogEntry>
         .hits
         .into_iter()
         .map(|hit| {
-            let src = hit._source;
+            let src = hit.source;
 
             let timestamp = src
                 .timestamp
@@ -223,7 +224,7 @@ mod tests {
         let resp: SearchResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.hits.hits.len(), 1);
         assert_eq!(
-            resp.hits.hits[0]._source.message.as_deref(),
+            resp.hits.hits[0].source.message.as_deref(),
             Some("connection refused")
         );
     }
@@ -241,9 +242,9 @@ mod tests {
             }
         }"#;
         let hit: Hit = serde_json::from_str(json).unwrap();
-        assert_eq!(hit._source.level.as_deref(), Some("ERROR"));
+        assert_eq!(hit.source.level.as_deref(), Some("ERROR"));
         assert_eq!(
-            hit._source.error_message.as_deref(),
+            hit.source.error_message.as_deref(),
             Some("timeout after 30s")
         );
     }

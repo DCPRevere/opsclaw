@@ -4,7 +4,10 @@
 //! - `GET /.well-known/agent-card.json` — auto-generated agent card
 //! - `POST /a2a` — JSON-RPC 2.0 endpoint for task lifecycle
 
-use super::a2a_types::*;
+use super::a2a_types::{
+    A2aRequest, A2aResponse, A2A_TASK_NOT_FOUND, A2A_UNAUTHORIZED, AgentAuth, AgentCard,
+    AgentSkill, JSONRPC_INVALID_PARAMS, JSONRPC_METHOD_NOT_FOUND, Task, TaskStatus,
+};
 use anyhow::{Context, Result};
 use axum::{
     extract::State,
@@ -105,12 +108,8 @@ async fn handle_a2a_rpc(
         _ => A2aResponse::error(&req.id, JSONRPC_METHOD_NOT_FOUND, "method not found"),
     };
 
-    let status = if resp.error.is_some() {
-        StatusCode::OK // JSON-RPC errors are still 200
-    } else {
-        StatusCode::OK
-    };
-    (status, Json(resp))
+    // JSON-RPC errors are still HTTP 200
+    (StatusCode::OK, Json(resp))
 }
 
 fn handle_tasks_send(state: &A2aState, req: &A2aRequest) -> A2aResponse {
@@ -185,6 +184,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+    use zeroclaw::config::schema::A2aAgentSkill;
 
     fn test_config() -> A2aServerConfig {
         A2aServerConfig {
@@ -194,7 +194,7 @@ mod tests {
             token: "test-token".into(),
             agent_name: "TestAgent".into(),
             agent_description: "A test agent".into(),
-            skills: vec![AgentSkill {
+            skills: vec![A2aAgentSkill {
                 name: "echo".into(),
                 description: "Echoes input".into(),
             }],
@@ -219,7 +219,7 @@ mod tests {
             .uri("/.well-known/agent-card.json")
             .body(Body::empty())
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let resp: axum::http::Response<Body> = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
         let body = axum::body::to_bytes(resp.into_body(), 1_048_576)
@@ -241,7 +241,7 @@ mod tests {
             .header("Content-Type", "application/json")
             .body(Body::from(serde_json::to_string(&rpc).unwrap()))
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let resp: axum::http::Response<Body> = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -265,7 +265,7 @@ mod tests {
             .header("Authorization", "Bearer test-token")
             .body(Body::from(serde_json::to_string(&rpc).unwrap()))
             .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
+        let resp: axum::http::Response<Body> = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1_048_576)
             .await
@@ -285,7 +285,7 @@ mod tests {
             .header("Authorization", "Bearer test-token")
             .body(Body::from(serde_json::to_string(&rpc).unwrap()))
             .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
+        let resp: axum::http::Response<Body> = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1_048_576)
             .await
@@ -307,7 +307,7 @@ mod tests {
             .header("Authorization", "Bearer test-token")
             .body(Body::from(serde_json::to_string(&rpc).unwrap()))
             .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
+        let resp: axum::http::Response<Body> = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1_048_576)
             .await
@@ -325,7 +325,7 @@ mod tests {
             .header("Authorization", "Bearer test-token")
             .body(Body::from(serde_json::to_string(&rpc).unwrap()))
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let resp: axum::http::Response<Body> = app.oneshot(req).await.unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 1_048_576)
             .await
             .unwrap();
@@ -345,7 +345,7 @@ mod tests {
             .header("Authorization", "Bearer test-token")
             .body(Body::from(serde_json::to_string(&rpc).unwrap()))
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let resp: axum::http::Response<Body> = app.oneshot(req).await.unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 1_048_576)
             .await
             .unwrap();
@@ -369,7 +369,7 @@ mod tests {
             .header("Authorization", "Bearer test-token")
             .body(Body::from(serde_json::to_string(&rpc).unwrap()))
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let resp: axum::http::Response<Body> = app.oneshot(req).await.unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 1_048_576)
             .await
             .unwrap();

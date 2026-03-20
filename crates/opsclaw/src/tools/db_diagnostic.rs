@@ -3,6 +3,8 @@
 //! Runs queries via the existing SSH [`CommandRunner`] abstraction —
 //! no direct database driver dependencies are needed.
 
+use std::fmt::Write;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -126,51 +128,54 @@ pub fn diagnostics_to_markdown(snapshots: &[DbDiagnosticSnapshot]) -> String {
     }
     let mut md = String::from("## Database Diagnostics\n\n");
     for snap in snapshots {
-        md.push_str(&format!(
-            "### {} ({})\n\n",
+        let _ = writeln!(
+            md,
+            "### {} ({})\n",
             snap.name,
             type_label(&snap.db_type)
-        ));
+        );
         match &snap.metrics {
             DbMetrics::Postgres(pg) => {
                 if let Some(count) = pg.connection_count {
-                    md.push_str(&format!("- **Connections**: {count}\n"));
+                    let _ = writeln!(md, "- **Connections**: {count}");
                 }
                 if let Some(size) = pg.database_size_bytes {
-                    md.push_str(&format!("- **Database size**: {} bytes\n", size));
+                    let _ = writeln!(md, "- **Database size**: {} bytes", size);
                 }
                 if let Some(lsn) = &pg.replication_lag_lsn {
-                    md.push_str(&format!("- **Replication LSN**: {lsn}\n"));
+                    let _ = writeln!(md, "- **Replication LSN**: {lsn}");
                 }
                 if !pg.active_queries.is_empty() {
-                    md.push_str(&format!(
-                        "- **Active queries**: {}\n\n",
+                    let _ = writeln!(
+                        md,
+                        "- **Active queries**: {}\n",
                         pg.active_queries.len()
-                    ));
+                    );
                     md.push_str("| PID | State | Started | Query |\n");
                     md.push_str("|-----|-------|---------|-------|\n");
                     for q in &pg.active_queries {
                         let short_query = truncate(&q.query, 80);
-                        md.push_str(&format!(
-                            "| {} | {} | {} | {} |\n",
+                        let _ = writeln!(
+                            md,
+                            "| {} | {} | {} | {} |",
                             q.pid, q.state, q.query_start, short_query
-                        ));
+                        );
                     }
                     md.push('\n');
                 }
             }
             DbMetrics::Redis(r) => {
                 if let Some(clients) = r.connected_clients {
-                    md.push_str(&format!("- **Connected clients**: {clients}\n"));
+                    let _ = writeln!(md, "- **Connected clients**: {clients}");
                 }
                 if let Some(mem) = &r.used_memory_human {
-                    md.push_str(&format!("- **Used memory**: {mem}\n"));
+                    let _ = writeln!(md, "- **Used memory**: {mem}");
                 }
                 if let Some(hits) = r.keyspace_hits {
                     let misses = r.keyspace_misses.unwrap_or(0);
-                    md.push_str(&format!("- **Keyspace hits/misses**: {hits}/{misses}"));
+                    let _ = write!(md, "- **Keyspace hits/misses**: {hits}/{misses}");
                     if let Some(rate) = r.hit_rate_pct {
-                        md.push_str(&format!(" ({rate:.1}% hit rate)"));
+                        let _ = write!(md, " ({rate:.1}% hit rate)");
                     }
                     md.push('\n');
                 }
@@ -230,7 +235,7 @@ async fn run_postgres_diagnostics(
     if let Ok(out) = runner.run(&cmd).await {
         if out.exit_code == 0 {
             let val = out.stdout.trim();
-            if !val.is_empty() && val != "" {
+            if !val.is_empty() {
                 metrics.replication_lag_lsn = Some(val.to_string());
             }
         }
@@ -457,7 +462,7 @@ keyspace_misses:1000\r
     async fn test_fetch_postgres_diagnostics() {
         let runner = MockRunner::new();
         runner.add("pg_stat_activity;", "42\n");
-        runner.add("WHERE state = 'active'", "1|active|2026-03-19|SELECT 1\n");
+        runner.add("WHERE state =", "1|active|2026-03-19|SELECT 1\n");
         runner.add("pg_last_wal_replay_lsn", "0/1234ABCD\n");
         runner.add("pg_database_size", "5000000\n");
 

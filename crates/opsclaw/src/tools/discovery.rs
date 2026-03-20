@@ -372,7 +372,7 @@ pub fn parse_k8s_pods_json(raw: &str) -> Vec<K8sPod> {
                     .count();
                 let restarts: u32 = cs
                     .iter()
-                    .map(|c| c["restartCount"].as_u64().unwrap_or(0) as u32)
+                    .map(|c| u32::try_from(c["restartCount"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX))
                     .sum();
                 // Detect waiting reason like CrashLoopBackOff
                 let waiting_reason = cs.iter().find_map(|c| {
@@ -417,10 +417,10 @@ pub fn parse_k8s_deployments_json(raw: &str) -> Vec<K8sDeployment> {
             let metadata = &item["metadata"];
             let status = &item["status"];
             let spec = &item["spec"];
-            let desired = spec["replicas"].as_u64().unwrap_or(0) as u32;
-            let available = status["availableReplicas"].as_u64().unwrap_or(0) as u32;
-            let up_to_date = status["updatedReplicas"].as_u64().unwrap_or(0) as u32;
-            let ready_replicas = status["readyReplicas"].as_u64().unwrap_or(0) as u32;
+            let desired = u32::try_from(spec["replicas"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
+            let available = u32::try_from(status["availableReplicas"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
+            let up_to_date = u32::try_from(status["updatedReplicas"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
+            let ready_replicas = u32::try_from(status["readyReplicas"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
             K8sDeployment {
                 name: metadata["name"].as_str().unwrap_or("").to_string(),
                 namespace: metadata["namespace"].as_str().unwrap_or("").to_string(),
@@ -798,10 +798,10 @@ pub fn snapshot_to_markdown(snap: &TargetSnapshot) -> String {
             md.push_str("| Name | Status | Roles | Version |\n");
             md.push_str("|---|---|---|---|\n");
             for n in &k8s.nodes {
-                let highlight = if n.status != "Ready" {
-                    " **UNHEALTHY**"
-                } else {
+                let highlight = if n.status == "Ready" {
                     ""
+                } else {
+                    " **UNHEALTHY**"
                 };
                 let _ = writeln!(
                     md,

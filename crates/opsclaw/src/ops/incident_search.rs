@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -154,21 +155,23 @@ impl IncidentIndex {
 
         for inc in matches {
             let date = inc.timestamp.format("%Y-%m-%d");
-            out.push_str(&format!(
-                "\n### {} (severity: {})\n",
+            let _ = writeln!(
+                out,
+                "\n### {} (severity: {})",
                 date,
                 inc.severity.to_lowercase()
-            ));
-            out.push_str(&format!("Symptoms: {}\n", inc.symptoms));
-            out.push_str(&format!("Diagnosis: {}\n", inc.llm_assessment));
+            );
+            let _ = writeln!(out, "Symptoms: {}", inc.symptoms);
+            let _ = writeln!(out, "Diagnosis: {}", inc.llm_assessment);
             if !inc.suggested_actions.is_empty() {
-                out.push_str(&format!(
-                    "Actions taken: {}\n",
+                let _ = writeln!(
+                    out,
+                    "Actions taken: {}",
                     inc.suggested_actions.join(", ")
-                ));
+                );
             }
             if let Some(ref resolution) = inc.resolution {
-                out.push_str(&format!("Resolution: {}\n", resolution));
+                let _ = writeln!(out, "Resolution: {}", resolution);
             }
         }
 
@@ -486,7 +489,7 @@ mod tests {
         }];
 
         let results = index.search_similar(&alerts, 3);
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
         // The one with matching category text should rank first.
         assert_eq!(results[0].incident_id, "inc-cat");
     }

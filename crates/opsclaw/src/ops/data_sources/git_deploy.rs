@@ -9,6 +9,8 @@
 //! the source is silently skipped. When configured, it needs only path list —
 //! no API keys, tokens, or external services.
 
+use std::fmt::Write;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -75,7 +77,6 @@ pub async fn fetch_git_deploy_snapshot(
             Ok(commits) => all_commits.extend(commits),
             Err(e) => {
                 tracing::warn!("git log for {path} failed: {e:#}");
-                continue;
             }
         }
     }
@@ -99,10 +100,11 @@ pub fn format_as_markdown(snap: &GitDeploySnapshot, window_hours: u64) -> String
     if !snap.correlations.is_empty() {
         md.push_str("### Commits correlated with container restarts\n\n");
         for c in &snap.correlations {
-            md.push_str(&format!(
-                "- `{}` {} (repo: {}) — container **{}** started {}s later\n",
+            let _ = writeln!(
+                md,
+                "- `{}` {} (repo: {}) — container **{}** started {}s later",
                 c.commit.hash, c.commit.message, c.commit.repo_path, c.container, c.lag_seconds,
-            ));
+            );
         }
         md.push('\n');
     }
@@ -110,13 +112,14 @@ pub fn format_as_markdown(snap: &GitDeploySnapshot, window_hours: u64) -> String
     if !snap.recent_commits.is_empty() {
         md.push_str("### Recent commits\n\n");
         for c in &snap.recent_commits {
-            md.push_str(&format!(
-                "- `{}` {} ({}, {})\n",
+            let _ = writeln!(
+                md,
+                "- `{}` {} ({}, {})",
                 c.hash,
                 c.message,
                 c.repo_path,
                 c.date.format("%Y-%m-%dT%H:%M:%SZ"),
-            ));
+            );
         }
     }
 
@@ -265,13 +268,13 @@ def456abc789012345678901234567890abcdef 2024-03-17T11:30:00+00:00 feat: add heal
     #[test]
     fn parse_git_date_rfc3339() {
         let dt = parse_git_date("2024-03-17T12:00:00+00:00").unwrap();
-        assert_eq!(dt.timestamp(), 1710676800);
+        assert_eq!(dt.timestamp(), 1_710_676_800);
     }
 
     #[test]
     fn parse_git_date_naive() {
         let dt = parse_git_date("2024-03-17T12:00:00").unwrap();
-        assert_eq!(dt.timestamp(), 1710676800);
+        assert_eq!(dt.timestamp(), 1_710_676_800);
     }
 
     #[test]

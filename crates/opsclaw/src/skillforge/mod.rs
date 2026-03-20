@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use self::evaluate::{EvalResult, Evaluator, Recommendation};
 use self::integrate::Integrator;
-use self::scout::{GitHubScout, Scout, ScoutResult, ScoutSource};
+use self::scout::{ClawHubScout, GitHubScout, HuggingFaceScout, Scout, ScoutResult, ScoutSource};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -151,11 +151,29 @@ impl SkillForge {
                         }
                     }
                 }
-                ScoutSource::ClawHub | ScoutSource::HuggingFace => {
-                    info!(
-                        source = src.as_str(),
-                        "Source not yet implemented — skipping"
-                    );
+                ScoutSource::ClawHub => {
+                    let scout = ClawHubScout::new();
+                    match scout.discover().await {
+                        Ok(mut found) => {
+                            info!(count = found.len(), "ClawHub scout returned candidates");
+                            candidates.append(&mut found);
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "ClawHub scout failed, continuing with other sources");
+                        }
+                    }
+                }
+                ScoutSource::HuggingFace => {
+                    let scout = HuggingFaceScout::new();
+                    match scout.discover().await {
+                        Ok(mut found) => {
+                            info!(count = found.len(), "HuggingFace scout returned candidates");
+                            candidates.append(&mut found);
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "HuggingFace scout failed, continuing with other sources");
+                        }
+                    }
                 }
             }
         }

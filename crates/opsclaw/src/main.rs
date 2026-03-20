@@ -623,6 +623,12 @@ Examples:
         config_command: ConfigCommands,
     },
 
+    /// View and edit target context files
+    Context {
+        #[command(subcommand)]
+        context_command: ContextCommands,
+    },
+
     /// Run a discovery scan on a target host
     #[command(long_about = "\
 Run a discovery scan on one or all configured targets.
@@ -905,6 +911,15 @@ use opsclaw::ops_cli::RunbookActions;
 enum ConfigCommands {
     /// Dump the full configuration JSON Schema to stdout
     Schema,
+}
+
+#[derive(Subcommand, Debug)]
+enum ContextCommands {
+    /// Open a target's context file in $EDITOR for editing
+    Edit {
+        /// Target name (from config [[targets]])
+        target: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1686,6 +1701,12 @@ async fn main() -> Result<()> {
                     serde_json::to_string_pretty(&schema).expect("failed to serialize JSON Schema")
                 );
                 Ok(())
+            }
+        },
+
+        Commands::Context { context_command } => match context_command {
+            ContextCommands::Edit { target } => {
+                ops_cli::handle_context_edit(&config, &target).await
             }
         },
     }

@@ -8,6 +8,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use zeroclaw::config::schema::{Config, TargetType};
 
+use super::data_sources::DataSourcesConfig;
+
 // ── Result types ────────────────────────────────────────────────
 
 /// Severity of a single diagnostic check.
@@ -87,6 +89,7 @@ pub async fn diagnose(config: &Config) -> DoctorReport {
     check_llm_provider(config, &mut results);
     check_disk_space(config, &mut results);
     check_data_directories(config, &mut results);
+    check_data_sources(config, &mut results).await;
 
     let ok = results
         .iter()
@@ -534,6 +537,146 @@ fn check_data_directories(config: &Config, results: &mut Vec<CheckResult>) {
     }
 }
 
+// ── Data source connectivity ─────────────────────────────────
+
+async fn check_data_sources(config: &Config, results: &mut Vec<CheckResult>) {
+    let cat = "data_sources";
+
+    let targets = match config.targets.as_ref() {
+        Some(t) => t,
+        None => return,
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            results.push(CheckResult::error(
+                cat,
+                format!("could not create HTTP client: {e}"),
+            ));
+            return;
+        }
+    };
+
+    for target in targets {
+        let ds_config: DataSourcesConfig = target
+            .data_sources
+            .as_ref()
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        if let Some(ref seq) = ds_config.seq {
+            let mut url = format!("{}/api/events?count=1", seq.url.trim_end_matches('/'));
+            if let Some(ref key) = seq.api_key {
+                if !key.is_empty() {
+                    let _ = std::fmt::Write::write_fmt(
+                        &mut url,
+                        format_args!("&apiKey={key}"),
+                    );
+                }
+            }
+            check_http_endpoint(&client, cat, "Seq", &seq.url, &url, &target.name, results)
+                .await;
+        }
+
+        if let Some(ref jaeger) = ds_config.jaeger {
+            let url = format!("{}/api/services", jaeger.url.trim_end_matches('/'));
+            check_http_endpoint(
+                &client,
+                cat,
+                "Jaeger",
+                &jaeger.url,
+                &url,
+                &target.name,
+                results,
+            )
+            .await;
+        }
+
+        if let Some(ref prom) = ds_config.prometheus {
+            let url = format!(
+                "{}/api/v1/query?query=up",
+                prom.url.trim_end_matches('/')
+            );
+            check_http_endpoint(
+                &client,
+                cat,
+                "Prometheus",
+                &prom.url,
+                &url,
+                &target.name,
+                results,
+            )
+            .await;
+        }
+
+        if let Some(ref es) = ds_config.elasticsearch {
+            let url = format!("{}/_cluster/health", es.url.trim_end_matches('/'));
+            check_http_endpoint(
+                &client,
+                cat,
+                "Elasticsearch",
+                &es.url,
+                &url,
+                &target.name,
+                results,
+            )
+            .await;
+        }
+    }
+}
+
+async fn check_http_endpoint(
+    client: &reqwest::Client,
+    cat: &str,
+    source_name: &str,
+    base_url: &str,
+    check_url: &str,
+    target_name: &str,
+    results: &mut Vec<CheckResult>,
+) {
+    match client.get(check_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            results.push(CheckResult::ok(
+                cat,
+                format!(
+                    "{source_name} at {base_url} is reachable (target \"{}\")",
+                    target_name
+                ),
+            ));
+        }
+        Ok(resp) => {
+            results.push(CheckResult::warn(
+                cat,
+                format!(
+                    "{source_name} at {base_url} returned {} (target \"{}\")",
+                    resp.status(),
+                    target_name
+                ),
+            ));
+        }
+        Err(e) => {
+            let reason = if e.is_timeout() {
+                "timed out (5s)".to_string()
+            } else if e.is_connect() {
+                "connection refused".to_string()
+            } else {
+                format!("{e}")
+            };
+            results.push(CheckResult::error(
+                cat,
+                format!(
+                    "{source_name} at {base_url} — {reason} (target \"{}\")",
+                    target_name
+                ),
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,5 +754,54 @@ mod tests {
             .find(|r| r.message.contains("no notification config"));
         assert!(item.is_some());
         assert_eq!(item.unwrap().severity, Severity::Warn);
+    }
+
+    #[tokio::test]
+    async fn check_data_sources_skips_when_no_targets() {
+        let config = Config::default();
+        let mut results = Vec::new();
+        check_data_sources(&config, &mut results).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_data_sources_reports_unreachable() {
+        use zeroclaw::config::schema::{OpsClawAutonomy, TargetConfig};
+
+        let ds_json = serde_json::json!({
+            "seq": { "url": "http://127.0.0.1:19876" },
+            "jaeger": { "url": "http://127.0.0.1:19877" },
+        });
+
+        let config = Config {
+            targets: Some(vec![TargetConfig {
+                name: "test-target".into(),
+                target_type: TargetType::Local,
+                host: None,
+                port: None,
+                user: None,
+                key_secret: None,
+                autonomy: OpsClawAutonomy::default(),
+                context_file: None,
+                probes: None,
+                data_sources: Some(ds_json),
+                escalation: None,
+                databases: None,
+                kubeconfig: None,
+                namespace: None,
+            }]),
+            ..Config::default()
+        };
+
+        let mut results = Vec::new();
+        check_data_sources(&config, &mut results).await;
+
+        assert_eq!(results.len(), 2);
+        for r in &results {
+            assert_eq!(r.category, "data_sources");
+            assert_eq!(r.severity, Severity::Error);
+        }
+        assert!(results[0].message.contains("Seq"));
+        assert!(results[1].message.contains("Jaeger"));
     }
 }

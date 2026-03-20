@@ -887,6 +887,21 @@ Examples:
         #[arg(value_enum)]
         shell: CompletionShell,
     },
+
+    /// Infrastructure helpers
+    Infra {
+        #[command(subcommand)]
+        command: InfraCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum InfraCommands {
+    /// Provision an `opsclaw` SSH service account on a remote target
+    SetupUser {
+        /// Target name from config (uses SSH connection details)
+        target: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1707,6 +1722,12 @@ async fn main() -> Result<()> {
         Commands::Context { context_command } => match context_command {
             ContextCommands::Edit { target } => {
                 ops_cli::handle_context_edit(&config, &target).await
+            }
+        },
+
+        Commands::Infra { command } => match command {
+            InfraCommands::SetupUser { target } => {
+                ops_cli::handle_infra_setup_user(&config, &target).await
             }
         },
     }

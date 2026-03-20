@@ -221,7 +221,6 @@ use zeroclaw::peripherals;
 use zeroclaw::providers;
 use zeroclaw::security;
 use zeroclaw::service;
-mod skillforge;
 use zeroclaw::skills;
 
 use config::Config;
@@ -1657,7 +1656,12 @@ async fn main() -> Result<()> {
             integration_command,
         } => integrations::handle_command(integration_command, &config),
 
-        Commands::Skills { skill_command } => skills::handle_command(skill_command, &config),
+        Commands::Skills { skill_command } => match skill_command {
+            SkillCommands::Forge { dry_run } => {
+                ops_cli::handle_skills_forge(&config, dry_run).await
+            }
+            other => skills::handle_command(other, &config),
+        },
 
         Commands::Migrate { migrate_command } => {
             migration::handle_command(migrate_command, &config).await

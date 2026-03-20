@@ -304,6 +304,12 @@ pub enum SkillCommands {
         /// Skill name to remove
         name: String,
     },
+    /// Run a SkillForge discovery pass
+    Forge {
+        /// Preview what would be discovered without integrating
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// OpsClaw secret management subcommands

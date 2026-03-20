@@ -1835,3 +1835,57 @@ async fn shutdown_signal() {
         ctrl_c.await.ok();
     }
 }
+
+// ---------------------------------------------------------------------------
+// SkillForge
+// ---------------------------------------------------------------------------
+
+pub async fn handle_skills_forge(config: &Config, dry_run: bool) -> Result<()> {
+    use crate::skillforge::{SkillForge, SkillForgeConfig};
+    use crate::skillforge::evaluate::Recommendation;
+
+    let mut forge_cfg = SkillForgeConfig::default();
+    // Enable the pipeline for this CLI-driven run.
+    forge_cfg.enabled = true;
+    // In dry-run mode, disable auto-integration so nothing is written.
+    if dry_run {
+        forge_cfg.auto_integrate = false;
+    }
+    // Resolve output directory relative to the workspace.
+    forge_cfg.output_dir = config
+        .workspace_dir
+        .join("skills")
+        .to_string_lossy()
+        .into_owned();
+
+    let forge = SkillForge::new(forge_cfg);
+    let report = forge.forge().await?;
+
+    println!("SkillForge discovery complete");
+    println!("  Discovered : {}", report.discovered);
+    println!("  Evaluated  : {}", report.evaluated);
+    if dry_run {
+        println!("  (dry-run — no skills were integrated)");
+    } else {
+        println!("  Integrated : {}", report.auto_integrated);
+    }
+    println!("  Review     : {}", report.manual_review);
+    println!("  Skipped    : {}", report.skipped);
+
+    if !report.results.is_empty() {
+        println!();
+        for res in &report.results {
+            let tag = match res.recommendation {
+                Recommendation::Auto => "AUTO",
+                Recommendation::Manual => "REVIEW",
+                Recommendation::Skip => "SKIP",
+            };
+            println!(
+                "  [{tag:^6}] {} (score: {:.2}) — {}",
+                res.candidate.name, res.total_score, res.candidate.url,
+            );
+        }
+    }
+
+    Ok(())
+}

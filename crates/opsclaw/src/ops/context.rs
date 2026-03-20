@@ -93,3 +93,51 @@ fn convert_autonomy(
         OpsClawAutonomy::Auto => crate::tools::ssh_tool::OpsClawAutonomy::Auto,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroclaw::config::schema::{OpsClawAutonomy, TargetConfig, TargetType};
+
+    fn config_with_targets(targets: Vec<TargetConfig>) -> Config {
+        let mut cfg = Config::default();
+        cfg.targets = Some(targets);
+        cfg
+    }
+
+    fn ssh_target(name: &str, host: Option<&str>, user: Option<&str>, key: Option<&str>) -> TargetConfig {
+        TargetConfig {
+            name: name.to_string(),
+            target_type: TargetType::Ssh,
+            host: host.map(|s| s.to_string()),
+            port: None,
+            user: user.map(|s| s.to_string()),
+            key_secret: key.map(|s| s.to_string()),
+            autonomy: OpsClawAutonomy::DryRun,
+            context_file: None,
+            probes: None,
+            data_sources: None,
+            escalation: None,
+            databases: None,
+            kubeconfig: None,
+            namespace: None,
+        }
+    }
+
+    #[test]
+    fn ssh_runner_for_missing_host_returns_error() {
+        let target = ssh_target("no-host", None, Some("root"), Some("fake-key"));
+        let ctx = OpsClawContext::new(config_with_targets(vec![target]));
+
+        let err = ctx.ssh_runner_for("no-host").unwrap_err();
+        assert!(err.to_string().contains("missing host"));
+    }
+
+    #[test]
+    fn ssh_runner_for_valid_ssh_target_returns_runner() {
+        let target = ssh_target("prod", Some("10.0.0.1"), Some("deploy"), Some("fake-key-pem"));
+        let ctx = OpsClawContext::new(config_with_targets(vec![target]));
+
+        assert!(ctx.ssh_runner_for("prod").is_ok());
+    }
+}

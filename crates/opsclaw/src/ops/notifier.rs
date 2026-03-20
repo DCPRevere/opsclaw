@@ -261,3 +261,66 @@ fn severity_icon_label(s: &AlertSeverity) -> (&'static str, &'static str) {
         AlertSeverity::Info => ("\u{2139}\u{fe0f}", "INFO"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::monitoring::AlertCategory;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn format_alert_message_includes_target_name() {
+        let alert = Alert {
+            severity: AlertSeverity::Critical,
+            category: AlertCategory::ContainerDown,
+            message: "container vanished".to_string(),
+        };
+        let text = format_alert("prod-web-1", &alert);
+        assert!(text.contains("prod-web-1"));
+    }
+
+    /// A notifier that records the text it receives, using only the default
+    /// `notify_with_buttons` implementation (which falls back to `notify_text`).
+    struct CapturingNotifier {
+        captured: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl AlertNotifier for CapturingNotifier {
+        async fn notify_alert(&self, _target_name: &str, _alert: &Alert) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn notify(&self, _target_name: &str, _health: &HealthCheck) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn notify_text(&self, _target_name: &str, message: &str) -> anyhow::Result<()> {
+            self.captured.lock().unwrap().push(message.to_string());
+            Ok(())
+        }
+        // NOTE: notify_with_buttons is NOT overridden, so the default
+        // trait implementation (fallback to notify_text) is used.
+    }
+
+    #[tokio::test]
+    async fn notify_with_buttons_falls_back_to_text() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let notifier = CapturingNotifier {
+            captured: Arc::clone(&captured),
+        };
+
+        let buttons = vec![
+            InlineButton::new("Approve", "approve"),
+            InlineButton::new("Reject", "reject"),
+        ];
+        notifier
+            .notify_with_buttons("my-target", "something happened", &buttons)
+            .await
+            .unwrap();
+
+        let msgs = captured.lock().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("something happened"));
+        assert!(msgs[0].contains("Approve"));
+        assert!(msgs[0].contains("Reject"));
+    }
+}

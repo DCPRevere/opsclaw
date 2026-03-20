@@ -1350,6 +1350,7 @@ fn search_all_targets(query: &str) -> Result<Vec<crate::ops::incident_search::In
 // postmortem command
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::unused_async)]
 pub async fn handle_postmortem(incident_id: &str, output: Option<&std::path::Path>) -> Result<()> {
     use crate::ops::postmortem::PostMortem;
 

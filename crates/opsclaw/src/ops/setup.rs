@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use console::style;
-use dialoguer::{Input, Select};
+use dialoguer::{Confirm, Input, Select};
 
 use crate::ops::snapshots;
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
@@ -474,6 +474,76 @@ fn step_notification() -> Result<NotificationChoice> {
     }
 }
 
+fn step_data_sources() -> Result<Option<serde_json::Value>> {
+    println!();
+    println!(
+        "  {}",
+        style("Configure endpoints for observability services (all optional).").dim()
+    );
+
+    let mut sources = serde_json::Map::new();
+
+    // Prometheus
+    if Confirm::new()
+        .with_prompt("Do you have Prometheus running?")
+        .default(false)
+        .interact()?
+    {
+        let url: String = Input::new()
+            .with_prompt("Prometheus URL")
+            .default("http://localhost:9090".into())
+            .interact_text()?;
+        sources.insert(
+            "prometheus".into(),
+            serde_json::json!({ "url": url }),
+        );
+    }
+
+    // Seq
+    if Confirm::new()
+        .with_prompt("Do you have Seq running?")
+        .default(false)
+        .interact()?
+    {
+        let url: String = Input::new()
+            .with_prompt("Seq URL")
+            .default("http://localhost:5341".into())
+            .interact_text()?;
+        let api_key: String = Input::new()
+            .with_prompt("Seq API key (leave blank for none)")
+            .allow_empty(true)
+            .interact_text()?;
+        let mut entry = serde_json::Map::new();
+        entry.insert("url".into(), serde_json::Value::String(url));
+        if !api_key.is_empty() {
+            entry.insert("api_key".into(), serde_json::Value::String(api_key));
+        }
+        sources.insert("seq".into(), serde_json::Value::Object(entry));
+    }
+
+    // Jaeger
+    if Confirm::new()
+        .with_prompt("Do you have Jaeger running?")
+        .default(false)
+        .interact()?
+    {
+        let url: String = Input::new()
+            .with_prompt("Jaeger URL")
+            .default("http://localhost:16686".into())
+            .interact_text()?;
+        sources.insert(
+            "jaeger".into(),
+            serde_json::json!({ "url": url }),
+        );
+    }
+
+    if sources.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::Value::Object(sources)))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Write config
 // ---------------------------------------------------------------------------
@@ -523,7 +593,7 @@ pub async fn run_opsclaw_setup() -> Result<()> {
     );
 
     // Step 1: Target type
-    print_step(1, 6, "Target");
+    print_step(1, 7, "Target");
     let target_type = step_target_type()?;
 
     // Step 2: Connection details
@@ -534,15 +604,15 @@ pub async fn run_opsclaw_setup() -> Result<()> {
     };
 
     // Step 3: Target context (optional)
-    print_step(2, 6, "Target Context");
+    print_step(2, 7, "Target Context");
     target_result.config.context_file = step_target_context(&target_result.config.name)?;
 
     // Step 4: Autonomy level
-    print_step(3, 6, "Autonomy Level");
+    print_step(3, 7, "Autonomy Level");
     target_result.config.autonomy = step_autonomy()?;
 
     // Step 5: Discovery scan
-    print_step(4, 6, "Discovery Scan");
+    print_step(4, 7, "Discovery Scan");
     if let Some(ref runner) = target_result.runner {
         step_discovery_scan(&target_result.config.name, runner.as_ref()).await;
     } else {
@@ -550,11 +620,15 @@ pub async fn run_opsclaw_setup() -> Result<()> {
     }
 
     // Step 6: Notification channel
-    print_step(5, 6, "Notification Channel");
+    print_step(5, 7, "Notification Channel");
     let notification = step_notification()?;
 
-    // Step 7: Write config
-    print_step(6, 6, "Write Config");
+    // Step 7: Data sources (optional)
+    print_step(6, 7, "Data Sources (optional)");
+    target_result.config.data_sources = step_data_sources()?;
+
+    // Step 8: Write config
+    print_step(7, 7, "Write Config");
     let config_path = opsclaw_config_path()?;
     write_config(&config_path, &target_result.config, &notification)?;
 
@@ -802,5 +876,44 @@ mod tests {
             cfg.targets[0].context_file.as_deref(),
             Some("~/.opsclaw/context/ctx-box.md")
         );
+    }
+
+    #[test]
+    fn test_write_config_with_data_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let ds = serde_json::json!({
+            "prometheus": { "url": "http://localhost:9090" },
+            "seq": { "url": "http://localhost:5341", "api_key": "abc123" },
+            "jaeger": { "url": "http://localhost:16686" },
+        });
+
+        let target = TargetConfig {
+            name: "ds-box".to_string(),
+            target_type: TargetType::Local,
+            host: None,
+            port: None,
+            user: None,
+            key_secret: None,
+            autonomy: OpsClawAutonomy::DryRun,
+            context_file: None,
+            probes: None,
+            data_sources: Some(ds.clone()),
+            escalation: None,
+            databases: None,
+            kubeconfig: None,
+            namespace: None,
+        };
+
+        write_config(&path, &target, &NotificationChoice::Skip).unwrap();
+
+        let cfg = load_existing_config(&path);
+        assert_eq!(cfg.targets.len(), 1);
+        let loaded_ds = cfg.targets[0].data_sources.as_ref().unwrap();
+        assert_eq!(loaded_ds["prometheus"]["url"], "http://localhost:9090");
+        assert_eq!(loaded_ds["seq"]["url"], "http://localhost:5341");
+        assert_eq!(loaded_ds["seq"]["api_key"], "abc123");
+        assert_eq!(loaded_ds["jaeger"]["url"], "http://localhost:16686");
     }
 }

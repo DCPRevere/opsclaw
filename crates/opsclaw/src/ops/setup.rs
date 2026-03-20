@@ -306,6 +306,54 @@ fn step_kubernetes_target() -> Result<TargetResult> {
     })
 }
 
+/// Ask the user for optional target context and persist it to a file.
+///
+/// Returns `Some(path)` (using `~/` prefix) if context was provided, `None` otherwise.
+fn step_target_context(target_name: &str) -> Result<Option<String>> {
+    println!();
+    println!(
+        "  {}",
+        style("Optionally describe this target for OpsClaw (things the scan can't infer).").dim()
+    );
+    println!(
+        "  {}",
+        style("Examples: \"Redis is for sessions only\", \"batch job runs at 02:00\"").dim()
+    );
+
+    let context_input: String = Input::new()
+        .with_prompt("  Target context (Enter to skip)")
+        .allow_empty(true)
+        .interact_text()?;
+
+    if context_input.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let path = write_context_file(target_name, context_input.trim())?;
+    println!(
+        "  {} Context saved to {}",
+        style("✓").green().bold(),
+        style(&path).underlined()
+    );
+    Ok(Some(path))
+}
+
+/// Write context content to `~/.opsclaw/context/{target_name}.md`, creating the directory
+/// if needed. Returns the path in `~/` form.
+fn write_context_file(target_name: &str, content: &str) -> Result<String> {
+    let user_dirs = directories::UserDirs::new().context("Cannot determine home directory")?;
+    let context_dir = user_dirs.home_dir().join(".opsclaw").join("context");
+    std::fs::create_dir_all(&context_dir)
+        .with_context(|| format!("Cannot create directory: {}", context_dir.display()))?;
+
+    let file_path = context_dir.join(format!("{target_name}.md"));
+    std::fs::write(&file_path, content)
+        .with_context(|| format!("Failed to write context file: {}", file_path.display()))?;
+
+    // Return tilde-prefixed path for config portability.
+    Ok(format!("~/.opsclaw/context/{target_name}.md"))
+}
+
 fn step_autonomy() -> Result<OpsClawAutonomy> {
     let items = &[
         "Dry-run  — evaluate OpsClaw first (recommended for new targets)",
@@ -469,7 +517,7 @@ pub async fn run_opsclaw_setup() -> Result<()> {
     );
 
     // Step 1: Target type
-    print_step(1, 5, "Target");
+    print_step(1, 6, "Target");
     let target_type = step_target_type()?;
 
     // Step 2: Connection details
@@ -479,24 +527,28 @@ pub async fn run_opsclaw_setup() -> Result<()> {
         TargetType::Kubernetes => step_kubernetes_target()?,
     };
 
-    // Step 3: Autonomy level
-    print_step(2, 5, "Autonomy Level");
+    // Step 3: Target context (optional)
+    print_step(2, 6, "Target Context");
+    target_result.config.context_file = step_target_context(&target_result.config.name)?;
+
+    // Step 4: Autonomy level
+    print_step(3, 6, "Autonomy Level");
     target_result.config.autonomy = step_autonomy()?;
 
-    // Step 4: Discovery scan
-    print_step(3, 5, "Discovery Scan");
+    // Step 5: Discovery scan
+    print_step(4, 6, "Discovery Scan");
     if let Some(ref runner) = target_result.runner {
         step_discovery_scan(&target_result.config.name, runner.as_ref()).await;
     } else {
         println!("Skipping shell-based discovery scan (Kubernetes targets use kube API).");
     }
 
-    // Step 5: Notification channel
-    print_step(4, 5, "Notification Channel");
+    // Step 6: Notification channel
+    print_step(5, 6, "Notification Channel");
     let notification = step_notification()?;
 
-    // Step 6: Write config
-    print_step(5, 5, "Write Config");
+    // Step 7: Write config
+    print_step(6, 6, "Write Config");
     let config_path = opsclaw_config_path()?;
     write_config(&config_path, &target_result.config, &notification)?;
 
@@ -699,5 +751,50 @@ mod tests {
 
         let cfg = load_existing_config(&path);
         assert_eq!(cfg.targets.len(), 1);
+    }
+
+    #[test]
+    fn test_write_context_file_creates_and_returns_path() {
+        let home = tempfile::tempdir().unwrap();
+        // Override HOME so write_context_file uses the temp dir.
+        std::env::set_var("HOME", home.path());
+        let path = write_context_file("my-server", "Redis is for sessions only").unwrap();
+        assert_eq!(path, "~/.opsclaw/context/my-server.md");
+
+        let abs_path = home.path().join(".opsclaw/context/my-server.md");
+        let content = std::fs::read_to_string(&abs_path).unwrap();
+        assert_eq!(content, "Redis is for sessions only");
+    }
+
+    #[test]
+    fn test_write_config_with_context_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let target = TargetConfig {
+            name: "ctx-box".to_string(),
+            target_type: TargetType::Local,
+            host: None,
+            port: None,
+            user: None,
+            key_secret: None,
+            autonomy: OpsClawAutonomy::DryRun,
+            context_file: Some("~/.opsclaw/context/ctx-box.md".to_string()),
+            probes: None,
+            data_sources: None,
+            escalation: None,
+            databases: None,
+            kubeconfig: None,
+            namespace: None,
+        };
+
+        write_config(&path, &target, &NotificationChoice::Skip).unwrap();
+
+        let cfg = load_existing_config(&path);
+        assert_eq!(cfg.targets.len(), 1);
+        assert_eq!(
+            cfg.targets[0].context_file.as_deref(),
+            Some("~/.opsclaw/context/ctx-box.md")
+        );
     }
 }

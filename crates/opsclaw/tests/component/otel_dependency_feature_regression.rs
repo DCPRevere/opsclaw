@@ -1,6 +1,8 @@
 #[test]
 fn opentelemetry_otlp_uses_blocking_reqwest_client() {
-    let manifest = include_str!("../../Cargo.toml");
+    // The opentelemetry-otlp dependency lives in zeroclaw (the runtime crate),
+    // not in opsclaw directly. We check the zeroclaw Cargo.toml.
+    let manifest = include_str!("../../../zeroclaw/Cargo.toml");
     let otlp_line = manifest
         .lines()
         .find(|line: &&str| line.trim_start().starts_with("opentelemetry-otlp ="))

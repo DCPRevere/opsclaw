@@ -159,6 +159,88 @@ fn expand_tilde(path: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// context edit command
+// ---------------------------------------------------------------------------
+
+const CONTEXT_TEMPLATE: &str = "\
+# Target Context
+
+Describe this target so OpsClaw understands how to operate it.
+
+## Services
+- (list key services running on this target)
+
+## Notes
+- (anything OpsClaw should know when diagnosing or remediating issues)
+";
+
+/// Open a target's context file in `$EDITOR` for editing.
+pub async fn handle_context_edit(config: &Config, target: &str) -> Result<()> {
+    // Validate the target exists in config.
+    let target_cfg = config
+        .targets
+        .as_ref()
+        .and_then(|targets| targets.iter().find(|t| t.name == target))
+        .with_context(|| format!("target '{}' not found in config", target))?;
+
+    // Resolve the context file path.
+    let tilde_path = target_cfg
+        .context_file
+        .clone()
+        .unwrap_or_else(|| format!("~/.opsclaw/context/{}.md", target));
+    let abs_path = PathBuf::from(expand_tilde(&tilde_path));
+
+    // Create file with template if it does not exist.
+    if !abs_path.exists() {
+        if let Some(parent) = abs_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("cannot create directory: {}", parent.display()))?;
+        }
+        fs::write(&abs_path, CONTEXT_TEMPLATE)
+            .with_context(|| format!("cannot write context file: {}", abs_path.display()))?;
+        println!("Created new context file: {}", abs_path.display());
+    }
+
+    // Determine editor.
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| {
+            // Prefer nano, fall back to vi.
+            if which::which("nano").is_ok() {
+                "nano".to_string()
+            } else {
+                "vi".to_string()
+            }
+        });
+
+    // Open editor.
+    let status = tokio::process::Command::new(&editor)
+        .arg(&abs_path)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .await
+        .with_context(|| format!("failed to launch editor '{}'", editor))?;
+
+    if !status.success() {
+        bail!("editor '{}' exited with {}", editor, status);
+    }
+
+    // Read back and confirm.
+    let content = fs::read_to_string(&abs_path)
+        .with_context(|| format!("failed to read context file: {}", abs_path.display()))?;
+    let line_count = content.lines().count();
+    println!(
+        "Context file saved: {} ({} lines)",
+        abs_path.display(),
+        line_count
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // dry-run-log command
 // ---------------------------------------------------------------------------
 

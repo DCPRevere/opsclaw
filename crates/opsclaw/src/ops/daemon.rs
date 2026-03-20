@@ -1,9 +1,11 @@
 //! OpsClaw daemon mode — runs monitor, watch, and digest as long-lived tasks
 //! alongside the ZeroClaw runtime (gateway, heartbeat, scheduler).
 
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use tokio::task::JoinSet;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use zeroclaw::config::Config;
 
 use crate::ops_cli;
@@ -34,14 +36,7 @@ pub async fn start_daemon(config: &Config, host: String, port: u16) -> Result<()
     for t in targets {
         let target_name = t.name.clone();
         let cfg = config.clone();
-        tasks.spawn(async move {
-            info!("Starting monitor loop for target '{target_name}'");
-            if let Err(e) =
-                ops_cli::handle_monitor(&cfg, Some(target_name.clone()), 300, false).await
-            {
-                error!("Monitor task for '{target_name}' exited with error: {e:#}");
-            }
-        });
+        tasks.spawn(run_monitor_with_backoff(target_name, cfg));
     }
 
     // --- Watch (event streaming) for all targets ---
@@ -81,4 +76,50 @@ pub async fn start_daemon(config: &Config, host: String, port: u16) -> Result<()
     while tasks.join_next().await.is_some() {}
 
     runtime_result
+}
+
+const MAX_FAILURES: u32 = 5;
+const FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+fn backoff_delay(attempt: u32) -> Duration {
+    match attempt {
+        1 => Duration::ZERO,
+        2 => Duration::from_secs(10),
+        3 => Duration::from_secs(30),
+        _ => Duration::from_secs(60),
+    }
+}
+
+async fn run_monitor_with_backoff(target: String, config: Config) {
+    let mut consecutive_failures: u32 = 0;
+    let mut window_start = Instant::now();
+
+    loop {
+        info!("Starting monitor loop for target '{target}'");
+        if let Err(e) =
+            ops_cli::handle_monitor(&config, Some(target.clone()), 300, false).await
+        {
+            error!("Monitor task for '{target}' exited with error: {e:#}");
+        }
+
+        consecutive_failures += 1;
+
+        // Reset the failure window if enough time has passed.
+        if window_start.elapsed() >= FAILURE_WINDOW {
+            consecutive_failures = 1;
+            window_start = Instant::now();
+        }
+
+        if consecutive_failures >= MAX_FAILURES {
+            warn!("[{target}] monitor task failed {consecutive_failures} times, giving up");
+            return;
+        }
+
+        let delay = backoff_delay(consecutive_failures);
+        info!(
+            "[{target}] monitor task exited, restarting (attempt {})...",
+            consecutive_failures + 1
+        );
+        tokio::time::sleep(delay).await;
+    }
 }

@@ -1721,7 +1721,7 @@ async fn main() -> Result<()> {
         Commands::Postmortem {
             incident_id,
             output,
-        } => ops_cli::handle_postmortem(&incident_id, output.as_deref()).await,
+        } => ops_cli::handle_postmortem(&incident_id, output.as_deref()),
 
         Commands::Runbook { action } => ops_cli::handle_runbook(&config, action).await,
         Commands::Sources { target, all } => ops_cli::handle_sources(&config, target, all).await,

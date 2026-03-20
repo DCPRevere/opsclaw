@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use console::style;
-use dialoguer::{Input, Select};
+use dialoguer::{Confirm, Input, Select};
 
 use crate::ops::snapshots;
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
@@ -436,15 +436,17 @@ async fn step_discovery_scan(
 
 enum NotificationChoice {
     Telegram { bot_token: String, chat_id: String },
+    Slack { webhook_url: String },
+    Webhook { url: String, bearer_token: Option<String> },
     Skip,
 }
 
 fn step_notification() -> Result<NotificationChoice> {
     let items = &[
         "Telegram",
-        "Slack (coming soon)",
+        "Slack",
         "Email (coming soon)",
-        "Webhook (coming soon)",
+        "Webhook",
         "Skip for now",
     ];
     let selection = Select::new()
@@ -463,12 +465,52 @@ fn step_notification() -> Result<NotificationChoice> {
                 .interact_text()?;
             Ok(NotificationChoice::Telegram { bot_token, chat_id })
         }
-        _ => {
-            if selection == 4 {
-                print_bullet("You can configure notifications later in ~/.opsclaw/config.toml");
+        1 => {
+            let webhook_url: String = Input::new()
+                .with_prompt("Slack webhook URL")
+                .validate_with(|input: &String| -> Result<(), String> {
+                    if input.starts_with("https://hooks.slack.com/") {
+                        Ok(())
+                    } else {
+                        Err("URL must start with https://hooks.slack.com/".into())
+                    }
+                })
+                .interact_text()?;
+            Ok(NotificationChoice::Slack { webhook_url })
+        }
+        3 => {
+            let url: String = Input::new()
+                .with_prompt("Webhook URL")
+                .validate_with(|input: &String| -> Result<(), String> {
+                    if input.starts_with("https://") || input.starts_with("http://") {
+                        Ok(())
+                    } else {
+                        Err("URL must start with https:// or http://".into())
+                    }
+                })
+                .interact_text()?;
+            let bearer_token = if Confirm::new()
+                .with_prompt("Add a bearer token?")
+                .default(false)
+                .interact()?
+            {
+                let token: String = Input::new()
+                    .with_prompt("Bearer token")
+                    .interact_text()?;
+                Some(token)
             } else {
-                print_bullet("This channel is not yet available. You can configure it later in ~/.opsclaw/config.toml");
-            }
+                None
+            };
+            Ok(NotificationChoice::Webhook { url, bearer_token })
+        }
+        4 => {
+            print_bullet("You can configure notifications later in ~/.opsclaw/config.toml");
+            Ok(NotificationChoice::Skip)
+        }
+        _ => {
+            print_bullet(
+                "This channel is not yet available. You can configure it later in ~/.opsclaw/config.toml",
+            );
             Ok(NotificationChoice::Skip)
         }
     }
@@ -494,12 +536,28 @@ fn write_config(
         cfg.targets.push(target.clone());
     }
 
-    if let NotificationChoice::Telegram { bot_token, chat_id } = notification {
-        cfg.notifications = Some(OpsClawNotificationConfig {
-            telegram_bot_token: Some(bot_token.clone()),
-            telegram_chat_id: Some(chat_id.clone()),
-            ..OpsClawNotificationConfig::default()
-        });
+    match notification {
+        NotificationChoice::Telegram { bot_token, chat_id } => {
+            cfg.notifications = Some(OpsClawNotificationConfig {
+                telegram_bot_token: Some(bot_token.clone()),
+                telegram_chat_id: Some(chat_id.clone()),
+                ..OpsClawNotificationConfig::default()
+            });
+        }
+        NotificationChoice::Slack { webhook_url } => {
+            cfg.notifications = Some(OpsClawNotificationConfig {
+                slack_webhook_url: Some(webhook_url.clone()),
+                ..OpsClawNotificationConfig::default()
+            });
+        }
+        NotificationChoice::Webhook { url, bearer_token } => {
+            cfg.notifications = Some(OpsClawNotificationConfig {
+                webhook_url: Some(url.clone()),
+                webhook_bearer_token: bearer_token.clone(),
+                ..OpsClawNotificationConfig::default()
+            });
+        }
+        NotificationChoice::Skip => {}
     }
 
     let toml_str = toml::to_string_pretty(&cfg).context("Failed to serialize config")?;

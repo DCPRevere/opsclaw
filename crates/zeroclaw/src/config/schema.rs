@@ -501,6 +501,12 @@ pub struct OpsClawNotificationConfig {
     pub telegram_bot_token: Option<String>,
     /// Telegram chat ID to send alerts to (can be a group or user chat ID).
     pub telegram_chat_id: Option<String>,
+    /// Slack incoming-webhook URL for sending alerts.
+    pub slack_webhook_url: Option<String>,
+    /// Generic webhook URL for sending alerts.
+    pub webhook_url: Option<String>,
+    /// Optional bearer token for the generic webhook.
+    pub webhook_bearer_token: Option<String>,
     /// Minimum severity level to send notifications for. Default: `warning`.
     #[serde(default = "default_min_severity")]
     pub min_severity: String,
@@ -511,6 +517,9 @@ impl Default for OpsClawNotificationConfig {
         Self {
             telegram_bot_token: None,
             telegram_chat_id: None,
+            slack_webhook_url: None,
+            webhook_url: None,
+            webhook_bearer_token: None,
             min_severity: "warning".to_string(),
         }
     }

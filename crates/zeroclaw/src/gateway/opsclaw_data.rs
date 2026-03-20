@@ -318,7 +318,7 @@ pub async fn handle_opsclaw_audit(
         .rev()
         .filter(|l| !l.trim().is_empty())
         .take(limit)
-        .filter_map(|line| parse_audit_line(line))
+        .filter_map(parse_audit_line)
         .collect();
 
     entries.reverse();

@@ -360,23 +360,18 @@ pub struct Config {
 /// Three user-facing modes: `dry-run`, `approve`, `auto`.
 /// Old names (`observe`, `suggest`, `act_on_known`, `full_auto`) are accepted
 /// for backward compatibility and mapped to the closest new mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OpsClawAutonomy {
     /// Log proposed actions without executing. Read-only commands still run.
     #[serde(alias = "observe", alias = "suggest")]
     DryRun,
     /// Propose actions and wait for user approval before executing.
+    #[default]
     Approve,
     /// Execute remediations automatically without asking.
     #[serde(alias = "act_on_known", alias = "full_auto")]
     Auto,
-}
-
-impl Default for OpsClawAutonomy {
-    fn default() -> Self {
-        Self::Approve
-    }
 }
 
 /// Connection type for an OpsClaw target.
@@ -6138,7 +6133,7 @@ impl Default for A2aServerConfig {
 }
 
 /// A2A protocol configuration — server and known peers.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct A2aConfig {
     /// A2A server configuration.
     #[serde(default)]
@@ -6146,15 +6141,6 @@ pub struct A2aConfig {
     /// Known remote A2A peers.
     #[serde(default)]
     pub peers: Vec<A2aPeer>,
-}
-
-impl Default for A2aConfig {
-    fn default() -> Self {
-        Self {
-            server: A2aServerConfig::default(),
-            peers: Vec::new(),
-        }
-    }
 }
 
 /// A known remote A2A agent peer.

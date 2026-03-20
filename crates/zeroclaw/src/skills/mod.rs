@@ -963,6 +963,9 @@ pub fn handle_command(command: crate::SkillCommands, config: &crate::config::Con
             );
             Ok(())
         }
+        crate::SkillCommands::Forge { .. } => {
+            anyhow::bail!("SkillForge commands are handled by the opsclaw binary CLI");
+        }
     }
 }
 

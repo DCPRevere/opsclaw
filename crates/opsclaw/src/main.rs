@@ -1652,14 +1652,7 @@ async fn main() -> Result<()> {
             lines,
             level,
         } => ops_cli::handle_logs(&config, target, source, lines, level).await,
-        Commands::Watch { target } => {
-            let opsclaw_dir = config
-                .config_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-            let secrets = opsclaw::security::OpsClawSecretStore::new(opsclaw_dir);
-            ops_cli::handle_watch(&config, &secrets, target).await
-        }
+        Commands::Watch { target } => ops_cli::handle_watch(&config, target).await,
         Commands::Baseline { target, reset } => {
             ops_cli::handle_baseline(&config, target, reset)
         }
@@ -2132,7 +2125,7 @@ fn handle_secret_command(secret_command: SecretCommands) -> Result<()> {
         .map(|u| u.home_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     let opsclaw_dir = home.join(".opsclaw");
-    let store = opsclaw::security::OpsClawSecretStore::new(&opsclaw_dir);
+    let store = zeroclaw::OpsClawSecretStore::new(&opsclaw_dir);
 
     match secret_command {
         SecretCommands::Set { name } => {
@@ -2623,7 +2616,7 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
                     marker,
                     id,
                     profile.kind,
-                    crate::security::redact(profile.account_id.as_deref().unwrap_or("unknown")),
+                    zeroclaw::security::redact(profile.account_id.as_deref().unwrap_or("unknown")),
                     format_expiry(profile)
                 );
             }

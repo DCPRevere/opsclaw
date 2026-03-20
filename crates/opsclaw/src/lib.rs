@@ -37,5 +37,4 @@
 
 pub mod ops;
 pub mod ops_cli;
-pub mod security;
 pub mod tools;

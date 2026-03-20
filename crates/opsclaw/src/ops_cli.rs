@@ -10,7 +10,6 @@ use clap::Subcommand;
 use tokio::signal;
 use tracing::info;
 
-use crate::security::OpsClawSecretStore;
 use zeroclaw::config::schema::{TargetConfig, TargetType};
 use zeroclaw::config::Config;
 
@@ -90,21 +89,11 @@ fn make_runner(target: &TargetConfig) -> Result<Box<dyn CommandRunner>> {
             let user = target.user.clone().unwrap_or_default();
             let port = target.port.unwrap_or(22);
 
-            // Resolve SSH key: key_secret holds a file path (possibly with ~)
-            let key_pem = match &target.key_secret {
-                Some(path) => {
-                    let expanded = expand_tilde(path);
-                    fs::read_to_string(&expanded)
-                        .with_context(|| format!("Failed to read SSH key from {expanded}"))?
-                }
-                None => {
-                    // Fall back to ~/.ssh/id_rsa
-                    let default_key = expand_tilde("~/.ssh/id_rsa");
-                    fs::read_to_string(&default_key).with_context(|| {
-                        "No key_secret configured and ~/.ssh/id_rsa not found".to_string()
-                    })?
-                }
-            };
+            // key_secret holds the PEM content directly (decrypted at config load)
+            let key_pem = target
+                .key_secret
+                .clone()
+                .context("SSH target requires key_secret (encrypted PEM in config)")?;
 
             let entry = TargetEntry {
                 name: target.name.clone(),
@@ -801,7 +790,6 @@ pub async fn handle_monitor(
 
 pub async fn handle_watch(
     config: &Config,
-    secrets: &OpsClawSecretStore,
     target: Option<String>,
 ) -> Result<()> {
     let targets = resolve_targets(config, target.as_deref(), target.is_none())?;
@@ -836,15 +824,11 @@ pub async fn handle_watch(
                     .user
                     .as_deref()
                     .context(format!("SSH target '{}' missing user", t.name))?;
-                let key_secret_name = t
+                let pem = t
                     .key_secret
                     .as_deref()
                     .context(format!("SSH target '{}' missing key_secret", t.name))?;
                 let port = t.port.unwrap_or(22);
-
-                let pem = secrets
-                    .get(key_secret_name)?
-                    .context(format!("secret '{}' not found", key_secret_name))?;
 
                 // Write the PEM to a temp file so `ssh -i` can use it.
                 let key_path = std::env::temp_dir().join(format!(

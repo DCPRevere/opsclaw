@@ -505,6 +505,15 @@ pub async fn handle_monitor(
                             String::new()
                         };
 
+                        // Fetch all configured data sources for diagnosis enrichment.
+                        let ds_snapshot = crate::ops::data_sources::fetch_all(
+                            t,
+                            runner.as_ref().map(|r| r.as_ref()),
+                        )
+                        .await;
+                        let ds_context =
+                            crate::ops::data_sources::format_for_diagnosis(&ds_snapshot);
+
                         if let Err(e) = notifier.notify(&t.name, &hc).await {
                             eprintln!("   Warning: notification failed: {e}");
                         }
@@ -529,6 +538,12 @@ pub async fn handle_monitor(
                             if !deploy_context.is_empty() {
                                 let combined = context_content.unwrap_or_default();
                                 context_content = Some(format!("{combined}\n\n{deploy_context}"));
+                            }
+
+                            // Append external data sources context for the LLM.
+                            if !ds_context.is_empty() {
+                                let combined = context_content.unwrap_or_default();
+                                context_content = Some(format!("{combined}\n\n{ds_context}"));
                             }
 
                             // Append baseline summary to context.

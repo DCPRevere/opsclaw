@@ -26,6 +26,8 @@ pub struct DataSourcesSnapshot {
     pub seq_logs: Vec<LogEntry>,
     pub jaeger_traces: Vec<jaeger::TraceSummary>,
     pub github_release: Option<github::ReleaseInfo>,
+    pub github_runs: Vec<github::WorkflowRun>,
+    pub github_tags: Vec<github::RepoTag>,
     pub docker_deploys: Vec<docker_inspect::ContainerStartTime>,
     pub prometheus: Option<prometheus::PrometheusSnapshot>,
     pub git_deploy: Option<git_deploy::GitDeploySnapshot>,
@@ -123,7 +125,15 @@ pub async fn collect_all(
     if let Some(gh_cfg) = &cfg.github {
         match github::fetch_latest_release(gh_cfg).await {
             Ok(release) => snap.github_release = release,
-            Err(e) => tracing::warn!("github source failed: {e:#}"),
+            Err(e) => tracing::warn!("github release source failed: {e:#}"),
+        }
+        match github::fetch_recent_runs(gh_cfg).await {
+            Ok(runs) => snap.github_runs = runs,
+            Err(e) => tracing::warn!("github actions source failed: {e:#}"),
+        }
+        match github::fetch_recent_tags(gh_cfg).await {
+            Ok(tags) => snap.github_tags = tags,
+            Err(e) => tracing::warn!("github tags source failed: {e:#}"),
         }
     }
 
@@ -383,6 +393,35 @@ pub fn print_summary(snap: &DataSourcesSnapshot) {
         );
     }
 
+    if !snap.github_runs.is_empty() {
+        println!(
+            "\n── GitHub workflow runs ({}) ──",
+            snap.github_runs.len()
+        );
+        for run in &snap.github_runs {
+            let conclusion = run
+                .conclusion
+                .as_deref()
+                .unwrap_or("-");
+            let name = run.name.as_deref().unwrap_or("unnamed");
+            let ts = run
+                .updated_at
+                .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_else(|| "unknown".into());
+            println!(
+                "  {} [{}→{}] {ts}",
+                name, run.status, conclusion
+            );
+        }
+    }
+
+    if !snap.github_tags.is_empty() {
+        println!("\n── GitHub tags ({}) ──", snap.github_tags.len());
+        for tag in &snap.github_tags {
+            println!("  {} ({})", tag.name, &tag.commit_sha[..7.min(tag.commit_sha.len())]);
+        }
+    }
+
     if !snap.docker_deploys.is_empty() {
         println!(
             "\n── Docker container start times ({}) ──",
@@ -465,6 +504,8 @@ pub fn print_summary(snap: &DataSourcesSnapshot) {
     if snap.seq_logs.is_empty()
         && snap.jaeger_traces.is_empty()
         && snap.github_release.is_none()
+        && snap.github_runs.is_empty()
+        && snap.github_tags.is_empty()
         && snap.docker_deploys.is_empty()
         && snap.prometheus.is_none()
         && snap.git_deploy.is_none()

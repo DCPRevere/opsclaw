@@ -5,6 +5,7 @@
 //! their JSON output into [`StreamEvent`] values sent over a tokio channel.
 
 use async_trait::async_trait;
+use tracing::{debug, error, warn};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -64,6 +65,7 @@ pub struct DockerEventSource;
 #[async_trait]
 impl EventSource for DockerEventSource {
     async fn stream(&self, tx: mpsc::Sender<StreamEvent>) -> anyhow::Result<()> {
+        debug!("Starting local docker event stream");
         let mut child = Command::new("docker")
             .args(["events", "--format", "{{json .}}"])
             .stdout(std::process::Stdio::piped())
@@ -89,7 +91,7 @@ impl EventSource for DockerEventSource {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Skipping unparseable docker event: {e}");
+                    warn!(error = %e, raw = %line, "Skipping unparseable docker event");
                 }
             }
         }
@@ -107,6 +109,7 @@ pub struct SystemdEventSource;
 #[async_trait]
 impl EventSource for SystemdEventSource {
     async fn stream(&self, tx: mpsc::Sender<StreamEvent>) -> anyhow::Result<()> {
+        debug!("Starting local systemd journal stream");
         let mut child = Command::new("journalctl")
             .args(["-f", "-n", "0", "-o", "json"])
             .stdout(std::process::Stdio::piped())
@@ -136,7 +139,7 @@ impl EventSource for SystemdEventSource {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Skipping unparseable journalctl event: {e}");
+                    warn!(error = %e, raw = %line, "Skipping unparseable journalctl event");
                 }
             }
         }
@@ -200,6 +203,7 @@ impl SshEventSource {
 #[async_trait]
 impl EventSource for SshEventSource {
     async fn stream(&self, tx: mpsc::Sender<StreamEvent>) -> anyhow::Result<()> {
+        debug!(target = %self.name, host = %self.host, user = %self.user, port = self.port, "Starting SSH event stream");
         // Spawn both Docker events and journalctl streams concurrently.
         let docker_tx = tx.clone();
         let name = self.name.clone();
@@ -229,7 +233,7 @@ impl EventSource for SshEventSource {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("SSH docker event parse error: {e}");
+                        warn!(error = %e, raw = %line, target = %name, "Skipping unparseable SSH docker event");
                     }
                 }
             }
@@ -264,7 +268,7 @@ impl EventSource for SshEventSource {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("SSH journalctl parse error: {e}");
+                        warn!(error = %e, raw = %line, target = %name2, "Skipping unparseable SSH journalctl event");
                     }
                 }
             }
@@ -331,7 +335,7 @@ impl EventStreamManager {
                 unsafe { std::mem::transmute(source_ref) };
             let handle = tokio::spawn(async move {
                 if let Err(e) = source_static.stream(tx).await {
-                    tracing::error!("Event source {i} failed: {e}");
+                    error!(source_index = i, error = %e, "Event source failed");
                 }
             });
             handles.push(handle);

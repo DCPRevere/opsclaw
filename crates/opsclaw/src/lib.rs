@@ -6,7 +6,6 @@
     clippy::cast_possible_wrap,
     clippy::doc_markdown,
     clippy::field_reassign_with_default,
-    clippy::float_cmp,
     clippy::implicit_clone,
     clippy::items_after_statements,
     clippy::map_unwrap_or,
@@ -16,7 +15,6 @@
     clippy::module_name_repetitions,
     clippy::must_use_candidate,
     clippy::new_without_default,
-    clippy::needless_pass_by_value,
     clippy::needless_raw_string_hashes,
     clippy::redundant_closure_for_method_calls,
     clippy::return_self_not_must_use,
@@ -32,7 +30,6 @@
     clippy::unused_self,
     clippy::cast_precision_loss,
     clippy::unnecessary_wraps,
-    dead_code
 )]
 
 pub mod openshell;

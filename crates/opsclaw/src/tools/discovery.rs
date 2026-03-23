@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tracing::warn;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -350,7 +351,10 @@ pub fn parse_uptime(raw: &str) -> LoadInfo {
 pub fn parse_k8s_pods_json(raw: &str) -> Vec<K8sPod> {
     let val: serde_json::Value = match serde_json::from_str(raw) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            warn!(error = %e, "Failed to parse K8s pods JSON");
+            return Vec::new();
+        }
     };
     let items = match val["items"].as_array() {
         Some(a) => a,
@@ -405,7 +409,10 @@ pub fn parse_k8s_pods_json(raw: &str) -> Vec<K8sPod> {
 pub fn parse_k8s_deployments_json(raw: &str) -> Vec<K8sDeployment> {
     let val: serde_json::Value = match serde_json::from_str(raw) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            warn!(error = %e, "Failed to parse K8s deployments JSON");
+            return Vec::new();
+        }
     };
     let items = match val["items"].as_array() {
         Some(a) => a,
@@ -439,7 +446,10 @@ pub fn parse_k8s_deployments_json(raw: &str) -> Vec<K8sDeployment> {
 pub fn parse_k8s_services_json(raw: &str) -> Vec<K8sService> {
     let val: serde_json::Value = match serde_json::from_str(raw) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            warn!(error = %e, "Failed to parse K8s services JSON");
+            return Vec::new();
+        }
     };
     let items = match val["items"].as_array() {
         Some(a) => a,
@@ -494,7 +504,10 @@ pub fn parse_k8s_services_json(raw: &str) -> Vec<K8sService> {
 pub fn parse_k8s_nodes_json(raw: &str) -> Vec<K8sNode> {
     let val: serde_json::Value = match serde_json::from_str(raw) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            warn!(error = %e, "Failed to parse K8s nodes JSON");
+            return Vec::new();
+        }
     };
     let items = match val["items"].as_array() {
         Some(a) => a,

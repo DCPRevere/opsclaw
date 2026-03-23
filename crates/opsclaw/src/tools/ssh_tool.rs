@@ -188,8 +188,66 @@ pub struct SshOutput {
 /// Real SSH executor backed by the `russh` crate.
 pub struct RealSshExecutor;
 
-/// Minimal handler that accepts any server host key.
-struct SshClientHandler;
+/// SSH client handler with trust-on-first-use (TOFU) host key verification.
+///
+/// On first connection to a host the key fingerprint is accepted and recorded
+/// in `~/.ssh/known_hosts` (via the system `ssh-keyscan` format). On
+/// subsequent connections the stored fingerprint is compared and the
+/// connection is **rejected** if it does not match, preventing MITM attacks.
+struct SshClientHandler {
+    host: String,
+    port: u16,
+}
+
+impl SshClientHandler {
+    /// Parse `~/.ssh/known_hosts` and return the stored base64 public key for
+    /// `host:port`, if any.
+    fn lookup_known_host(host: &str, port: u16) -> Option<String> {
+        let home = std::env::var("HOME").ok()?;
+        let path = std::path::Path::new(&home).join(".ssh").join("known_hosts");
+        let content = std::fs::read_to_string(path).ok()?;
+
+        // known_hosts lines: "[host]:port key-type base64-key comment..."
+        // or "host key-type base64-key comment..." for port 22.
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(3, ' ');
+            let host_field = parts.next()?;
+            let _key_type = parts.next()?;
+            let key_b64 = parts.next()?.split_whitespace().next()?;
+
+            let matched = if port == 22 {
+                host_field == host || host_field == format!("[{host}]:22")
+            } else {
+                host_field == format!("[{host}]:{port}")
+            };
+            if matched {
+                return Some(key_b64.to_string());
+            }
+        }
+        None
+    }
+
+    /// Append a new entry to `~/.ssh/known_hosts`.
+    fn record_known_host(host: &str, port: u16, key_type: &str, key_b64: &str) {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let path = std::path::Path::new(&home).join(".ssh").join("known_hosts");
+        let host_field = if port == 22 {
+            host.to_string()
+        } else {
+            format!("[{host}]:{port}")
+        };
+        let line = format!("{host_field} {key_type} {key_b64}\n");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+    }
+}
 
 #[async_trait]
 impl russh::client::Handler for SshClientHandler {
@@ -197,12 +255,39 @@ impl russh::client::Handler for SshClientHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh_keys::key::PublicKey,
+        server_public_key: &russh_keys::key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // Accept all host keys. Production deployments should verify against
-        // a known_hosts file — acceptable for the current threat model where
-        // targets are pre-configured by the operator.
-        Ok(true)
+        use russh_keys::PublicKeyBase64;
+
+        let key_type = server_public_key.name();
+        let key_b64 = server_public_key.public_key_base64();
+
+        match Self::lookup_known_host(&self.host, self.port) {
+            Some(stored) => {
+                if stored == key_b64 {
+                    Ok(true)
+                } else {
+                    tracing::error!(
+                        host = %self.host,
+                        port = self.port,
+                        "Host key mismatch — possible MITM attack. \
+                         Remove the stale entry from ~/.ssh/known_hosts if the key legitimately changed."
+                    );
+                    Err(russh::Error::WrongServerSig)
+                }
+            }
+            None => {
+                // Trust on first use: record and accept.
+                tracing::warn!(
+                    host = %self.host,
+                    port = self.port,
+                    key_type = %key_type,
+                    "Unknown host key — trusting on first use (TOFU) and recording in ~/.ssh/known_hosts"
+                );
+                Self::record_known_host(&self.host, self.port, key_type, &key_b64);
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -236,7 +321,10 @@ impl RealSshExecutor {
 
         // Connect.
         let config = Arc::new(russh::client::Config::default());
-        let handler = SshClientHandler;
+        let handler = SshClientHandler {
+            host: target.host.clone(),
+            port: target.port,
+        };
         let mut handle = russh::client::connect(config, (&*target.host, target.port), handler)
             .await
             .map_err(|e| {

@@ -1716,7 +1716,7 @@ async fn main() -> Result<()> {
         } => ops_cli::handle_logs(&config, target, source, lines, level).await,
         Commands::Watch { target } => ops_cli::handle_watch(&config, target).await,
         Commands::Baseline { target, reset } => {
-            ops_cli::handle_baseline(&config, target, reset)
+            ops_cli::handle_baseline(&config, target.as_deref(), reset)
         }
         Commands::DryRunLog { tail, clear } => ops_cli::handle_dry_run_log(tail, clear),
 

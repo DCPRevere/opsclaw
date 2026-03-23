@@ -1092,8 +1092,8 @@ async fn collect_error_logs_for_diagnosis(
                     }
                 }
             }
-            Err(_) => {
-                // Skip sources that fail (e.g. missing log files).
+            Err(e) => {
+                tracing::debug!(source = ?source, error = %e, "Skipping log source");
             }
         }
     }
@@ -1190,17 +1190,17 @@ fn format_diagnosis_alert(hc: &HealthCheck, diag: &Diagnosis) -> String {
 // baseline command
 // ---------------------------------------------------------------------------
 
-pub fn handle_baseline(config: &Config, target: Option<String>, reset: bool) -> Result<()> {
+pub fn handle_baseline(config: &Config, target: Option<&str>, reset: bool) -> Result<()> {
     let targets = config.targets.as_deref().unwrap_or_default();
 
     if targets.is_empty() {
         bail!("No [[targets]] defined in config. Add at least one target.");
     }
 
-    let selected: Vec<&TargetConfig> = if let Some(ref name) = target {
+    let selected: Vec<&TargetConfig> = if let Some(name) = target {
         let t = targets
             .iter()
-            .find(|t| &t.name == name)
+            .find(|t| t.name == name)
             .with_context(|| format!("Target '{name}' not found in config"))?;
         vec![t]
     } else {

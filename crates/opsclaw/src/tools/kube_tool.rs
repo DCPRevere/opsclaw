@@ -5,6 +5,7 @@
 //! [`KubernetesInfo`] snapshot structs defined in [`super::discovery`].
 
 use anyhow::{Context, Result};
+use tracing::{debug, warn};
 use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Event, Namespace, Node, Pod, Service};
@@ -79,12 +80,38 @@ impl KubeClient {
     /// Perform a full Kubernetes discovery scan and return a
     /// [`KubernetesInfo`] snapshot.
     pub async fn discover_k8s(&self) -> Result<KubernetesInfo> {
-        let cluster_info = self.cluster_version().await.unwrap_or_default();
-        let namespaces = self.list_namespaces().await.unwrap_or_default();
-        let pods = self.list_pods(None).await.unwrap_or_default();
-        let deployments = self.list_deployments(None).await.unwrap_or_default();
-        let services = self.list_services(None).await.unwrap_or_default();
-        let nodes = self.list_nodes().await.unwrap_or_default();
+        debug!("Starting Kubernetes discovery");
+        let cluster_info = self.cluster_version().await.unwrap_or_else(|e| {
+            warn!(error = %e, "Failed to retrieve cluster version");
+            String::new()
+        });
+        let namespaces = self.list_namespaces().await.unwrap_or_else(|e| {
+            warn!(error = %e, "Failed to list namespaces");
+            Vec::new()
+        });
+        let pods = self.list_pods(None).await.unwrap_or_else(|e| {
+            warn!(error = %e, "Failed to list pods");
+            Vec::new()
+        });
+        let deployments = self.list_deployments(None).await.unwrap_or_else(|e| {
+            warn!(error = %e, "Failed to list deployments");
+            Vec::new()
+        });
+        let services = self.list_services(None).await.unwrap_or_else(|e| {
+            warn!(error = %e, "Failed to list services");
+            Vec::new()
+        });
+        let nodes = self.list_nodes().await.unwrap_or_else(|e| {
+            warn!(error = %e, "Failed to list nodes");
+            Vec::new()
+        });
+        debug!(
+            pods = pods.len(),
+            deployments = deployments.len(),
+            services = services.len(),
+            nodes = nodes.len(),
+            "Kubernetes discovery complete"
+        );
 
         Ok(KubernetesInfo {
             cluster_info,

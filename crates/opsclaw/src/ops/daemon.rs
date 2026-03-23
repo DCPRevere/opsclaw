@@ -73,6 +73,22 @@ pub async fn start_daemon(
         });
     }
 
+    // --- A2A server ---
+    if let Some(a2a_config) = &config.a2a {
+        if a2a_config.server.enabled {
+            let server_config = a2a_config.server.clone();
+            info!(
+                "Starting A2A server on {}:{}",
+                server_config.bind, server_config.port
+            );
+            tasks.spawn(async move {
+                if let Err(e) = crate::tools::a2a_server::run_a2a_server(server_config).await {
+                    error!("A2A server exited with error: {e:#}");
+                }
+            });
+        }
+    }
+
     // --- ZeroClaw runtime (gateway, channels, heartbeat, scheduler) ---
     // This blocks until shutdown signal is received.
     let runtime_result = Box::pin(zeroclaw::daemon::run(config.clone(), host, port)).await;

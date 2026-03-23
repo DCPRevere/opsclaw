@@ -16,7 +16,7 @@ use crate::tools::ssh_command_runner::{LocalCommandRunner, SshCommandRunner};
 use crate::tools::ssh_tool::RealSshExecutor;
 use crate::tools::ssh_tool::TargetEntry;
 use zeroclaw::config::schema::{
-    OpsClawAutonomy, OpsClawNotificationConfig, TargetConfig, TargetType,
+    Config, OpsClawAutonomy, OpsClawNotificationConfig, TargetConfig, TargetType,
 };
 
 // ---------------------------------------------------------------------------
@@ -65,32 +65,41 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Minimal TOML representation we write (avoids coupling to the full Config struct).
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct SetupConfig {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    targets: Vec<TargetConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    notifications: Option<OpsClawNotificationConfig>,
-}
-
-fn load_existing_config(path: &Path) -> SetupConfig {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default()
+fn load_existing_config(path: &Path) -> Config {
+    match std::fs::read_to_string(path) {
+        Err(_) => Config::default(), // file absent — expected on first run
+        Ok(s) => match toml::from_str(&s) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "Failed to parse existing config, starting fresh");
+                Config::default()
+            }
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
 // SSH connection test
 // ---------------------------------------------------------------------------
 
-async fn test_ssh_connection(host: &str, user: &str, port: u16) -> bool {
-    let result = tokio::process::Command::new("ssh")
-        .arg("-o")
+async fn test_ssh_connection(host: &str, user: &str, port: u16, key_path: Option<&str>) -> bool {
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.arg("-o")
         .arg("ConnectTimeout=5")
         .arg("-o")
-        .arg("BatchMode=yes")
+        .arg("BatchMode=yes");
+    if let Some(key) = key_path {
+        // Expand ~ to home directory
+        let expanded = if key.starts_with("~/") {
+            std::env::var("HOME")
+                .map(|h| format!("{}/{}", h, &key[2..]))
+                .unwrap_or_else(|_| key.to_string())
+        } else {
+            key.to_string()
+        };
+        cmd.arg("-i").arg(expanded);
+    }
+    let result = cmd
         .arg("-p")
         .arg(port.to_string())
         .arg(format!("{user}@{host}"))
@@ -99,8 +108,28 @@ async fn test_ssh_connection(host: &str, user: &str, port: u16) -> bool {
         .await;
 
     match result {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
+        Ok(output) => {
+            if output.status.success() {
+                true
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                tracing::info!(
+                    host = %host,
+                    user = %user,
+                    port = port,
+                    status = ?output.status,
+                    stderr = %stderr.trim(),
+                    stdout = %stdout.trim(),
+                    "SSH connection test failed"
+                );
+                false
+            }
+        }
+        Err(e) => {
+            tracing::info!(error = %e, "Failed to spawn ssh process");
+            false
+        }
     }
 }
 
@@ -152,7 +181,7 @@ async fn step_ssh_target() -> Result<TargetResult> {
         "Testing SSH connection to {user}@{host}:{port}..."
     ));
 
-    let mut connected = test_ssh_connection(&host, &user, port).await;
+    let mut connected = test_ssh_connection(&host, &user, port, Some(&key_path)).await;
     if connected {
         println!("  {} Connection successful", style("✓").green().bold());
     } else {
@@ -164,7 +193,7 @@ async fn step_ssh_target() -> Result<TargetResult> {
             .default(0)
             .interact()?;
         if choice == 0 {
-            connected = test_ssh_connection(&host, &user, port).await;
+            connected = test_ssh_connection(&host, &user, port, Some(&key_path)).await;
             if connected {
                 println!("  {} Connection successful", style("✓").green().bold());
             } else {
@@ -587,23 +616,97 @@ fn step_data_sources() -> Result<Option<serde_json::Value>> {
 }
 
 // ---------------------------------------------------------------------------
+// LLM provider step
+// ---------------------------------------------------------------------------
+
+enum LlmChoice {
+    Anthropic { model: String, api_key: String },
+    OpenAi { model: String, api_key: String },
+    Google { model: String, api_key: String },
+    Ollama { model: String, base_url: String },
+    Skip,
+}
+
+fn step_llm_provider() -> Result<LlmChoice> {
+    let items = &["Anthropic", "OpenAI", "Google (Gemini)", "Ollama (local)", "Skip"];
+    let selection = Select::new()
+        .with_prompt("Which LLM provider?")
+        .items(items)
+        .default(0)
+        .interact()?;
+
+    match selection {
+        0 => {
+            let model: String = Input::new()
+                .with_prompt("Model")
+                .default("anthropic/claude-sonnet-4-6".into())
+                .interact_text()?;
+            let api_key: String = Input::new()
+                .with_prompt("API key")
+                .interact_text()?;
+            Ok(LlmChoice::Anthropic { model, api_key })
+        }
+        1 => {
+            let model: String = Input::new()
+                .with_prompt("Model")
+                .default("openai/gpt-4o".into())
+                .interact_text()?;
+            let api_key: String = Input::new()
+                .with_prompt("API key")
+                .interact_text()?;
+            Ok(LlmChoice::OpenAi { model, api_key })
+        }
+        2 => {
+            let model: String = Input::new()
+                .with_prompt("Model")
+                .default("google/gemini-2.0-flash".into())
+                .interact_text()?;
+            let api_key: String = Input::new()
+                .with_prompt("API key")
+                .interact_text()?;
+            Ok(LlmChoice::Google { model, api_key })
+        }
+        3 => {
+            let model: String = Input::new()
+                .with_prompt("Model (e.g. ollama/llama3)")
+                .default("ollama/llama3".into())
+                .interact_text()?;
+            let base_url: String = Input::new()
+                .with_prompt("Ollama base URL")
+                .default("http://localhost:11434".into())
+                .interact_text()?;
+            Ok(LlmChoice::Ollama { model, base_url })
+        }
+        _ => {
+            print_bullet("You can configure an LLM provider later in ~/.opsclaw/config.toml");
+            Ok(LlmChoice::Skip)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Write config
 // ---------------------------------------------------------------------------
 
-fn write_config(
+async fn write_config(
     path: &Path,
     target: &TargetConfig,
     notification: &NotificationChoice,
+    llm: &LlmChoice,
 ) -> Result<()> {
     ensure_parent_dir(path)?;
 
     let mut cfg = load_existing_config(path);
 
+    // Set the config path so Config::save() writes to the correct location.
+    cfg.config_path = path.to_path_buf();
+
     // Replace target with same name, or append
-    if let Some(pos) = cfg.targets.iter().position(|t| t.name == target.name) {
-        cfg.targets[pos] = target.clone();
+    let targets = cfg.targets.get_or_insert_with(Vec::new);
+    if let Some(pos) = targets.iter().position(|t| t.name == target.name) {
+        targets[pos] = target.clone();
     } else {
-        cfg.targets.push(target.clone());
+        targets.push(target.clone());
     }
 
     match notification {
@@ -630,11 +733,38 @@ fn write_config(
         NotificationChoice::Skip => {}
     }
 
-    let toml_str = toml::to_string_pretty(&cfg).context("Failed to serialize config")?;
-    std::fs::write(path, &toml_str)
-        .with_context(|| format!("Failed to write config to {}", path.display()))?;
+    // LLM provider config
+    match llm {
+        LlmChoice::Anthropic { model, api_key } => {
+            cfg.default_provider = Some("anthropic".into());
+            cfg.default_model = Some(model.clone());
+            cfg.api_key = Some(api_key.clone());
+            cfg.api_url = None;
+        }
+        LlmChoice::OpenAi { model, api_key } => {
+            cfg.default_provider = Some("openai".into());
+            cfg.default_model = Some(model.clone());
+            cfg.api_key = Some(api_key.clone());
+            cfg.api_url = None;
+        }
+        LlmChoice::Google { model, api_key } => {
+            cfg.default_provider = Some("google".into());
+            cfg.default_model = Some(model.clone());
+            cfg.api_key = Some(api_key.clone());
+            cfg.api_url = None;
+        }
+        LlmChoice::Ollama { model, base_url } => {
+            cfg.default_provider = Some("ollama".into());
+            cfg.default_model = Some(model.clone());
+            cfg.api_key = None;
+            cfg.api_url = Some(base_url.clone());
+        }
+        LlmChoice::Skip => {}
+    }
 
-    Ok(())
+    // Config::save() handles encryption of all secrets (api_key, key_secret,
+    // notification tokens) and sets 0600 file permissions.
+    cfg.save().await
 }
 
 // ---------------------------------------------------------------------------
@@ -651,7 +781,7 @@ pub async fn run_opsclaw_setup() -> Result<()> {
     );
 
     // Step 1: Target type
-    print_step(1, 7, "Target");
+    print_step(1, 8, "Target");
     let target_type = step_target_type()?;
 
     // Step 2: Connection details
@@ -662,15 +792,15 @@ pub async fn run_opsclaw_setup() -> Result<()> {
     };
 
     // Step 3: Target context (optional)
-    print_step(2, 7, "Target Context");
+    print_step(2, 8, "Target Context");
     target_result.config.context_file = step_target_context(&target_result.config.name)?;
 
     // Step 4: Autonomy level
-    print_step(3, 7, "Autonomy Level");
+    print_step(3, 8, "Autonomy Level");
     target_result.config.autonomy = step_autonomy()?;
 
     // Step 5: Discovery scan
-    print_step(4, 7, "Discovery Scan");
+    print_step(4, 8, "Discovery Scan");
     if let Some(ref runner) = target_result.runner {
         step_discovery_scan(&target_result.config.name, runner.as_ref()).await;
     } else {
@@ -678,17 +808,30 @@ pub async fn run_opsclaw_setup() -> Result<()> {
     }
 
     // Step 6: Notification channel
-    print_step(5, 7, "Notification Channel");
+    print_step(5, 8, "Notification Channel");
     let notification = step_notification()?;
 
     // Step 7: Data sources (optional)
-    print_step(6, 7, "Data Sources (optional)");
+    print_step(6, 8, "Data Sources (optional)");
     target_result.config.data_sources = step_data_sources()?;
 
+    // Step 7: LLM provider
+    print_step(7, 8, "LLM Provider");
+    let llm = step_llm_provider()?;
+    match &llm {
+        LlmChoice::Anthropic { model, .. } | LlmChoice::OpenAi { model, .. } | LlmChoice::Google { model, .. } => {
+            println!("  {} LLM configured: {}", style("✓").green().bold(), model);
+        }
+        LlmChoice::Ollama { model, base_url } => {
+            println!("  {} LLM configured: {} ({})", style("✓").green().bold(), model, base_url);
+        }
+        LlmChoice::Skip => {}
+    }
+
     // Step 8: Write config
-    print_step(7, 7, "Write Config");
+    print_step(8, 8, "Write Config");
     let config_path = opsclaw_config_path()?;
-    write_config(&config_path, &target_result.config, &notification)?;
+    write_config(&config_path, &target_result.config, &notification, &llm).await?;
 
     println!(
         "  {} Config written to {}",
@@ -697,16 +840,42 @@ pub async fn run_opsclaw_setup() -> Result<()> {
     );
     println!();
 
-    // Print summary
-    let toml_str = toml::to_string_pretty(&target_result.config).unwrap_or_default();
-    println!("{toml_str}");
-
-    if let NotificationChoice::Telegram { bot_token, chat_id } = &notification {
-        println!("[notifications]");
-        println!("telegram_bot_token = \"{bot_token}\"");
-        println!("telegram_chat_id = \"{chat_id}\"");
-        println!();
+    // Print sanitized summary — never show plaintext secrets.
+    let t = &target_result.config;
+    println!("  Target:    {}", t.name);
+    println!("  Type:      {:?}", t.target_type);
+    if let Some(ref host) = t.host {
+        println!("  Host:      {host}");
     }
+    println!("  Autonomy:  {:?}", t.autonomy);
+    if let Some(ref secret) = t.key_secret {
+        let _ = secret; // present but not printed
+        println!("  SSH key:   [encrypted]");
+    }
+    match &notification {
+        NotificationChoice::Telegram { chat_id, .. } => {
+            println!("  Notify:    Telegram chat {chat_id} (token [encrypted])");
+        }
+        NotificationChoice::Slack { .. } => {
+            println!("  Notify:    Slack (webhook [encrypted])");
+        }
+        NotificationChoice::Webhook { url, .. } => {
+            println!("  Notify:    Webhook {url}");
+        }
+        NotificationChoice::Skip => {}
+    }
+    match &llm {
+        LlmChoice::Anthropic { model, .. }
+        | LlmChoice::OpenAi { model, .. }
+        | LlmChoice::Google { model, .. } => {
+            println!("  LLM:       {model} (key [encrypted])");
+        }
+        LlmChoice::Ollama { model, base_url } => {
+            println!("  LLM:       {model} @ {base_url}");
+        }
+        LlmChoice::Skip => {}
+    }
+    println!();
 
     println!(
         "  {}",
@@ -728,12 +897,12 @@ mod tests {
     #[test]
     fn test_load_existing_config_missing_file() {
         let cfg = load_existing_config(Path::new("/nonexistent/config.toml"));
-        assert!(cfg.targets.is_empty());
+        assert!(cfg.targets.as_ref().map_or(true, |t| t.is_empty()));
         assert!(cfg.notifications.is_none());
     }
 
-    #[test]
-    fn test_write_and_reload_config() {
+    #[tokio::test]
+    async fn test_write_and_reload_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -754,16 +923,19 @@ mod tests {
             namespace: None,
         };
 
-        write_config(&path, &target, &NotificationChoice::Skip).unwrap();
+        write_config(&path, &target, &NotificationChoice::Skip, &LlmChoice::Skip)
+            .await
+            .unwrap();
 
         let cfg = load_existing_config(&path);
-        assert_eq!(cfg.targets.len(), 1);
-        assert_eq!(cfg.targets[0].name, "test-box");
+        let targets = cfg.targets.as_ref().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "test-box");
         assert!(cfg.notifications.is_none());
     }
 
-    #[test]
-    fn test_write_config_with_telegram() {
+    #[tokio::test]
+    async fn test_write_config_with_telegram() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -789,18 +961,136 @@ mod tests {
             chat_id: "-100123".to_string(),
         };
 
-        write_config(&path, &target, &notif).unwrap();
+        write_config(&path, &target, &notif, &LlmChoice::Skip)
+            .await
+            .unwrap();
+
+        // Read the raw TOML to verify secrets are encrypted on disk.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("123:ABC"),
+            "Telegram bot token must not appear plaintext on disk"
+        );
 
         let cfg = load_existing_config(&path);
-        assert_eq!(cfg.targets.len(), 1);
-        assert_eq!(cfg.targets[0].name, "prod-web-1");
-        let n = cfg.notifications.unwrap();
-        assert_eq!(n.telegram_bot_token.unwrap(), "123:ABC");
-        assert_eq!(n.telegram_chat_id.unwrap(), "-100123");
+        let targets = cfg.targets.as_ref().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "prod-web-1");
+        // key_secret must be stored encrypted, not as the original plaintext
+        let stored_key = targets[0].key_secret.as_deref().unwrap();
+        assert!(
+            stored_key.starts_with("enc2:"),
+            "key_secret should be encrypted with enc2: prefix, got: {stored_key}"
+        );
+        // Notification token must also be encrypted on disk
+        let stored_token = cfg
+            .notifications
+            .as_ref()
+            .unwrap()
+            .telegram_bot_token
+            .as_deref()
+            .unwrap();
+        assert!(
+            stored_token.starts_with("enc2:"),
+            "telegram_bot_token should be encrypted, got: {stored_token}"
+        );
+        // chat_id is not a secret — stored plaintext
+        assert_eq!(
+            cfg.notifications.as_ref().unwrap().telegram_chat_id.as_deref(),
+            Some("-100123")
+        );
     }
 
-    #[test]
-    fn test_write_config_appends_target() {
+    #[tokio::test]
+    async fn test_write_config_key_secret_is_encrypted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let plaintext_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-pem-content\n-----END OPENSSH PRIVATE KEY-----";
+        let target = TargetConfig {
+            name: "ssh-box".to_string(),
+            target_type: TargetType::Ssh,
+            host: Some("10.0.0.1".to_string()),
+            port: Some(22),
+            user: Some("admin".to_string()),
+            key_secret: Some(plaintext_key.to_string()),
+            autonomy: OpsClawAutonomy::Approve,
+            context_file: None,
+            probes: None,
+            data_sources: None,
+            escalation: None,
+            databases: None,
+            kubeconfig: None,
+            namespace: None,
+        };
+
+        write_config(&path, &target, &NotificationChoice::Skip, &LlmChoice::Skip)
+            .await
+            .unwrap();
+
+        // Verify the on-disk TOML does not contain the plaintext key
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("fake-pem-content"),
+            "Plaintext key must not appear in config.toml"
+        );
+
+        // Verify the loaded config has an enc2: encrypted value
+        let cfg = load_existing_config(&path);
+        let stored = cfg.targets.as_ref().unwrap()[0].key_secret.as_deref().unwrap();
+        assert!(
+            stored.starts_with("enc2:"),
+            "key_secret should be encrypted, got: {stored}"
+        );
+
+        // Verify decryption round-trips back to the original
+        let store = zeroclaw::security::SecretStore::new(dir.path(), true);
+        let decrypted = store.decrypt(stored).unwrap();
+        assert_eq!(decrypted, plaintext_key);
+    }
+
+    #[tokio::test]
+    async fn test_write_config_already_encrypted_key_not_double_encrypted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Pre-encrypt a key as if Config::save() already ran
+        let store = zeroclaw::security::SecretStore::new(dir.path(), true);
+        let already_encrypted = store.encrypt("my-pem-content").unwrap();
+        assert!(already_encrypted.starts_with("enc2:"));
+
+        let target = TargetConfig {
+            name: "pre-enc-box".to_string(),
+            target_type: TargetType::Ssh,
+            host: Some("10.0.0.2".to_string()),
+            port: Some(22),
+            user: Some("root".to_string()),
+            key_secret: Some(already_encrypted.clone()),
+            autonomy: OpsClawAutonomy::Approve,
+            context_file: None,
+            probes: None,
+            data_sources: None,
+            escalation: None,
+            databases: None,
+            kubeconfig: None,
+            namespace: None,
+        };
+
+        write_config(&path, &target, &NotificationChoice::Skip, &LlmChoice::Skip)
+            .await
+            .unwrap();
+
+        let cfg = load_existing_config(&path);
+        let stored = cfg.targets.as_ref().unwrap()[0].key_secret.as_deref().unwrap();
+        // Should still start with enc2: (not double-wrapped)
+        assert!(stored.starts_with("enc2:"));
+        // Should decrypt to the original plaintext
+        let decrypted = store.decrypt(stored).unwrap();
+        assert_eq!(decrypted, "my-pem-content");
+    }
+
+    #[tokio::test]
+    async fn test_write_config_appends_target() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -820,7 +1110,9 @@ mod tests {
             kubeconfig: None,
             namespace: None,
         };
-        write_config(&path, &t1, &NotificationChoice::Skip).unwrap();
+        write_config(&path, &t1, &NotificationChoice::Skip, &LlmChoice::Skip)
+            .await
+            .unwrap();
 
         let t2 = TargetConfig {
             name: "box-2".to_string(),
@@ -838,16 +1130,19 @@ mod tests {
             kubeconfig: None,
             namespace: None,
         };
-        write_config(&path, &t2, &NotificationChoice::Skip).unwrap();
+        write_config(&path, &t2, &NotificationChoice::Skip, &LlmChoice::Skip)
+            .await
+            .unwrap();
 
         let cfg = load_existing_config(&path);
-        assert_eq!(cfg.targets.len(), 2);
-        assert_eq!(cfg.targets[0].name, "box-1");
-        assert_eq!(cfg.targets[1].name, "box-2");
+        let targets = cfg.targets.as_ref().unwrap();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].name, "box-1");
+        assert_eq!(targets[1].name, "box-2");
     }
 
-    #[test]
-    fn test_write_config_replaces_same_name() {
+    #[tokio::test]
+    async fn test_write_config_replaces_same_name() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -867,7 +1162,9 @@ mod tests {
             kubeconfig: None,
             namespace: None,
         };
-        write_config(&path, &t1, &NotificationChoice::Skip).unwrap();
+        write_config(&path, &t1, &NotificationChoice::Skip, &LlmChoice::Skip)
+            .await
+            .unwrap();
 
         let t1_updated = TargetConfig {
             name: "box-1".to_string(),
@@ -885,10 +1182,12 @@ mod tests {
             kubeconfig: None,
             namespace: None,
         };
-        write_config(&path, &t1_updated, &NotificationChoice::Skip).unwrap();
+        write_config(&path, &t1_updated, &NotificationChoice::Skip, &LlmChoice::Skip)
+            .await
+            .unwrap();
 
         let cfg = load_existing_config(&path);
-        assert_eq!(cfg.targets.len(), 1);
+        assert_eq!(cfg.targets.as_ref().unwrap().len(), 1);
     }
 
     #[test]
@@ -904,8 +1203,8 @@ mod tests {
         assert_eq!(content, "Redis is for sessions only");
     }
 
-    #[test]
-    fn test_write_config_with_context_file() {
+    #[tokio::test]
+    async fn test_write_config_with_context_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -926,18 +1225,21 @@ mod tests {
             namespace: None,
         };
 
-        write_config(&path, &target, &NotificationChoice::Skip).unwrap();
+        write_config(&path, &target, &NotificationChoice::Skip, &LlmChoice::Skip)
+            .await
+            .unwrap();
 
         let cfg = load_existing_config(&path);
-        assert_eq!(cfg.targets.len(), 1);
+        let targets = cfg.targets.as_ref().unwrap();
+        assert_eq!(targets.len(), 1);
         assert_eq!(
-            cfg.targets[0].context_file.as_deref(),
+            targets[0].context_file.as_deref(),
             Some("~/.opsclaw/context/ctx-box.md")
         );
     }
 
-    #[test]
-    fn test_write_config_with_data_sources() {
+    #[tokio::test]
+    async fn test_write_config_with_data_sources() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -964,11 +1266,14 @@ mod tests {
             namespace: None,
         };
 
-        write_config(&path, &target, &NotificationChoice::Skip).unwrap();
+        write_config(&path, &target, &NotificationChoice::Skip, &LlmChoice::Skip)
+            .await
+            .unwrap();
 
         let cfg = load_existing_config(&path);
-        assert_eq!(cfg.targets.len(), 1);
-        let loaded_ds = cfg.targets[0].data_sources.as_ref().unwrap();
+        let targets = cfg.targets.as_ref().unwrap();
+        assert_eq!(targets.len(), 1);
+        let loaded_ds = targets[0].data_sources.as_ref().unwrap();
         assert_eq!(loaded_ds["prometheus"]["url"], "http://localhost:9090");
         assert_eq!(loaded_ds["seq"]["url"], "http://localhost:5341");
         assert_eq!(loaded_ds["seq"]["api_key"], "abc123");

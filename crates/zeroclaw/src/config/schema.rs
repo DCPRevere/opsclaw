@@ -7027,6 +7027,25 @@ impl Config {
                 "config.security.nevis.client_secret",
             )?;
 
+            // Decrypt OpsClaw notification secrets
+            if let Some(ref mut notif) = config.notifications {
+                decrypt_optional_secret(
+                    &store,
+                    &mut notif.telegram_bot_token,
+                    "config.notifications.telegram_bot_token",
+                )?;
+                decrypt_optional_secret(
+                    &store,
+                    &mut notif.slack_webhook_url,
+                    "config.notifications.slack_webhook_url",
+                )?;
+                decrypt_optional_secret(
+                    &store,
+                    &mut notif.webhook_bearer_token,
+                    "config.notifications.webhook_bearer_token",
+                )?;
+            }
+
             // Notion API key (top-level, not in ChannelsConfig)
             if !config.notion.api_key.is_empty() {
                 decrypt_secret(&store, &mut config.notion.api_key, "config.notion.api_key")?;
@@ -8202,6 +8221,25 @@ impl Config {
             &mut config_to_save.security.nevis.client_secret,
             "config.security.nevis.client_secret",
         )?;
+
+        // Encrypt OpsClaw notification secrets
+        if let Some(ref mut notif) = config_to_save.notifications {
+            encrypt_optional_secret(
+                &store,
+                &mut notif.telegram_bot_token,
+                "config.notifications.telegram_bot_token",
+            )?;
+            encrypt_optional_secret(
+                &store,
+                &mut notif.slack_webhook_url,
+                "config.notifications.slack_webhook_url",
+            )?;
+            encrypt_optional_secret(
+                &store,
+                &mut notif.webhook_bearer_token,
+                "config.notifications.webhook_bearer_token",
+            )?;
+        }
 
         // Notion API key (top-level, not in ChannelsConfig)
         if !config_to_save.notion.api_key.is_empty() {

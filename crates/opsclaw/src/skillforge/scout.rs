@@ -73,7 +73,7 @@ pub struct GitHubScout {
 }
 
 impl GitHubScout {
-    pub fn new(token: Option<String>) -> Self {
+    pub fn new(token: Option<&str>) -> Self {
         use std::time::Duration;
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -85,7 +85,7 @@ impl GitHubScout {
             reqwest::header::USER_AGENT,
             "OpsClaw-SkillForge/0.1".parse().expect("valid header"),
         );
-        if let Some(ref t) = token {
+        if let Some(t) = token {
             if let Ok(val) = format!("Bearer {t}").parse() {
                 headers.insert(reqwest::header::AUTHORIZATION, val);
             }

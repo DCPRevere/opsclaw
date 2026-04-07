@@ -1,4 +1,4 @@
-# Justfile - Convenient command runner for ZeroClaw development
+# Justfile - Convenient command runner for OpsClaw development
 # https://github.com/casey/just
 
 # Default recipe to display help
@@ -41,7 +41,7 @@ build-debug:
 clean:
     cargo clean
 
-# Run zeroclaw with example config (for development)
+# Run opsclaw with example config (for development)
 dev *ARGS:
     cargo run -- {{ARGS}}
 

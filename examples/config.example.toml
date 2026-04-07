@@ -131,7 +131,7 @@ allow_override = false
 
 # ── ACP (Agent Control Protocol) Server ───────────────────────────
 # JSON-RPC 2.0 server over stdio for IDE and tool integration.
-# Start with: zeroclaw acp
+# Start with: opsclaw acp
 # [acp]
 # Maximum number of concurrent agent sessions. Default: 10
 # max_sessions = 10

@@ -1,7 +1,7 @@
 ---
 name: browser
 description: Headless browser automation using agent-browser CLI
-metadata: {"zeroclaw":{"emoji":"🌐","requires":{"bins":["agent-browser"]}}}
+metadata: {"opsclaw":{"emoji":"🌐","requires":{"bins":["agent-browser"]}}}
 ---
 
 # Browser Skill
@@ -93,7 +93,7 @@ agent-browser screenshot --full page.png
 ## Configuration
 
 The browser tool is enabled by default with `allowed_domains = ["*"]` and
-`backend = "agent_browser"`. To customize, edit `~/.zeroclaw/config.toml`:
+`backend = "agent_browser"`. To customize, edit `~/.opsclaw/config.toml`:
 
 ```toml
 [browser]

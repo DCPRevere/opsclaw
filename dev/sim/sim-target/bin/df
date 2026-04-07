@@ -1,0 +1,6 @@
+#!/bin/bash
+if [ -f /sim/active-scenario.sh ]; then
+    source /sim/active-scenario.sh
+    if type sim_df &>/dev/null; then sim_df "$@"; exit; fi
+fi
+exec /usr/bin/df "$@"

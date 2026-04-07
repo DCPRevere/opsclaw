@@ -1,0 +1,23 @@
+# OpsClaw Simulation Environment
+#
+# Usage: managed via sim.sh (don't run docker compose directly)
+name: opsclaw-sim
+services:
+  sim-target:
+    build: ./sim-target
+    container_name: opsclaw-sim-target
+    environment:
+      - AUTHORIZED_KEY=${SIM_SSH_PUBKEY}
+      - SSH_PORT=2222
+    volumes:
+      - ./scenarios:/sim/scenarios:ro
+    network_mode: host
+
+  webhook-sink:
+    build: ./webhook-sink
+    container_name: opsclaw-webhook-sink
+    volumes:
+      - ./.state:/data
+    network_mode: host
+    environment:
+      - PORT=9999

@@ -9,7 +9,7 @@ Options:
     --mode brief|full   Output mode (default: full)
                         brief: billable minutes/hours table only
                         full:  detailed breakdown with per-run list
-    --repo OWNER/NAME   Repository (default: zeroclaw-labs/zeroclaw)
+    --repo OWNER/NAME   Repository (default: dcprevere/opsclaw)
     -h, --help          Show this help message
 """
 
@@ -38,8 +38,8 @@ def parse_args():
     )
     parser.add_argument(
         "--repo",
-        default="zeroclaw-labs/zeroclaw",
-        help="Repository in OWNER/NAME format (default: zeroclaw-labs/zeroclaw)",
+        default="dcprevere/opsclaw",
+        help="Repository in OWNER/NAME format (default: dcprevere/opsclaw)",
     )
     return parser.parse_args()
 

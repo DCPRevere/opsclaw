@@ -37,8 +37,8 @@ export default function Sidebar() {
         <div className="relative shrink-0">
           <div className="absolute -inset-1.5 rounded-xl" style={{ background: 'linear-gradient(135deg, rgba(var(--pc-accent-rgb), 0.15), rgba(var(--pc-accent-rgb), 0.05))' }} />
           <img
-            src={`${basePath}/_app/zeroclaw-trans.png`}
-            alt="ZeroClaw"
+            src={`${basePath}/_app/opsclaw-trans.png`}
+            alt="OpsClaw"
             className="relative h-9 w-9 rounded-xl object-cover"
             onError={(e) => {
               const img = e.currentTarget;
@@ -47,7 +47,7 @@ export default function Sidebar() {
           />
         </div>
         <span className="text-sm font-semibold tracking-wide" style={{ color: 'var(--pc-text-primary)' }}>
-          ZeroClaw
+          OpsClaw
         </span>
       </div>
 
@@ -86,7 +86,7 @@ export default function Sidebar() {
 
       {/* Footer */}
       <div className="px-5 py-4 border-t text-[10px] uppercase tracking-wider" style={{ borderColor: 'var(--pc-border)', color: 'var(--pc-text-faint)' }}>
-        ZeroClaw Runtime
+        OpsClaw Runtime
       </div>
     </aside>
   );

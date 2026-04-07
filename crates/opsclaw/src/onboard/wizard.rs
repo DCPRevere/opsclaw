@@ -212,6 +212,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         opencode_cli: crate::config::OpenCodeCliConfig::default(),
         sop: crate::config::SopConfig::default(),
         shell_tool: crate::config::ShellToolConfig::default(),
+        trust: zeroclaw::trust::TrustConfig::default(),
     };
 
     println!(
@@ -655,6 +656,7 @@ async fn run_quick_setup_with_home(
         opencode_cli: crate::config::OpenCodeCliConfig::default(),
         sop: crate::config::SopConfig::default(),
         shell_tool: crate::config::ShellToolConfig::default(),
+        trust: zeroclaw::trust::TrustConfig::default(),
     };
 
     config.save().await?;
@@ -3938,6 +3940,10 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     interrupt_on_new_message: false,
                     mention_only: false,
                     proxy_url: None,
+                    stream_mode: Default::default(),
+                    draft_update_interval_ms: Default::default(),
+                    multi_message_delay_ms: Default::default(),
+                    stall_timeout_secs: Default::default(),
                 });
             }
             ChannelMenuChoice::Slack => {
@@ -4073,6 +4079,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     proxy_url: None,
                     stream_drafts: false,
                     draft_update_interval_ms: 1200,
+                    cancel_reaction: Default::default(),
                 });
             }
             ChannelMenuChoice::IMessage => {
@@ -4231,6 +4238,10 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     allowed_users,
                     allowed_rooms: vec![],
                     interrupt_on_new_message: false,
+                    stream_mode: Default::default(),
+                    draft_update_interval_ms: Default::default(),
+                    multi_message_delay_ms: Default::default(),
+                    recovery_key: Default::default(),
                 });
             }
             ChannelMenuChoice::Signal => {
@@ -4428,6 +4439,9 @@ fn setup_channels() -> Result<ChannelsConfig> {
                         group_policy: WhatsAppChatPolicy::default(),
                         self_chat_mode: false,
                         proxy_url: None,
+                        dm_mention_patterns: Default::default(),
+                        group_mention_patterns: Default::default(),
+                        mention_only: Default::default(),
                     });
 
                     println!(
@@ -4534,6 +4548,9 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     group_policy: WhatsAppChatPolicy::default(),
                     self_chat_mode: false,
                     proxy_url: None,
+                    dm_mention_patterns: Default::default(),
+                    group_mention_patterns: Default::default(),
+                    mention_only: Default::default(),
                 });
             }
             ChannelMenuChoice::Linq => {
@@ -4868,6 +4885,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     },
                     allowed_users,
                     proxy_url: None,
+                    bot_name: Default::default(),
                 });
 
                 println!("  {} Nextcloud Talk configured", style("✅").green().bold());
@@ -6260,7 +6278,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let workspace_root = tmp.path().join("opsclaw-data");
         let workspace_dir = workspace_root.join("workspace");
-        let expected_config_path = workspace_root.join(".opsclaw").join("config.toml");
+        let expected_config_path = workspace_root.join(".zeroclaw").join("config.toml");
 
         let _workspace_env = EnvVarGuard::set(
             "OPSCLAW_WORKSPACE",
@@ -6738,12 +6756,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            soul.contains("Use emojis naturally (0-2 max"),
+            soul.contains("Use emojis sparingly"),
             "SOUL.md should include emoji usage guidance"
-        );
-        assert!(
-            soul.contains("Match emoji density to the user"),
-            "SOUL.md should include emoji-awareness guidance"
         );
     }
 
@@ -7622,6 +7636,7 @@ mod tests {
             webhook_secret: Some("secret".into()),
             allowed_users: vec!["*".into()],
             proxy_url: None,
+            bot_name: Default::default(),
         });
         assert!(has_launchable_channels(&channels));
 

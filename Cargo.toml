@@ -2,6 +2,10 @@
 members = ["crates/zeroclawlabs", "crates/opsclaw", "crates/robot-kit", "crates/aardvark-sys", "apps/tauri"]
 resolver = "2"
 
+[profile.dev]
+incremental = true
+opt-level = 0
+
 [profile.release]
 opt-level = "z"      # Optimize for size
 lto = "fat"          # Maximum cross-crate optimization for smaller binaries

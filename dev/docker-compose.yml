@@ -1,4 +1,4 @@
-# Development Environment for OpsClaw Agentic Testing
+# Development Environment for ZeroClaw Agentic Testing
 #
 # Use this for:
 # - Running the agent in a sandboxed environment
@@ -8,37 +8,37 @@
 # Usage:
 #   cd dev && ./cli.sh up
 #   or from root: ./dev/cli.sh up
-name: opsclaw-dev
+name: zeroclaw-dev
 services:
   # ── The Agent (Development Image) ──
   # Builds from source using the 'dev' stage of the root Dockerfile
-  opsclaw-dev:
+  zeroclaw-dev:
     build:
       context: ..
       dockerfile: Dockerfile
       target: dev
-    container_name: opsclaw-dev
+    container_name: zeroclaw-dev
     restart: unless-stopped
     environment:
-      - OPSCLAW_GATEWAY_PORT=42617
-      - SANDBOX_HOST=opsclaw-sandbox
+      - ZEROCLAW_GATEWAY_PORT=42617
+      - SANDBOX_HOST=zeroclaw-sandbox
     secrets:
-      - source: opsclaw_env
-        target: opsclaw_env
+      - source: zeroclaw_env
+        target: zeroclaw_env
     entrypoint: ["/bin/bash", "-lc"]
     command:
       - |
-        if [ -f /run/secrets/opsclaw_env ]; then
+        if [ -f /run/secrets/zeroclaw_env ]; then
           set -a
-          . /run/secrets/opsclaw_env
+          . /run/secrets/zeroclaw_env
           set +a
         fi
-        exec opsclaw gateway --port "${OPSCLAW_GATEWAY_PORT:-42617}" --host "[::]"
+        exec zeroclaw gateway start --port "${ZEROCLAW_GATEWAY_PORT:-42617}" --host "[::]"
     volumes:
-      # Mount single config file (avoids shadowing other files in .opsclaw)
-      - ../target/.opsclaw/config.toml:/opsclaw-data/.opsclaw/config.toml
+      # Mount single config file (avoids shadowing other files in .zeroclaw)
+      - ../target/.zeroclaw/config.toml:/zeroclaw-data/.zeroclaw/config.toml
       # Mount shared workspace
-      - ../playground:/opsclaw-data/workspace
+      - ../playground:/zeroclaw-data/workspace
     ports:
       - "127.0.0.1:42617:42617"
     networks:
@@ -50,7 +50,7 @@ services:
     build:
       context: sandbox # Context relative to dev/
       dockerfile: Dockerfile
-    container_name: opsclaw-sandbox
+    container_name: zeroclaw-sandbox
     hostname: dev-box
     command: ["tail", "-f", "/dev/null"]
     working_dir: /home/developer/workspace
@@ -68,5 +68,5 @@ networks:
     driver: bridge
 
 secrets:
-  opsclaw_env:
+  zeroclaw_env:
     file: ../.env

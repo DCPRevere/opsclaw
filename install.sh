@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# OpsClaw installer
+# ZeroClaw installer
 # POSIX preamble: ensure bash is available, then re-exec under bash.
 set -eu
 
@@ -25,7 +25,7 @@ _ensure_bash() {
   elif _have_cmd dnf; then _run_privileged dnf install -y bash
   elif _have_cmd pacman; then
     if _is_container_runtime; then
-      _PACMAN_CFG="$(mktemp /tmp/opsclaw-pacman.XXXXXX.conf)"
+      _PACMAN_CFG="$(mktemp /tmp/zeroclaw-pacman.XXXXXX.conf)"
       cp /etc/pacman.conf "$_PACMAN_CFG"
       grep -Eq '^[[:space:]]*DisableSandboxSyscalls([[:space:]]|$)' "$_PACMAN_CFG" || printf '\nDisableSandboxSyscalls\n' >> "$_PACMAN_CFG"
       _run_privileged pacman --config "$_PACMAN_CFG" -Sy --noconfirm
@@ -89,17 +89,15 @@ error() {
 
 usage() {
   cat <<'USAGE'
-OpsClaw installer — one-click bootstrap
+ZeroClaw installer — one-click bootstrap
 
 Usage:
   ./install.sh [options]
 
-The installer builds OpsClaw, configures your provider and API key,
+The installer builds ZeroClaw, configures your provider and API key,
 starts the gateway service, and opens the dashboard — all in one step.
 
 Options:
-  --guided                   Run interactive guided installer (default on Linux TTY)
-  --no-guided                Disable guided installer
   --docker                   Run install in Docker-compatible mode
   --install-system-deps      Install build dependencies (Linux/macOS)
   --install-rust             Install Rust via rustup if missing
@@ -109,6 +107,7 @@ Options:
   --api-key <key>            API key (skips interactive prompt)
   --provider <id>            Provider (default: openrouter)
   --model <id>               Model (optional)
+  --cargo-features <list>    Extra cargo features (comma/space separated)
   --skip-onboard             Skip provider/API key configuration
   --skip-build               Skip build step
   --skip-install             Skip cargo install step
@@ -117,7 +116,7 @@ Options:
 
 Examples:
   # One-click install (interactive)
-  curl -fsSL https://raw.githubusercontent.com/dcprevere/opsclaw/master/install.sh | bash
+  curl -fsSL https://zeroclawlabs.ai/install.sh | bash
 
   # Non-interactive with API key
   ./install.sh --api-key "sk-..." --provider openrouter
@@ -132,21 +131,53 @@ Examples:
   ./install.sh --skip-onboard
 
 Environment:
-  OPSCLAW_CONTAINER_CLI     Container CLI command (default: docker; auto-fallback: podman)
-  OPSCLAW_DOCKER_DATA_DIR   Host path for Docker config/workspace persistence
-  OPSCLAW_DOCKER_IMAGE      Docker image tag to build/run (default: opsclaw-bootstrap:local)
-  OPSCLAW_API_KEY           Used when --api-key is not provided
-  OPSCLAW_PROVIDER          Used when --provider is not provided (default: openrouter)
-  OPSCLAW_MODEL             Used when --model is not provided
-  OPSCLAW_BOOTSTRAP_MIN_RAM_MB   Minimum RAM threshold for source build preflight (default: 2048)
-  OPSCLAW_BOOTSTRAP_MIN_DISK_MB  Minimum free disk threshold for source build preflight (default: 6144)
-  OPSCLAW_DISABLE_ALPINE_AUTO_DEPS
+  ZEROCLAW_CONTAINER_CLI     Container CLI command (default: docker; auto-fallback: podman)
+  ZEROCLAW_DOCKER_DATA_DIR   Host path for Docker config/workspace persistence
+  ZEROCLAW_DOCKER_IMAGE      Docker image tag to build/run (default: zeroclaw-bootstrap:local)
+  ZEROCLAW_API_KEY           Used when --api-key is not provided
+  ZEROCLAW_PROVIDER          Used when --provider is not provided (default: openrouter)
+  ZEROCLAW_MODEL             Used when --model is not provided
+  ZEROCLAW_CARGO_FEATURES    Extra cargo features for source builds (comma/space separated)
+  ZEROCLAW_BOOTSTRAP_MIN_RAM_MB   Minimum RAM threshold for source build preflight (default: 2048)
+  ZEROCLAW_BOOTSTRAP_MIN_DISK_MB  Minimum free disk threshold for source build preflight (default: 6144)
+  ZEROCLAW_DISABLE_ALPINE_AUTO_DEPS
                             Set to 1 to disable Alpine auto-install of missing prerequisites
 USAGE
 }
 
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+append_cargo_feature() {
+  local feature="${1:-}"
+  [[ -n "$feature" ]] || return 0
+  case ",${CARGO_FEATURES_CSV:-}," in
+    *,"$feature",*) return 0 ;;
+  esac
+  if [[ -n "${CARGO_FEATURES_CSV:-}" ]]; then
+    CARGO_FEATURES_CSV+=",${feature}"
+  else
+    CARGO_FEATURES_CSV="$feature"
+  fi
+}
+
+append_cargo_features_from_input() {
+  local raw="${1:-}" token
+  raw="${raw//,/ }"
+  for token in $raw; do
+    append_cargo_feature "$token"
+  done
+}
+
+refresh_cargo_feature_args() {
+  CARGO_FEATURE_ARGS=()
+  if [[ "${CARGO_NO_DEFAULT_FEATURES:-false}" == true ]]; then
+    CARGO_FEATURE_ARGS+=(--no-default-features)
+  fi
+  if [[ -n "${CARGO_FEATURES_CSV:-}" ]]; then
+    CARGO_FEATURE_ARGS+=(--features "$CARGO_FEATURES_CSV")
+  fi
 }
 
 get_total_memory_mb() {
@@ -277,8 +308,8 @@ should_attempt_prebuilt_for_resources() {
   local workspace="${1:-.}"
   local min_ram_mb min_disk_mb total_ram_mb free_disk_mb low_resource
 
-  min_ram_mb="${OPSCLAW_BOOTSTRAP_MIN_RAM_MB:-2048}"
-  min_disk_mb="${OPSCLAW_BOOTSTRAP_MIN_DISK_MB:-6144}"
+  min_ram_mb="${ZEROCLAW_BOOTSTRAP_MIN_RAM_MB:-2048}"
+  min_disk_mb="${ZEROCLAW_BOOTSTRAP_MIN_DISK_MB:-6144}"
   total_ram_mb="$(get_total_memory_mb || true)"
   free_disk_mb="$(get_available_disk_mb "$workspace" || true)"
   low_resource=false
@@ -310,7 +341,7 @@ should_attempt_prebuilt_for_resources() {
 
 resolve_asset_url() {
   local asset_name="$1"
-  local api_url="https://api.github.com/repos/dcprevere/opsclaw/releases"
+  local api_url="https://api.github.com/repos/zeroclaw-labs/zeroclaw/releases"
   local releases_json download_url
 
   # Fetch up to 10 recent releases (includes prereleases) and find the first
@@ -359,16 +390,16 @@ install_prebuilt_binary() {
     return 1
   fi
 
-  asset_name="opsclaw-${target}.tar.gz"
+  asset_name="zeroclaw-${target}.tar.gz"
 
   # Try the GitHub API first to find the newest release (including prereleases)
   # that actually contains the asset, then fall back to /releases/latest/.
   archive_url="$(resolve_asset_url "$asset_name" || true)"
   if [[ -z "$archive_url" ]]; then
-    archive_url="https://github.com/dcprevere/opsclaw/releases/latest/download/${asset_name}"
+    archive_url="https://github.com/zeroclaw-labs/zeroclaw/releases/latest/download/${asset_name}"
   fi
 
-  temp_dir="$(mktemp -d -t opsclaw-prebuilt-XXXXXX)"
+  temp_dir="$(mktemp -d -t zeroclaw-prebuilt-XXXXXX)"
   archive_path="$temp_dir/${asset_name}"
 
   step_dot "Attempting pre-built binary install for target: $target"
@@ -384,22 +415,22 @@ install_prebuilt_binary() {
     return 1
   fi
 
-  extracted_bin="$temp_dir/opsclaw"
+  extracted_bin="$temp_dir/zeroclaw"
   if [[ ! -x "$extracted_bin" ]]; then
-    extracted_bin="$(find "$temp_dir" -maxdepth 2 -type f -name opsclaw -perm -u+x | head -n 1 || true)"
+    extracted_bin="$(find "$temp_dir" -maxdepth 2 -type f -name zeroclaw -perm -u+x | head -n 1 || true)"
   fi
   if [[ -z "$extracted_bin" || ! -x "$extracted_bin" ]]; then
-    warn "Archive did not contain an executable opsclaw binary."
+    warn "Archive did not contain an executable zeroclaw binary."
     rm -rf "$temp_dir"
     return 1
   fi
 
   install_dir="$HOME/.cargo/bin"
   mkdir -p "$install_dir"
-  install -m 0755 "$extracted_bin" "$install_dir/opsclaw"
+  install -m 0755 "$extracted_bin" "$install_dir/zeroclaw"
   rm -rf "$temp_dir"
 
-  step_ok "Installed pre-built binary to $install_dir/opsclaw"
+  step_ok "Installed pre-built binary to $install_dir/zeroclaw"
   if [[ ":$PATH:" != *":$install_dir:"* ]]; then
     warn "$install_dir is not in PATH for this shell."
     warn "Run: export PATH=\"$install_dir:\$PATH\""
@@ -444,7 +475,7 @@ run_pacman() {
 
   local pacman_cfg_tmp=""
   local pacman_rc=0
-  pacman_cfg_tmp="$(mktemp /tmp/opsclaw-pacman.XXXXXX.conf)"
+  pacman_cfg_tmp="$(mktemp /tmp/zeroclaw-pacman.XXXXXX.conf)"
   cp /etc/pacman.conf "$pacman_cfg_tmp"
   if ! grep -Eq '^[[:space:]]*DisableSandboxSyscalls([[:space:]]|$)' "$pacman_cfg_tmp"; then
     printf '\nDisableSandboxSyscalls\n' >> "$pacman_cfg_tmp"
@@ -483,78 +514,6 @@ find_missing_alpine_prereqs() {
     if ! apk info -e "$pkg" >/dev/null 2>&1; then
       ALPINE_MISSING_PKGS+=("$pkg")
     fi
-  done
-}
-
-bool_to_word() {
-  if [[ "$1" == true ]]; then
-    echo "yes"
-  else
-    echo "no"
-  fi
-}
-
-guided_open_input() {
-  # Use stdin directly when it is an interactive terminal (e.g. SSH into LXC).
-  # Subshell probing of /dev/stdin fails in some constrained containers even
-  # when FD 0 is perfectly usable, so skip the probe and trust -t 0.
-  if [[ -t 0 ]]; then
-    GUIDED_FD=0
-    return 0
-  fi
-
-  # Non-interactive stdin: try to open /dev/tty as an explicit fd.
-  exec {GUIDED_FD}</dev/tty 2>/dev/null || return 1
-}
-
-guided_read() {
-  local __target_var="$1"
-  local __prompt="$2"
-  local __silent="${3:-false}"
-  local __value=""
-
-  [[ -n "${GUIDED_FD:-}" ]] || guided_open_input || return 1
-
-  if [[ "$__silent" == true ]]; then
-    read -r -s -u "$GUIDED_FD" -p "$__prompt" __value || return 1
-    echo
-  else
-    read -r -u "$GUIDED_FD" -p "$__prompt" __value || return 1
-  fi
-
-  printf -v "$__target_var" '%s' "$__value"
-  return 0
-}
-
-prompt_yes_no() {
-  local question="$1"
-  local default_answer="$2"
-  local prompt=""
-  local answer=""
-
-  if [[ "$default_answer" == "yes" ]]; then
-    prompt="[Y/n]"
-  else
-    prompt="[y/N]"
-  fi
-
-  while true; do
-    if ! guided_read answer "$question $prompt "; then
-      error "guided installer input was interrupted."
-      exit 1
-    fi
-    answer="${answer:-$default_answer}"
-    case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
-      y|yes)
-        return 0
-        ;;
-      n|no)
-        return 1
-        ;;
-      *)
-        echo "Please answer yes or no."
-        ;;
-    esac
   done
 }
 
@@ -614,7 +573,7 @@ MSG
       # Detect un-accepted Xcode/CLT license (causes `cc` to exit 69).
       # xcrun --show-sdk-path can succeed even without an accepted license,
       # so we test-compile a trivial C file which reliably triggers the error.
-      _xcode_test_file="$(mktemp /tmp/opsclaw-xcode-check.XXXXXX.c)"
+      _xcode_test_file="$(mktemp /tmp/zeroclaw-xcode-check.XXXXXX.c)"
       printf 'int main(){return 0;}\n' > "$_xcode_test_file"
       if ! cc -x c "$_xcode_test_file" -o /dev/null 2>/dev/null; then
         rm -f "$_xcode_test_file"
@@ -672,165 +631,14 @@ install_rust_toolchain() {
   fi
 }
 
-prompt_provider() {
-  local provider_input=""
-  echo
-  echo -e "  ${BOLD}Select your AI provider${RESET}"
-  echo -e "  ${DIM}(press Enter for default: ${PROVIDER})${RESET}"
-  echo
-  echo -e "  ${BOLD_BLUE}1)${RESET} OpenRouter ${DIM}(recommended — multi-model gateway)${RESET}"
-  echo -e "  ${BOLD_BLUE}2)${RESET} Anthropic ${DIM}(Claude)${RESET}"
-  echo -e "  ${BOLD_BLUE}3)${RESET} OpenAI ${DIM}(GPT)${RESET}"
-  echo -e "  ${BOLD_BLUE}4)${RESET} Gemini ${DIM}(Google)${RESET}"
-  echo -e "  ${BOLD_BLUE}5)${RESET} Ollama ${DIM}(local, no API key needed)${RESET}"
-  echo -e "  ${BOLD_BLUE}6)${RESET} Groq ${DIM}(fast inference)${RESET}"
-  echo -e "  ${BOLD_BLUE}7)${RESET} Venice ${DIM}(privacy-focused)${RESET}"
-  echo -e "  ${BOLD_BLUE}8)${RESET} Other ${DIM}(enter provider ID manually)${RESET}"
-  echo
-
-  if ! guided_read provider_input "  Provider [1]: "; then
-    error "input was interrupted."
-    exit 1
-  fi
-
-  case "${provider_input:-1}" in
-    1|"") PROVIDER="openrouter" ;;
-    2) PROVIDER="anthropic" ;;
-    3) PROVIDER="openai" ;;
-    4) PROVIDER="gemini" ;;
-    5) PROVIDER="ollama" ;;
-    6) PROVIDER="groq" ;;
-    7) PROVIDER="venice" ;;
-    8)
-      if ! guided_read provider_input "  Provider ID: "; then
-        error "input was interrupted."
-        exit 1
-      fi
-      if [[ -n "$provider_input" ]]; then
-        PROVIDER="$provider_input"
-      fi
-      ;;
-    *) PROVIDER="openrouter" ;;
-  esac
-}
-
-prompt_api_key() {
-  local api_key_input=""
-
-  if [[ "$PROVIDER" == "ollama" ]]; then
-    step_ok "Ollama selected — no API key required"
-    return 0
-  fi
-
-  echo
-  if [[ -n "$API_KEY" ]]; then
-    step_ok "API key provided via environment/flag"
-    return 0
-  fi
-
-  echo -e "  ${BOLD}Enter your ${PROVIDER} API key${RESET}"
-  echo -e "  ${DIM}(input is hidden; leave empty to configure later)${RESET}"
-  echo
-
-  if ! guided_read api_key_input "  API key: " true; then
-    echo
-    error "input was interrupted."
-    exit 1
-  fi
-  echo
-
-  if [[ -n "$api_key_input" ]]; then
-    API_KEY="$api_key_input"
-    step_ok "API key set"
-  else
-    warn "No API key entered — you can configure it later with opsclaw onboard"
-    SKIP_ONBOARD=true
-  fi
-}
-
-prompt_model() {
-  local model_input=""
-
-  echo -e "  ${DIM}Model (press Enter for provider default):${RESET}"
-  if ! guided_read model_input "  Model [default]: "; then
-    error "input was interrupted."
-    exit 1
-  fi
-
-  if [[ -n "$model_input" ]]; then
-    MODEL="$model_input"
-  fi
-}
-
-run_guided_installer() {
-  local os_name="$1"
-
-  if ! guided_open_input >/dev/null; then
-    error "guided installer requires an interactive terminal."
-    error "Run from a terminal, or pass --no-guided with explicit flags."
-    exit 1
-  fi
-
-  echo
-  echo -e "  ${BOLD_BLUE}${CRAB} OpsClaw Guided Installer${RESET}"
-  echo -e "  ${DIM}Answer a few questions, then the installer will handle everything.${RESET}"
-  echo
-
-  # --- System dependencies ---
-  if [[ "$os_name" == "Linux" ]]; then
-    if prompt_yes_no "Install Linux build dependencies (toolchain/pkg-config/git/curl)?" "yes"; then
-      INSTALL_SYSTEM_DEPS=true
-    fi
-  else
-    if prompt_yes_no "Install system dependencies for $os_name?" "no"; then
-      INSTALL_SYSTEM_DEPS=true
-    fi
-  fi
-
-  # --- Rust toolchain ---
-  if have_cmd cargo && have_cmd rustc; then
-    step_ok "Detected Rust toolchain: $(rustc --version)"
-  else
-    if prompt_yes_no "Rust toolchain not found. Install Rust via rustup now?" "yes"; then
-      INSTALL_RUST=true
-    fi
-  fi
-
-  # --- Provider + API key (inline onboarding) ---
-  prompt_provider
-  prompt_api_key
-  prompt_model
-
-  # --- Install plan summary ---
-  echo
-  echo -e "${BOLD}Install plan${RESET}"
-  step_dot "OS: $(echo "$os_name" | tr '[:upper:]' '[:lower:]')"
-  step_dot "Install system deps: $(bool_to_word "$INSTALL_SYSTEM_DEPS")"
-  step_dot "Install Rust: $(bool_to_word "$INSTALL_RUST")"
-  step_dot "Provider: ${PROVIDER}"
-  if [[ -n "$MODEL" ]]; then
-    step_dot "Model: ${MODEL}"
-  fi
-  if [[ -n "$API_KEY" ]]; then
-    step_ok "API key: configured"
-  else
-    step_dot "API key: not set (configure later)"
-  fi
-
-  echo
-  if ! prompt_yes_no "Proceed with this install plan?" "yes"; then
-    info "Installation canceled by user."
-    exit 0
-  fi
-}
 
 ensure_default_config_and_workspace() {
   # Creates a minimal config.toml and workspace scaffold files when the
   # onboard wizard was skipped (e.g. --skip-build --prefer-prebuilt, or
   # Docker mode without an API key).
   #
-  # $1 — config directory  (e.g. ~/.opsclaw or $docker_data_dir/.opsclaw)
-  # $2 — workspace directory (e.g. ~/.opsclaw/workspace or $docker_data_dir/workspace)
+  # $1 — config directory  (e.g. ~/.zeroclaw or $docker_data_dir/.zeroclaw)
+  # $2 — workspace directory (e.g. ~/.zeroclaw/workspace or $docker_data_dir/workspace)
   # $3 — provider name      (default: openrouter)
   local config_dir="$1"
   local workspace_dir="$2"
@@ -843,8 +651,8 @@ ensure_default_config_and_workspace() {
   if [[ ! -f "$config_path" ]]; then
     step_dot "Creating default config.toml"
     cat > "$config_path" <<TOML
-# OpsClaw configuration — generated by install.sh
-# Edit this file or run 'opsclaw onboard' to reconfigure.
+# ZeroClaw configuration — generated by install.sh
+# Edit this file or run 'zeroclaw onboard --tui' to reconfigure.
 
 default_provider = "${provider}"
 workspace_dir = "${workspace_dir}"
@@ -869,7 +677,7 @@ TOML
 
   # Seed workspace markdown files only if they don't already exist.
   local user_name="${USER:-User}"
-  local agent_name="OpsClaw"
+  local agent_name="ZeroClaw"
 
   _write_if_missing() {
     local filepath="$1"
@@ -958,12 +766,32 @@ You are **${agent_name}**. Built in Rust. 3MB binary. Zero bloat.
   unset -f _write_if_missing
 }
 
+_is_wsl() {
+  # Detect Windows Subsystem for Linux (WSL)
+  # WSL typically has microsoft-standard or microsoft in the kernel release
+  if [[ -f /proc/version ]] && grep -qi 'microsoft' /proc/version; then
+    return 0
+  fi
+  # WSL2 sets WSL_DISTRO_NAME or WSL_INTEROP environment variables
+  if [[ -n "${WSL_DISTRO_NAME:-}" || -n "${WSL_INTEROP:-}" ]]; then
+    return 0
+  fi
+  return 1
+}
+
 resolve_container_cli() {
   local requested_cli
-  requested_cli="${OPSCLAW_CONTAINER_CLI:-docker}"
+  requested_cli="${ZEROCLAW_CONTAINER_CLI:-docker}"
 
   if have_cmd "$requested_cli"; then
     CONTAINER_CLI="$requested_cli"
+    return 0
+  fi
+
+  # WSL: try docker.exe (Docker Desktop for Windows) if docker is not found
+  if [[ "$requested_cli" == "docker" ]] && _is_wsl && have_cmd docker.exe; then
+    info "Detected WSL environment with Docker Desktop"
+    CONTAINER_CLI="docker.exe"
     return 0
   fi
 
@@ -975,9 +803,9 @@ resolve_container_cli() {
 
   error "Container CLI '$requested_cli' is not installed."
   if [[ "$requested_cli" != "docker" ]]; then
-    error "Set OPSCLAW_CONTAINER_CLI to an installed Docker-compatible CLI (e.g., docker or podman)."
+    error "Set ZEROCLAW_CONTAINER_CLI to an installed Docker-compatible CLI (e.g., docker or podman)."
   else
-    error "Install Docker, install podman, or set OPSCLAW_CONTAINER_CLI to an available Docker-compatible CLI."
+    error "Install Docker, install podman, or set ZEROCLAW_CONTAINER_CLI to an available Docker-compatible CLI."
   fi
   exit 1
 }
@@ -996,17 +824,17 @@ run_docker_bootstrap() {
   local docker_image docker_data_dir default_data_dir fallback_image
   local config_mount workspace_mount
   local -a container_run_user_args container_run_namespace_args
-  docker_image="${OPSCLAW_DOCKER_IMAGE:-opsclaw-bootstrap:local}"
-  fallback_image="ghcr.io/dcprevere/opsclaw:latest"
+  docker_image="${ZEROCLAW_DOCKER_IMAGE:-zeroclaw-bootstrap:local}"
+  fallback_image="ghcr.io/zeroclaw-labs/zeroclaw:latest"
   if [[ "$TEMP_CLONE" == true ]]; then
-    default_data_dir="$HOME/.opsclaw-docker"
+    default_data_dir="$HOME/.zeroclaw-docker"
   else
-    default_data_dir="$WORK_DIR/.opsclaw-docker"
+    default_data_dir="$WORK_DIR/.zeroclaw-docker"
   fi
-  docker_data_dir="${OPSCLAW_DOCKER_DATA_DIR:-$default_data_dir}"
+  docker_data_dir="${ZEROCLAW_DOCKER_DATA_DIR:-$default_data_dir}"
   DOCKER_DATA_DIR="$docker_data_dir"
 
-  mkdir -p "$docker_data_dir/.opsclaw" "$docker_data_dir/workspace"
+  mkdir -p "$docker_data_dir/.zeroclaw" "$docker_data_dir/workspace"
 
   if [[ "$SKIP_INSTALL" == true ]]; then
     warn "--skip-install has no effect with --docker."
@@ -1019,7 +847,7 @@ run_docker_bootstrap() {
     info "Skipping Docker image build"
     if ! "$CONTAINER_CLI" image inspect "$docker_image" >/dev/null 2>&1; then
       warn "Local Docker image ($docker_image) was not found."
-      info "Pulling official OpsClaw image ($fallback_image)"
+      info "Pulling official ZeroClaw image ($fallback_image)"
       if ! "$CONTAINER_CLI" pull "$fallback_image"; then
         error "Failed to pull fallback Docker image: $fallback_image"
         error "Run without --skip-build to build locally, or verify access to GHCR."
@@ -1032,8 +860,8 @@ run_docker_bootstrap() {
     fi
   fi
 
-  config_mount="$docker_data_dir/.opsclaw:/opsclaw-data/.opsclaw"
-  workspace_mount="$docker_data_dir/workspace:/opsclaw-data/workspace"
+  config_mount="$docker_data_dir/.zeroclaw:/zeroclaw-data/.zeroclaw"
+  workspace_mount="$docker_data_dir/workspace:/zeroclaw-data/workspace"
   if [[ "$CONTAINER_CLI" == "podman" ]]; then
     config_mount+=":Z"
     workspace_mount+=":Z"
@@ -1070,20 +898,20 @@ run_docker_bootstrap() {
     "$CONTAINER_CLI" run --rm -it \
       "${container_run_namespace_args[@]+"${container_run_namespace_args[@]}"}" \
       "${container_run_user_args[@]}" \
-      -e HOME=/opsclaw-data \
-      -e OPSCLAW_WORKSPACE=/opsclaw-data/workspace \
+      -e HOME=/zeroclaw-data \
+      -e ZEROCLAW_WORKSPACE=/zeroclaw-data/workspace \
       -v "$config_mount" \
       -v "$workspace_mount" \
       "$docker_image" \
       "${onboard_cmd[@]}" || true
   else
-    info "Docker image ready. Run opsclaw onboard inside the container to configure."
+    info "Docker image ready. Run zeroclaw onboard --tui inside the container to configure."
   fi
 
   # Ensure config.toml and workspace scaffold exist on the host even when
   # onboard was skipped, failed, or ran non-interactively inside the container.
   ensure_default_config_and_workspace \
-    "$docker_data_dir/.opsclaw" \
+    "$docker_data_dir/.zeroclaw" \
     "$docker_data_dir/workspace" \
     "$PROVIDER"
 }
@@ -1091,10 +919,7 @@ run_docker_bootstrap() {
 SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" >/dev/null 2>&1 && pwd || pwd)"
 ROOT_DIR="$SCRIPT_DIR"
-REPO_URL="https://github.com/dcprevere/opsclaw.git"
-ORIGINAL_ARG_COUNT=$#
-GUIDED_MODE="auto"
-
+REPO_URL="https://github.com/zeroclaw-labs/zeroclaw.git"
 DOCKER_MODE=false
 INSTALL_SYSTEM_DEPS=false
 INSTALL_RUST=false
@@ -1105,19 +930,19 @@ SKIP_ONBOARD=false
 SKIP_BUILD=false
 SKIP_INSTALL=false
 PREBUILT_INSTALLED=false
-CONTAINER_CLI="${OPSCLAW_CONTAINER_CLI:-docker}"
-API_KEY="${OPSCLAW_API_KEY:-}"
-PROVIDER="${OPSCLAW_PROVIDER:-openrouter}"
-MODEL="${OPSCLAW_MODEL:-}"
+CONTAINER_CLI="${ZEROCLAW_CONTAINER_CLI:-docker}"
+API_KEY="${ZEROCLAW_API_KEY:-}"
+PROVIDER="${ZEROCLAW_PROVIDER:-openrouter}"
+MODEL="${ZEROCLAW_MODEL:-}"
+CARGO_FEATURES_INPUT="${ZEROCLAW_CARGO_FEATURES:-}"
+CARGO_NO_DEFAULT_FEATURES=false
+CARGO_FEATURES_CSV=""
+CARGO_FEATURE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --guided)
-      GUIDED_MODE="on"
-      shift
-      ;;
-    --no-guided)
-      GUIDED_MODE="off"
+    --guided|--no-guided)
+      warn "--guided / --no-guided are deprecated; the TUI wizard runs automatically after install."
       shift
       ;;
     --docker)
@@ -1172,6 +997,14 @@ while [[ $# -gt 0 ]]; do
       }
       shift 2
       ;;
+    --cargo-features)
+      CARGO_FEATURES_INPUT="${2:-}"
+      [[ -n "$CARGO_FEATURES_INPUT" ]] || {
+        error "--cargo-features requires a value"
+        exit 1
+      }
+      shift 2
+      ;;
     --build-first)
       SKIP_BUILD=false
       shift
@@ -1197,26 +1030,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+append_cargo_features_from_input "$CARGO_FEATURES_INPUT"
+refresh_cargo_feature_args
+
 OS_NAME="$(uname -s)"
 DEVICE_CLASS="$(detect_device_class)"
 step_dot "Device: $OS_NAME/$(uname -m) ($DEVICE_CLASS)"
-
-if [[ "$GUIDED_MODE" == "auto" ]]; then
-  if [[ "$OS_NAME" == "Linux" && "$ORIGINAL_ARG_COUNT" -eq 0 && -t 0 && -t 1 ]]; then
-    GUIDED_MODE="on"
-  else
-    GUIDED_MODE="off"
-  fi
-fi
-
-if [[ "$DOCKER_MODE" == true && "$GUIDED_MODE" == "on" ]]; then
-  warn "--guided is ignored with --docker."
-  GUIDED_MODE="off"
-fi
-
-if [[ "$GUIDED_MODE" == "on" ]]; then
-  run_guided_installer "$OS_NAME"
-fi
 
 if [[ "$DOCKER_MODE" == true ]]; then
   if [[ "$INSTALL_SYSTEM_DEPS" == true ]]; then
@@ -1226,11 +1045,11 @@ if [[ "$DOCKER_MODE" == true ]]; then
       warn "--install-rust is ignored with --docker."
   fi
 else
-  if [[ "$OS_NAME" == "Linux" && -z "${OPSCLAW_DISABLE_ALPINE_AUTO_DEPS:-}" ]] && have_cmd apk; then
+  if [[ "$OS_NAME" == "Linux" && -z "${ZEROCLAW_DISABLE_ALPINE_AUTO_DEPS:-}" ]] && have_cmd apk; then
     find_missing_alpine_prereqs
     if [[ ${#ALPINE_MISSING_PKGS[@]} -gt 0 && "$INSTALL_SYSTEM_DEPS" == false ]]; then
       info "Detected Alpine with missing prerequisites: ${ALPINE_MISSING_PKGS[*]}"
-      info "Auto-enabling system dependency installation (set OPSCLAW_DISABLE_ALPINE_AUTO_DEPS=1 to disable)."
+      info "Auto-enabling system dependency installation (set ZEROCLAW_DISABLE_ALPINE_AUTO_DEPS=1 to disable)."
       INSTALL_SYSTEM_DEPS=true
     fi
   fi
@@ -1242,7 +1061,7 @@ else
   # Always check Xcode/CLT license on macOS, regardless of --install-system-deps.
   # An un-accepted license causes `cc` to exit 69, breaking all Rust builds.
   if [[ "$OS_NAME" == "Darwin" ]]; then
-    _xcode_test_file="$(mktemp /tmp/opsclaw-xcode-check.XXXXXX.c)"
+    _xcode_test_file="$(mktemp /tmp/zeroclaw-xcode-check.XXXXXX.c)"
     printf 'int main(){return 0;}\n' > "$_xcode_test_file"
     if ! cc -x c "$_xcode_test_file" -o /dev/null 2>/dev/null; then
       rm -f "$_xcode_test_file"
@@ -1257,7 +1076,7 @@ else
       if [[ "$_xcode_accept_ok" == true ]]; then
         step_ok "Xcode license accepted"
         # Re-test compilation to confirm it's fixed.
-        _xcode_test_file="$(mktemp /tmp/opsclaw-xcode-check.XXXXXX.c)"
+        _xcode_test_file="$(mktemp /tmp/zeroclaw-xcode-check.XXXXXX.c)"
         printf 'int main(){return 0;}\n' > "$_xcode_test_file"
         if ! cc -x c "$_xcode_test_file" -o /dev/null 2>/dev/null; then
           rm -f "$_xcode_test_file"
@@ -1308,7 +1127,7 @@ if [[ ! -f "$WORK_DIR/Cargo.toml" ]]; then
       exit 1
     fi
 
-    TEMP_DIR="$(mktemp -d -t opsclaw-bootstrap-XXXXXX)"
+    TEMP_DIR="$(mktemp -d -t zeroclaw-bootstrap-XXXXXX)"
     info "No local repository detected; cloning latest master branch"
     git clone --depth 1 --branch master "$REPO_URL" "$TEMP_DIR"
     WORK_DIR="$TEMP_DIR"
@@ -1317,7 +1136,7 @@ if [[ ! -f "$WORK_DIR/Cargo.toml" ]]; then
 fi
 
 echo
-echo -e "  ${BOLD_BLUE}${CRAB} OpsClaw Installer${RESET}"
+echo -e "  ${BOLD_BLUE}${CRAB} ZeroClaw Installer${RESET}"
 echo -e "  ${DIM}Build it, run it, trust it.${RESET}"
 echo
 step_ok "Detected: ${BOLD}$(echo "$OS_NAME" | tr '[:upper:]' '[:lower:]')${RESET}"
@@ -1325,11 +1144,11 @@ step_ok "Detected: ${BOLD}$(echo "$OS_NAME" | tr '[:upper:]' '[:lower:]')${RESET
 # --- Detect existing installation and version ---
 EXISTING_VERSION=""
 INSTALL_MODE="fresh"
-if have_cmd opsclaw; then
-  EXISTING_VERSION="$(opsclaw --version 2>/dev/null | awk '{print $NF}' || true)"
+if have_cmd zeroclaw; then
+  EXISTING_VERSION="$(zeroclaw --version 2>/dev/null | awk '{print $NF}' || true)"
   INSTALL_MODE="upgrade"
-elif [[ -x "$HOME/.cargo/bin/opsclaw" ]]; then
-  EXISTING_VERSION="$("$HOME/.cargo/bin/opsclaw" --version 2>/dev/null | awk '{print $NF}' || true)"
+elif [[ -x "$HOME/.cargo/bin/zeroclaw" ]]; then
+  EXISTING_VERSION="$("$HOME/.cargo/bin/zeroclaw" --version 2>/dev/null | awk '{print $NF}' || true)"
   INSTALL_MODE="upgrade"
 fi
 
@@ -1357,9 +1176,9 @@ if [[ -n "$TARGET_VERSION" ]]; then
 fi
 step_dot "Workspace: $WORK_DIR"
 if [[ "$INSTALL_MODE" == "upgrade" && -n "$EXISTING_VERSION" ]]; then
-  step_dot "Existing OpsClaw installation detected, upgrading from v${EXISTING_VERSION}"
+  step_dot "Existing ZeroClaw installation detected, upgrading from v${EXISTING_VERSION}"
 elif [[ "$INSTALL_MODE" == "upgrade" ]]; then
-  step_dot "Existing OpsClaw installation detected, upgrading"
+  step_dot "Existing ZeroClaw installation detected, upgrading"
 fi
 
 cd "$WORK_DIR"
@@ -1379,17 +1198,17 @@ if [[ "$DOCKER_MODE" == true ]]; then
   echo
   echo -e "${BOLD_BLUE}${CRAB} Docker bootstrap complete!${RESET}"
   echo
-  echo -e "${BOLD}Your containerized OpsClaw data is persisted under:${RESET}"
+  echo -e "${BOLD}Your containerized ZeroClaw data is persisted under:${RESET}"
   echo -e "  ${DIM}$DOCKER_DATA_DIR${RESET}"
   echo
   echo -e "${BOLD}Dashboard URL:${RESET} ${BLUE}http://127.0.0.1:42617${RESET}"
   echo
   echo -e "${BOLD}Next steps:${RESET}"
-  echo -e "  ${DIM}opsclaw status${RESET}"
-  echo -e "  ${DIM}opsclaw agent -m \"Hello, OpsClaw!\"${RESET}"
-  echo -e "  ${DIM}opsclaw gateway${RESET}"
+  echo -e "  ${DIM}zeroclaw status${RESET}"
+  echo -e "  ${DIM}zeroclaw agent -m \"Hello, ZeroClaw!\"${RESET}"
+  echo -e "  ${DIM}zeroclaw gateway${RESET}"
   echo
-  echo -e "${BOLD}Docs:${RESET} ${BLUE}https://www.opsclawlabs.ai/docs${RESET}"
+  echo -e "${BOLD}Docs:${RESET} ${BLUE}https://www.zeroclawlabs.ai/docs${RESET}"
   exit 0
 fi
 
@@ -1451,9 +1270,9 @@ else
 fi
 
 echo
-echo -e "${BOLD_BLUE}[2/3]${RESET} ${BOLD}Installing OpsClaw${RESET}"
+echo -e "${BOLD_BLUE}[2/3]${RESET} ${BOLD}Installing ZeroClaw${RESET}"
 if [[ -n "$TARGET_VERSION" ]]; then
-  step_dot "Installing OpsClaw v${TARGET_VERSION}"
+  step_dot "Installing ZeroClaw v${TARGET_VERSION}"
 fi
 if [[ "$SKIP_BUILD" == false ]]; then
   # Clean stale build artifacts on upgrade to prevent bindgen/build-script
@@ -1465,24 +1284,29 @@ if [[ "$SKIP_BUILD" == false ]]; then
 
   # Determine cargo feature flags — disable prometheus on 32-bit targets
   # (prometheus crate requires AtomicU64, unavailable on armv7l/armv6l)
-  CARGO_FEATURE_FLAGS=""
   _build_arch="$(uname -m)"
   case "$_build_arch" in
     armv7l|armv6l|armhf)
       step_dot "32-bit ARM detected ($_build_arch) — disabling prometheus (requires 64-bit atomics)"
-      CARGO_FEATURE_FLAGS="--no-default-features --features channel-nostr,skill-creation"
+      CARGO_NO_DEFAULT_FEATURES=true
+      append_cargo_feature "channel-nostr"
+      append_cargo_feature "skill-creation"
       ;;
   esac
+  refresh_cargo_feature_args
+  if [[ ${#CARGO_FEATURE_ARGS[@]} -gt 0 ]]; then
+    step_dot "Cargo feature flags: ${CARGO_FEATURE_ARGS[*]}"
+  fi
 
   step_dot "Building release binary"
-  cargo build --release --locked $CARGO_FEATURE_FLAGS
+  cargo build --release --locked "${CARGO_FEATURE_ARGS[@]}"
   step_ok "Release binary built"
 else
   step_dot "Skipping build"
 fi
 
 if [[ "$SKIP_INSTALL" == false ]]; then
-  step_dot "Installing opsclaw to cargo bin"
+  step_dot "Installing zeroclaw to cargo bin"
 
   # Clean up stale cargo install tracking from the old "zeroclaw" package name
   # (renamed to "zeroclawlabs"). Without this, `cargo install zeroclawlabs` from
@@ -1494,12 +1318,12 @@ if [[ "$SKIP_INSTALL" == false ]]; then
     fi
   fi
 
-  cargo install --path "$WORK_DIR" --force --locked $CARGO_FEATURE_FLAGS
-  step_ok "OpsClaw installed"
+  cargo install --path "$WORK_DIR" --force --locked "${CARGO_FEATURE_ARGS[@]}"
+  step_ok "ZeroClaw installed"
 
   # Sync binary to ~/.local/bin so PATH lookups find the fresh version
   if [[ -d "$HOME/.local/bin" ]]; then
-    cp -f "$HOME/.cargo/bin/opsclaw" "$HOME/.local/bin/opsclaw" 2>/dev/null && \
+    cp -f "$HOME/.cargo/bin/zeroclaw" "$HOME/.local/bin/zeroclaw" 2>/dev/null && \
       step_ok "Synced binary to ~/.local/bin" || true
   fi
 else
@@ -1528,25 +1352,25 @@ fi
 # --- Companion desktop app (device-class-aware) ---
 # The desktop app is a pre-built download from the website, not built from source.
 # This keeps the one-liner install fast and the CLI binary small.
-DESKTOP_DOWNLOAD_URL="https://www.opsclawlabs.ai/download"
+DESKTOP_DOWNLOAD_URL="https://www.zeroclawlabs.ai/download"
 DESKTOP_APP_DETECTED=false
 
 if [[ "$DEVICE_CLASS" == "desktop" ]]; then
   # Check if the companion app is already installed
   case "$OS_NAME" in
     Darwin)
-      if [[ -d "/Applications/OpsClaw.app" ]] || [[ -d "$HOME/Applications/OpsClaw.app" ]]; then
+      if [[ -d "/Applications/ZeroClaw.app" ]] || [[ -d "$HOME/Applications/ZeroClaw.app" ]]; then
         DESKTOP_APP_DETECTED=true
-        step_ok "Companion app found (OpsClaw.app)"
+        step_ok "Companion app found (ZeroClaw.app)"
       fi
       ;;
     Linux)
-      if have_cmd opsclaw-desktop; then
+      if have_cmd zeroclaw-desktop; then
         DESKTOP_APP_DETECTED=true
-        step_ok "Companion app found (opsclaw-desktop)"
-      elif [[ -x "$HOME/.local/bin/opsclaw-desktop" ]]; then
+        step_ok "Companion app found (zeroclaw-desktop)"
+      elif [[ -x "$HOME/.local/bin/zeroclaw-desktop" ]]; then
         DESKTOP_APP_DETECTED=true
-        step_ok "Companion app found (~/.local/bin/opsclaw-desktop)"
+        step_ok "Companion app found (~/.local/bin/zeroclaw-desktop)"
       fi
       ;;
   esac
@@ -1554,7 +1378,7 @@ if [[ "$DEVICE_CLASS" == "desktop" ]]; then
   if [[ "$DESKTOP_APP_DETECTED" == false ]]; then
     echo
     echo -e "${BOLD}Companion App${RESET}"
-    echo -e "  Menu bar access to your OpsClaw agent."
+    echo -e "  Menu bar access to your ZeroClaw agent."
     echo -e "  Works alongside the CLI — connects to the same gateway."
     echo
     case "$OS_NAME" in
@@ -1565,7 +1389,7 @@ if [[ "$DEVICE_CLASS" == "desktop" ]]; then
         echo -e "  ${BOLD}Download for Linux:${RESET} ${BLUE}${DESKTOP_DOWNLOAD_URL}${RESET}"
         ;;
     esac
-    echo -e "  ${DIM}Or run: opsclaw desktop --install${RESET}"
+    echo -e "  ${DIM}Or run: zeroclaw desktop --install${RESET}"
   fi
 elif [[ "$DEVICE_CLASS" != "desktop" ]]; then
   # Non-desktop device — explain why companion app is not offered
@@ -1585,113 +1409,96 @@ elif [[ "$DEVICE_CLASS" != "desktop" ]]; then
   esac
 fi
 
-OPSCLAW_BIN=""
-if [[ -x "$HOME/.cargo/bin/opsclaw" ]]; then
-  OPSCLAW_BIN="$HOME/.cargo/bin/opsclaw"
-elif [[ -x "$WORK_DIR/target/release/opsclaw" ]]; then
-  OPSCLAW_BIN="$WORK_DIR/target/release/opsclaw"
-elif have_cmd opsclaw; then
-  OPSCLAW_BIN="opsclaw"
+ZEROCLAW_BIN=""
+if [[ -x "$HOME/.cargo/bin/zeroclaw" ]]; then
+  ZEROCLAW_BIN="$HOME/.cargo/bin/zeroclaw"
+elif [[ -x "$WORK_DIR/target/release/zeroclaw" ]]; then
+  ZEROCLAW_BIN="$WORK_DIR/target/release/zeroclaw"
+elif have_cmd zeroclaw; then
+  ZEROCLAW_BIN="zeroclaw"
 fi
 
 echo
 echo -e "${BOLD_BLUE}[3/3]${RESET} ${BOLD}Finalizing setup${RESET}"
 
-# --- Inline onboarding (provider + API key configuration) ---
-if [[ "$SKIP_ONBOARD" == false && -n "$OPSCLAW_BIN" ]]; then
+# --- Onboarding via TUI wizard ---
+if [[ "$SKIP_ONBOARD" == false && -n "$ZEROCLAW_BIN" ]]; then
   if [[ -n "$API_KEY" ]]; then
+    # Non-interactive: apply provider/key directly
     step_dot "Configuring provider: ${PROVIDER}"
-    ONBOARD_CMD=("$OPSCLAW_BIN" onboard --api-key "$API_KEY" --provider "$PROVIDER")
+    ONBOARD_CMD=("$ZEROCLAW_BIN" onboard --api-key "$API_KEY" --provider "$PROVIDER")
     if [[ -n "$MODEL" ]]; then
       ONBOARD_CMD+=(--model "$MODEL")
     fi
     if "${ONBOARD_CMD[@]}" 2>/dev/null; then
       step_ok "Provider configured"
     else
-      step_fail "Provider configuration failed — run opsclaw onboard to retry"
+      step_fail "Provider configuration failed — run zeroclaw onboard --tui to retry"
     fi
-  elif [[ "$PROVIDER" == "ollama" ]]; then
-    step_dot "Configuring Ollama (no API key needed)"
-    if "$OPSCLAW_BIN" onboard --provider ollama 2>/dev/null; then
-      step_ok "Ollama configured"
-    else
-      step_fail "Ollama configuration failed — run opsclaw onboard to retry"
-    fi
+  elif [[ -t 1 ]] && [[ -t 0 || -e /dev/tty ]]; then
+    # Interactive terminal: launch TUI onboarding wizard.
+    # The TUI binary handles /dev/tty reopening internally when stdin is a pipe.
+    echo
+    step_dot "Launching TUI onboarding wizard"
+    "$ZEROCLAW_BIN" onboard --tui || warn "TUI setup exited — run zeroclaw onboard --tui to retry"
   else
-    # No API key and not ollama — prompt inline if interactive, skip otherwise
-    if [[ -t 0 && -t 1 ]]; then
-      prompt_provider
-      prompt_api_key
-      if [[ -n "$API_KEY" ]]; then
-        ONBOARD_CMD=("$OPSCLAW_BIN" onboard --api-key "$API_KEY" --provider "$PROVIDER")
-        if [[ -n "$MODEL" ]]; then
-          ONBOARD_CMD+=(--model "$MODEL")
-        fi
-        if "${ONBOARD_CMD[@]}" 2>/dev/null; then
-          step_ok "Provider configured"
-        else
-          step_fail "Provider configuration failed — run opsclaw onboard to retry"
-        fi
-      fi
-    else
-      step_dot "No API key provided — run opsclaw onboard to configure"
-    fi
+    step_dot "No API key provided — run zeroclaw onboard --tui to configure"
   fi
 elif [[ "$SKIP_ONBOARD" == true ]]; then
-  step_dot "Skipping configuration (run opsclaw onboard later)"
-elif [[ -z "$OPSCLAW_BIN" ]]; then
-  warn "OpsClaw binary not found — cannot configure provider"
+  step_dot "Skipping configuration (run zeroclaw onboard --tui later)"
+elif [[ -z "$ZEROCLAW_BIN" ]]; then
+  warn "ZeroClaw binary not found — cannot configure provider"
 fi
 
 # Ensure config.toml and workspace scaffold exist even when onboard was
 # skipped, unavailable, or failed (e.g. --skip-build --prefer-prebuilt
 # without an API key, or when the binary could not run onboard).
-_native_config_dir="${OPSCLAW_CONFIG_DIR:-$HOME/.opsclaw}"
-_native_workspace_dir="${OPSCLAW_WORKSPACE:-$_native_config_dir/workspace}"
+_native_config_dir="${ZEROCLAW_CONFIG_DIR:-$HOME/.zeroclaw}"
+_native_workspace_dir="${ZEROCLAW_WORKSPACE:-$_native_config_dir/workspace}"
 ensure_default_config_and_workspace "$_native_config_dir" "$_native_workspace_dir" "$PROVIDER"
 
 # --- Gateway service management ---
-if [[ -n "$OPSCLAW_BIN" ]]; then
+if [[ -n "$ZEROCLAW_BIN" ]]; then
   # Try to install and start the gateway service
   step_dot "Checking gateway service"
-  if "$OPSCLAW_BIN" service install 2>/dev/null; then
+  if "$ZEROCLAW_BIN" service install 2>/dev/null; then
     step_ok "Gateway service installed"
-    if "$OPSCLAW_BIN" service restart 2>/dev/null; then
+    if "$ZEROCLAW_BIN" service restart 2>/dev/null; then
       step_ok "Gateway service restarted"
 
     else
-      step_fail "Gateway service restart failed — re-run with opsclaw service start"
+      step_fail "Gateway service restart failed — re-run with zeroclaw service start"
     fi
   else
-    step_dot "Gateway service not installed (run opsclaw service install later)"
+    step_dot "Gateway service not installed (run zeroclaw service install later)"
   fi
 
   # --- Post-install doctor check ---
   step_dot "Running doctor to validate installation"
-  if "$OPSCLAW_BIN" doctor 2>/dev/null; then
+  if "$ZEROCLAW_BIN" doctor 2>/dev/null; then
     step_ok "Doctor complete"
   else
-    warn "Doctor reported issues — run opsclaw doctor --fix to resolve"
+    warn "Doctor reported issues — run zeroclaw doctor --fix to resolve"
   fi
 fi
 
 # --- Determine installed version ---
 INSTALLED_VERSION=""
-if [[ -n "$OPSCLAW_BIN" ]]; then
-  INSTALLED_VERSION="$("$OPSCLAW_BIN" --version 2>/dev/null | awk '{print $NF}' || true)"
+if [[ -n "$ZEROCLAW_BIN" ]]; then
+  INSTALLED_VERSION="$("$ZEROCLAW_BIN" --version 2>/dev/null | awk '{print $NF}' || true)"
 fi
 
 # --- Success banner ---
 echo
 if [[ -n "$INSTALLED_VERSION" ]]; then
-  echo -e "${BOLD_BLUE}${CRAB} OpsClaw installed successfully (OpsClaw ${INSTALLED_VERSION})!${RESET}"
+  echo -e "${BOLD_BLUE}${CRAB} ZeroClaw installed successfully (ZeroClaw ${INSTALLED_VERSION})!${RESET}"
 else
-  echo -e "${BOLD_BLUE}${CRAB} OpsClaw installed successfully!${RESET}"
+  echo -e "${BOLD_BLUE}${CRAB} ZeroClaw installed successfully!${RESET}"
 fi
 
-if [[ -x "$HOME/.cargo/bin/opsclaw" ]] && ! have_cmd opsclaw; then
+if [[ -x "$HOME/.cargo/bin/zeroclaw" ]] && ! have_cmd zeroclaw; then
   echo
-  warn "opsclaw is installed in $HOME/.cargo/bin, but that directory is not in PATH for this shell."
+  warn "zeroclaw is installed in $HOME/.cargo/bin, but that directory is not in PATH for this shell."
   warn 'Run: export PATH="$HOME/.cargo/bin:$PATH"'
   step_dot "To persist it, add that export line to ~/.bashrc, ~/.zshrc, or your shell profile, then open a new shell."
 fi
@@ -1748,16 +1555,16 @@ fi
 
 echo
 echo -e "${BOLD}Next steps:${RESET}"
-echo -e "  ${DIM}opsclaw status${RESET}"
-echo -e "  ${DIM}opsclaw agent -m \"Hello, OpsClaw!\"${RESET}"
-echo -e "  ${DIM}opsclaw gateway${RESET}"
+echo -e "  ${DIM}zeroclaw status${RESET}"
+echo -e "  ${DIM}zeroclaw agent -m \"Hello, ZeroClaw!\"${RESET}"
+echo -e "  ${DIM}zeroclaw gateway${RESET}"
 if [[ "$DEVICE_CLASS" == "desktop" ]]; then
   if [[ "$DESKTOP_APP_DETECTED" == true ]]; then
-    echo -e "  ${DIM}opsclaw desktop${RESET}                ${DIM}# Launch the menu bar app${RESET}"
+    echo -e "  ${DIM}zeroclaw desktop${RESET}                ${DIM}# Launch the menu bar app${RESET}"
   else
-    echo -e "  ${DIM}opsclaw desktop --install${RESET}      ${DIM}# Download the companion app${RESET}"
+    echo -e "  ${DIM}zeroclaw desktop --install${RESET}      ${DIM}# Download the companion app${RESET}"
   fi
 fi
 echo
-echo -e "${BOLD}Docs:${RESET} ${BLUE}https://www.opsclawlabs.ai/docs${RESET}"
+echo -e "${BOLD}Docs:${RESET} ${BLUE}https://www.zeroclawlabs.ai/docs${RESET}"
 echo

@@ -23,7 +23,7 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  RELEASE_CARGO_FEATURES: channel-matrix,channel-lark,memory-postgres,whatsapp-web
+  RELEASE_CARGO_FEATURES: channel-matrix,channel-lark,whatsapp-web
 
 jobs:
   validate:
@@ -106,9 +106,16 @@ jobs:
         id: notes
         shell: bash
         env:
-          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version || '' }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+
+          # Resolve version from tag push or manual input
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            INPUT_VERSION="${REF_NAME#v}"
+          fi
 
           # Find the previous stable tag (exclude beta tags)
           PREV_TAG=$(git tag --sort=-creatordate | grep -vE '\-beta\.' | grep -v "^v${INPUT_VERSION}$" | head -1 || echo "")
@@ -143,7 +150,7 @@ jobs:
           ALL_CONTRIBUTORS=$(printf "%s\n%s" "$GIT_AUTHORS" "$CO_AUTHORS" \
             | sort -uf \
             | grep -v '^$' \
-            | grep -viE '\[bot\]$|^dependabot|^github-actions|^copilot|^OpsClaw Bot|^OpsClaw Runner|^OpsClaw Agent|^blacksmith' \
+            | grep -viE '\[bot\]$|^dependabot|^github-actions|^copilot|^ZeroClaw Bot|^ZeroClaw Runner|^ZeroClaw Agent|^blacksmith' \
             | while IFS= read -r name; do echo "- ${name}"; done || true)
 
           BODY=$(cat <<NOTES_EOF
@@ -179,18 +186,18 @@ jobs:
           # ensuring compatibility with Ubuntu 22.04+ (#3573).
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            artifact: opsclaw
+            artifact: zeroclaw
             ext: tar.gz
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
-            artifact: opsclaw
+            artifact: zeroclaw
             ext: tar.gz
             cross_compiler: gcc-aarch64-linux-gnu
             linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
             linker: aarch64-linux-gnu-gcc
           - os: ubuntu-22.04
             target: armv7-unknown-linux-gnueabihf
-            artifact: opsclaw
+            artifact: zeroclaw
             ext: tar.gz
             cross_compiler: gcc-arm-linux-gnueabihf
             linker_env: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
@@ -198,7 +205,7 @@ jobs:
             skip_prometheus: true
           - os: ubuntu-22.04
             target: arm-unknown-linux-gnueabihf
-            artifact: opsclaw
+            artifact: zeroclaw
             ext: tar.gz
             cross_compiler: gcc-arm-linux-gnueabihf
             linker_env: CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER
@@ -206,22 +213,26 @@ jobs:
             skip_prometheus: true
           - os: macos-14
             target: aarch64-apple-darwin
-            artifact: opsclaw
+            artifact: zeroclaw
             ext: tar.gz
           - os: ubuntu-latest
             target: aarch64-linux-android
-            artifact: opsclaw
+            artifact: zeroclaw
             ext: tar.gz
             ndk: true
+            experimental: true
+            # wa-rs crates don't compile for Android; exclude whatsapp-web
+            cargo_features: "channel-matrix,channel-lark"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: opsclaw.exe
+            artifact: zeroclaw.exe
             ext: zip
+    continue-on-error: ${{ matrix.experimental || false }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: 1.92.0
+          toolchain: 1.93.0
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         if: runner.os != 'Windows'
@@ -256,28 +267,36 @@ jobs:
             export CFLAGS_arm_unknown_linux_gnueabihf="-march=armv6 -mfpu=vfp -mfloat-abi=hard"
             export CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS="-C target-feature=-neon"
           fi
+          # Use matrix-level feature override if set, otherwise use global RELEASE_CARGO_FEATURES
+          FEATURES="${{ matrix.cargo_features || env.RELEASE_CARGO_FEATURES }}"
           if [ "${{ matrix.skip_prometheus || 'false' }}" = "true" ]; then
-            cargo build --release --locked --no-default-features --features "${{ env.RELEASE_CARGO_FEATURES }},channel-nostr,skill-creation" --target ${{ matrix.target }}
+            cargo build --release --locked --no-default-features --features "${FEATURES},channel-nostr,skill-creation" --target ${{ matrix.target }}
           else
-            cargo build --release --locked --features "${{ env.RELEASE_CARGO_FEATURES }}" --target ${{ matrix.target }}
+            cargo build --release --locked --features "${FEATURES}" --target ${{ matrix.target }}
           fi
+
+      - name: Check binary size
+        shell: bash
+        run: bash scripts/ci/check_binary_size.sh "target/${{ matrix.target }}/release/${{ matrix.artifact }}" "${{ matrix.target }}"
+        env:
+          BINARY_SIZE_HARD_LIMIT: "52428800"  # 50MB — release builds include all optional features
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../opsclaw-${{ matrix.target }}.${{ matrix.ext }} ${{ matrix.artifact }}
+          tar czf ../../../zeroclaw-${{ matrix.target }}.${{ matrix.ext }} ${{ matrix.artifact }}
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../opsclaw-${{ matrix.target }}.${{ matrix.ext }} ${{ matrix.artifact }}
+          7z a ../../../zeroclaw-${{ matrix.target }}.${{ matrix.ext }} ${{ matrix.artifact }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: opsclaw-${{ matrix.target }}
-          path: opsclaw-${{ matrix.target }}.${{ matrix.ext }}
+          name: zeroclaw-${{ matrix.target }}
+          path: zeroclaw-${{ matrix.target }}.${{ matrix.ext }}
           retention-days: 14
 
   build-desktop:
@@ -290,7 +309,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: 1.92.0
+          toolchain: 1.93.0
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
@@ -323,9 +342,9 @@ jobs:
       - name: Prepare desktop release assets
         run: |
           mkdir -p desktop-assets
-          find target -name '*.dmg' -exec cp {} desktop-assets/OpsClaw.dmg \; 2>/dev/null || true
-          find target -name '*.app.tar.gz' -exec cp {} desktop-assets/OpsClaw-macos.app.tar.gz \; 2>/dev/null || true
-          find target -name '*.app.tar.gz.sig' -exec cp {} desktop-assets/OpsClaw-macos.app.tar.gz.sig \; 2>/dev/null || true
+          find target -name '*.dmg' -exec cp {} desktop-assets/ZeroClaw.dmg \; 2>/dev/null || true
+          find target -name '*.app.tar.gz' -exec cp {} desktop-assets/ZeroClaw-macos.app.tar.gz \; 2>/dev/null || true
+          find target -name '*.app.tar.gz.sig' -exec cp {} desktop-assets/ZeroClaw-macos.app.tar.gz.sig \; 2>/dev/null || true
           echo "--- Desktop assets ---"
           ls -lh desktop-assets/
 
@@ -339,18 +358,49 @@ jobs:
     name: Publish Stable Release
     needs: [validate, release-notes, build, build-desktop]
     runs-on: ubuntu-latest
+    environment:
+      name: github-releases
+      url: https://github.com/${{ github.repository }}/releases/tag/v${{ needs.validate.outputs.version }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: opsclaw-*
+          pattern: zeroclaw-*
           path: artifacts
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: desktop-macos
           path: artifacts/desktop-macos
+
+      - name: Verify required release assets
+        shell: bash
+        run: |
+          required_assets=(
+            "zeroclaw-x86_64-unknown-linux-gnu.tar.gz"
+            "zeroclaw-aarch64-unknown-linux-gnu.tar.gz"
+            "zeroclaw-armv7-unknown-linux-gnueabihf.tar.gz"
+            "zeroclaw-arm-unknown-linux-gnueabihf.tar.gz"
+            "zeroclaw-aarch64-apple-darwin.tar.gz"
+            "zeroclaw-aarch64-linux-android.tar.gz"
+            "zeroclaw-x86_64-pc-windows-msvc.zip"
+            "ZeroClaw.dmg"
+          )
+          missing=0
+          for asset in "${required_assets[@]}"; do
+            if ! find artifacts -type f -name "$asset" -print -quit | grep -q .; then
+              echo "::error::Missing required release asset: ${asset}"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Collected files:"
+            find artifacts -type f | sort
+            exit 1
+          fi
 
       - name: Generate checksums
         run: |
@@ -376,7 +426,9 @@ jobs:
         env:
           TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          git tag -a "$TAG" -m "opsclaw $TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "zeroclaw $TAG"
           git push origin "$TAG"
 
       - name: Create GitHub Release
@@ -395,12 +447,15 @@ jobs:
     needs: [validate, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/zeroclawlabs/${{ needs.validate.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.92.0
+          toolchain: 1.93.0
 
       - uses: Swatinem/rust-cache@v2
 
@@ -459,37 +514,40 @@ jobs:
           curl -fsSL -X POST \
             -H "Authorization: token $PAT" \
             -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/dcprevere/opsclaw-website/dispatches \
-            -d '{"event_type":"new-release","client_payload":{"install_script_url":"https://raw.githubusercontent.com/dcprevere/opsclaw/master/install.sh"}}'
+            https://api.github.com/repos/zeroclaw-labs/zeroclaw-website/dispatches \
+            -d '{"event_type":"new-release","client_payload":{"install_script_url":"https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/master/install.sh"}}'
 
   docker:
     name: Push Docker Image
     needs: [validate, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment:
+      name: docker
+      url: https://github.com/${{ github.repository }}/pkgs/container/zeroclaw
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: opsclaw-x86_64-unknown-linux-gnu
+          name: zeroclaw-x86_64-unknown-linux-gnu
           path: artifacts/
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: opsclaw-aarch64-unknown-linux-gnu
+          name: zeroclaw-aarch64-unknown-linux-gnu
           path: artifacts/
 
       - name: Prepare Docker context with pre-built binaries
         run: |
           mkdir -p docker-ctx/bin/amd64 docker-ctx/bin/arm64
-          tar xzf artifacts/opsclaw-x86_64-unknown-linux-gnu.tar.gz -C docker-ctx/bin/amd64
-          tar xzf artifacts/opsclaw-aarch64-unknown-linux-gnu.tar.gz -C docker-ctx/bin/arm64
+          tar xzf artifacts/zeroclaw-x86_64-unknown-linux-gnu.tar.gz -C docker-ctx/bin/amd64
+          tar xzf artifacts/zeroclaw-aarch64-unknown-linux-gnu.tar.gz -C docker-ctx/bin/arm64
 
-          mkdir -p docker-ctx/opsclaw-data/.opsclaw docker-ctx/opsclaw-data/workspace
+          mkdir -p docker-ctx/zeroclaw-data/.zeroclaw docker-ctx/zeroclaw-data/workspace
           printf '%s\n' \
-            'workspace_dir = "/opsclaw-data/workspace"' \
-            'config_path = "/opsclaw-data/.opsclaw/config.toml"' \
+            'workspace_dir = "/zeroclaw-data/workspace"' \
+            'config_path = "/zeroclaw-data/.zeroclaw/config.toml"' \
             'api_key = ""' \
             'default_provider = "openrouter"' \
             'default_model = "anthropic/claude-sonnet-4-20250514"' \
@@ -499,7 +557,7 @@ jobs:
             'port = 42617' \
             'host = "[::]"' \
             'allow_public_bind = true' \
-            > docker-ctx/opsclaw-data/.opsclaw/config.toml
+            > docker-ctx/zeroclaw-data/.zeroclaw/config.toml
 
           cp Dockerfile.ci docker-ctx/Dockerfile
           cp Dockerfile.debian.ci docker-ctx/Dockerfile.debian
@@ -564,6 +622,16 @@ jobs:
       dry_run: false
     secrets: inherit
 
+  # ── Post-publish: sync marketplace templates (Coolify, Dokploy, EasyPanel) ──
+  marketplace:
+    name: Sync Marketplace Templates
+    needs: [validate, docker]
+    if: ${{ !cancelled() && needs.docker.result == 'success' }}
+    uses: ./.github/workflows/sync-marketplace-templates.yml
+    with:
+      release_tag: ${{ needs.validate.outputs.tag }}
+    secrets: inherit
+
   # ── Post-publish: announce after release + website are live ───────────
   # Docker push can be slow; don't let it block announcements.
   tweet:
@@ -573,7 +641,7 @@ jobs:
     uses: ./.github/workflows/tweet-release.yml
     with:
       release_tag: ${{ needs.validate.outputs.tag }}
-      release_url: https://github.com/dcprevere/opsclaw/releases/tag/${{ needs.validate.outputs.tag }}
+      release_url: https://github.com/zeroclaw-labs/zeroclaw/releases/tag/${{ needs.validate.outputs.tag }}
     secrets: inherit
 
   discord:
@@ -583,5 +651,5 @@ jobs:
     uses: ./.github/workflows/discord-release.yml
     with:
       release_tag: ${{ needs.validate.outputs.tag }}
-      release_url: https://github.com/dcprevere/opsclaw/releases/tag/${{ needs.validate.outputs.tag }}
+      release_url: https://github.com/zeroclaw-labs/zeroclaw/releases/tag/${{ needs.validate.outputs.tag }}
     secrets: inherit

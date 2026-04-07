@@ -1,8 +1,8 @@
-//! OpsClaw Desktop — main entry point.
+//! ZeroClaw Desktop — main entry point.
 //!
 //! Prevents an additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    opsclaw_desktop::run();
+    zeroclaw_desktop::run();
 }

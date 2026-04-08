@@ -126,23 +126,30 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
 
     // ── Build config ──
     // Defaults: SQLite memory, supervised autonomy, workspace-scoped, native runtime
-    let config = Config {
+    let mut config = Config {
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
         schema_version: crate::config::migration::CURRENT_SCHEMA_VERSION,
-        providers: crate::config::providers::ProvidersConfig::default(),
-        api_key: if api_key.is_empty() {
-            None
-        } else {
-            Some(api_key)
+        providers: {
+            let mut p = crate::config::providers::ProvidersConfig::default();
+            let mut entry = crate::config::ModelProviderConfig::default();
+            entry.api_key = if api_key.is_empty() { None } else { Some(api_key) };
+            entry.base_url = provider_api_url;
+            entry.model = Some(model);
+            entry.temperature = Some(0.7);
+            entry.timeout_secs = Some(120);
+            p.models.insert(provider.clone(), entry);
+            p.fallback = Some(provider);
+            p
         },
-        api_url: provider_api_url,
+        api_key: None,
+        api_url: None,
         api_path: None,
-        default_provider: Some(provider),
-        default_model: Some(model),
+        default_provider: None,
+        default_model: None,
         model_providers: std::collections::HashMap::new(),
-        default_temperature: 0.7,
-        provider_timeout_secs: 120,
+        default_temperature: 0.0,
+        provider_timeout_secs: 0,
         provider_max_tokens: None,
         extra_headers: std::collections::HashMap::new(),
         observability: ObservabilityConfig::default(),
@@ -216,6 +223,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         sop: crate::config::SopConfig::default(),
         shell_tool: crate::config::ShellToolConfig::default(),
     };
+    config.resolve_provider_cache();
 
     println!(
         "  {} Security: {} | workspace-scoped",
@@ -387,14 +395,16 @@ fn apply_provider_update(
     model: String,
     provider_api_url: Option<String>,
 ) {
-    config.default_provider = Some(provider);
-    config.default_model = Some(model);
-    config.api_url = provider_api_url;
-    config.api_key = if api_key.trim().is_empty() {
+    let entry = config.providers.models.entry(provider.clone()).or_default();
+    entry.model = Some(model);
+    entry.base_url = provider_api_url;
+    entry.api_key = if api_key.trim().is_empty() {
         None
     } else {
         Some(api_key)
     };
+    config.providers.fallback = Some(provider);
+    config.resolve_provider_cache();
 }
 
 // ── Quick setup (zero prompts) ───────────────────────────────────
@@ -586,23 +596,33 @@ async fn run_quick_setup_with_home(
     // Create memory config based on backend choice
     let memory_config = memory_config_defaults_for_backend(&memory_backend_name);
 
-    let config = Config {
+    let mut config = Config {
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
         schema_version: crate::config::migration::CURRENT_SCHEMA_VERSION,
-        providers: crate::config::providers::ProvidersConfig::default(),
-        api_key: credential_override.map(|c| {
-            let mut s = String::with_capacity(c.len());
-            s.push_str(c);
-            s
-        }),
+        providers: {
+            let mut p = crate::config::providers::ProvidersConfig::default();
+            let mut entry = crate::config::ModelProviderConfig::default();
+            entry.api_key = credential_override.map(|c| {
+                let mut s = String::with_capacity(c.len());
+                s.push_str(c);
+                s
+            });
+            entry.model = Some(model.clone());
+            entry.temperature = Some(0.7);
+            entry.timeout_secs = Some(120);
+            p.models.insert(provider_name.clone(), entry);
+            p.fallback = Some(provider_name.clone());
+            p
+        },
+        api_key: None,
         api_url: None,
         api_path: None,
-        default_provider: Some(provider_name.clone()),
-        default_model: Some(model.clone()),
+        default_provider: None,
+        default_model: None,
         model_providers: std::collections::HashMap::new(),
-        default_temperature: 0.7,
-        provider_timeout_secs: 120,
+        default_temperature: 0.0,
+        provider_timeout_secs: 0,
         provider_max_tokens: None,
         extra_headers: std::collections::HashMap::new(),
         observability: ObservabilityConfig::default(),
@@ -676,6 +696,7 @@ async fn run_quick_setup_with_home(
         sop: crate::config::SopConfig::default(),
         shell_tool: crate::config::ShellToolConfig::default(),
     };
+    config.resolve_provider_cache();
 
     config.save().await?;
     persist_workspace_selection(&config.config_path).await?;

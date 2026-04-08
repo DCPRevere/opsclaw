@@ -83,6 +83,9 @@ zip = { version = "8.1", default-features = false, features = ["deflate-flate2"]
 anyhow = "1.0"
 thiserror = "2.0"
 
+# Proc macros for config field derivation
+zeroclaw-macros = { path = "../zeroclaw-macros" }
+
 # Aardvark I2C/SPI/GPIO USB adapter (Total Phase) — stub when SDK absent
 aardvark-sys = { path = "../aardvark-sys", version = "0.1.0" }
 

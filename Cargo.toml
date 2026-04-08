@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/zeroclawlabs", "crates/opsclaw", "crates/robot-kit", "crates/aardvark-sys", "apps/tauri"]
+members = ["crates/zeroclawlabs", "crates/opsclaw", "crates/robot-kit", "crates/aardvark-sys", "crates/zeroclaw-macros", "apps/tauri"]
 resolver = "2"
 
 [profile.dev]

@@ -3831,6 +3831,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 }
 
                 config.telegram = Some(TelegramConfig {
+                    enabled: true,
                     bot_token: token,
                     allowed_users,
                     stream_mode: StreamMode::default(),
@@ -3933,6 +3934,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 }
 
                 config.discord = Some(DiscordConfig {
+                    enabled: true,
                     bot_token: token,
                     guild_id: if guild.is_empty() { None } else { Some(guild) },
                     allowed_users,
@@ -4059,6 +4061,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 }
 
                 config.slack = Some(SlackConfig {
+                    enabled: true,
                     bot_token: token,
                     app_token: if app_token.is_empty() {
                         None
@@ -4119,7 +4122,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                         .collect()
                 };
 
-                config.imessage = Some(IMessageConfig { allowed_contacts });
+                config.imessage = Some(IMessageConfig { enabled: true, allowed_contacts });
                 println!(
                     "  {} iMessage configured (contacts: {})",
                     style("✅").green().bold(),
@@ -4230,6 +4233,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 };
 
                 config.matrix = Some(MatrixConfig {
+                    enabled: true,
                     homeserver: homeserver.trim_end_matches('/').to_string(),
                     access_token,
                     user_id: detected_user_id,
@@ -4330,6 +4334,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .interact()?;
 
                 config.signal = Some(SignalConfig {
+                    enabled: true,
                     http_url: http_url.trim_end_matches('/').to_string(),
                     account: account.trim().to_string(),
                     group_id,
@@ -4424,6 +4429,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     };
 
                     config.whatsapp = Some(WhatsAppConfig {
+                        enabled: true,
                         access_token: None,
                         phone_number_id: None,
                         verify_token: None,
@@ -4535,6 +4541,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 };
 
                 config.whatsapp = Some(WhatsAppConfig {
+                    enabled: true,
                     access_token: Some(access_token.trim().to_string()),
                     phone_number_id: Some(phone_number_id.trim().to_string()),
                     verify_token: Some(verify_token.trim().to_string()),
@@ -4635,6 +4642,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .interact_text()?;
 
                 config.linq = Some(LinqConfig {
+                    enabled: true,
                     api_token: api_token.trim().to_string(),
                     from_phone: from_phone.trim().to_string(),
                     signing_secret: if signing_secret.trim().is_empty() {
@@ -4760,6 +4768,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 );
 
                 config.irc = Some(IrcConfig {
+                    enabled: true,
                     server: server.trim().to_string(),
                     port,
                     nickname: nickname.trim().to_string(),
@@ -4804,6 +4813,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .interact_text()?;
 
                 config.webhook = Some(WebhookConfig {
+                    enabled: true,
                     port: port.parse().unwrap_or(8080),
                     listen_path: None,
                     send_url: None,
@@ -4876,6 +4886,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 };
 
                 config.nextcloud_talk = Some(NextcloudTalkConfig {
+                    enabled: true,
                     base_url,
                     app_token: app_token.trim().to_string(),
                     webhook_secret: if webhook_secret.trim().is_empty() {
@@ -4955,6 +4966,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .collect();
 
                 config.dingtalk = Some(DingTalkConfig {
+                    enabled: true,
                     client_id,
                     client_secret,
                     allowed_users,
@@ -5032,6 +5044,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .collect();
 
                 config.qq = Some(QQConfig {
+                    enabled: true,
                     app_id,
                     app_secret,
                     allowed_users,
@@ -5216,6 +5229,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 }
 
                 config.lark = Some(LarkConfig {
+                    enabled: true,
                     app_id,
                     app_secret,
                     verification_token,
@@ -7597,6 +7611,7 @@ mod tests {
         assert!(!has_launchable_channels(&channels));
 
         channels.signal = Some(crate::config::schema::SignalConfig {
+            enabled: true,
             http_url: "http://127.0.0.1:8686".into(),
             account: "+1234567890".into(),
             group_id: None,
@@ -7609,6 +7624,7 @@ mod tests {
 
         channels.signal = None;
         channels.mattermost = Some(crate::config::schema::MattermostConfig {
+            enabled: true,
             url: "https://mattermost.example.com".into(),
             bot_token: "token".into(),
             channel_id: Some("channel".into()),
@@ -7622,6 +7638,7 @@ mod tests {
 
         channels.mattermost = None;
         channels.qq = Some(crate::config::schema::QQConfig {
+            enabled: true,
             app_id: "app-id".into(),
             app_secret: "app-secret".into(),
             allowed_users: vec!["*".into()],
@@ -7631,6 +7648,7 @@ mod tests {
 
         channels.qq = None;
         channels.nextcloud_talk = Some(crate::config::schema::NextcloudTalkConfig {
+            enabled: true,
             base_url: "https://cloud.example.com".into(),
             app_token: "token".into(),
             webhook_secret: Some("secret".into()),
@@ -7642,6 +7660,7 @@ mod tests {
 
         channels.nextcloud_talk = None;
         channels.feishu = Some(crate::config::schema::FeishuConfig {
+            enabled: true,
             app_id: "cli_123".into(),
             app_secret: "secret".into(),
             encrypt_key: None,

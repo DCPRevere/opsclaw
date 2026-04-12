@@ -1,6 +1,5 @@
 //! OpsClaw CLI command handlers: scan, monitor, watch.
 
-use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -36,9 +35,6 @@ pub enum RunbookActions {
 
 // Re-import from the same crate tree the binary uses — discovery/monitoring
 // types are fine because they don't reference Config.
-use crate::ops::baseline::{self, anomalies_to_alerts, extract_metrics, BaselineStore};
-use crate::ops::diagnosis::{Diagnosis, MonitoringAgent};
-use crate::ops::digest::{DigestReport, ProjectInput};
 use crate::ops::escalation::{
     format_escalation_message, EscalationAction, EscalationManager, EscalationPolicy,
 };
@@ -47,10 +43,9 @@ use crate::ops::incident_search::IncidentIndex;
 use crate::ops::log_sources::{self, LogLevel, LogSourceType};
 use crate::ops::notifier::{AlertNotifier, NullNotifier, TelegramNotifier, WebhookNotifier};
 use crate::ops::runbooks::{self, RunbookStore};
-use crate::ops::{monitor_log, probes, snapshots};
+use crate::ops::probes;
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::kube_tool::KubeClient;
-use crate::tools::monitoring::{self, HealthCheck};
 use crate::tools::ssh_command_runner::{DryRunCommandRunner, LocalCommandRunner, SshCommandRunner};
 use crate::tools::ssh_tool::{RealSshExecutor, ProjectEntry};
 use crate::ops_config::{parse_min_severity, OpsClawAutonomy, OpsConfig};
@@ -116,7 +111,7 @@ fn opsclaw_dir() -> Result<std::path::PathBuf> {
 
 /// Run a discovery scan for a project, using the kube API for Kubernetes
 /// projects and a [`CommandRunner`] for everything else.
-async fn scan_target(config: &OpsConfig, project: &ProjectConfig) -> Result<TargetSnapshot> {
+pub async fn scan_target(config: &OpsConfig, project: &ProjectConfig) -> Result<TargetSnapshot> {
     if project.project_type == ProjectType::Kubernetes {
         let kube = KubeClient::new(project.kubeconfig.as_deref()).await?;
         return kube.discover_snapshot().await;
@@ -296,10 +291,6 @@ pub async fn handle_scan(config: &OpsConfig, target: Option<String>, all: bool) 
             .await
             .with_context(|| format!("Scan failed for project '{}'", t.name))?;
 
-        snapshots::save_snapshot(&t.name, &snapshot)?;
-        let path = snapshots::snapshot_path(&t.name)?;
-        info!("Snapshot saved to {}", path.display());
-
         let md = discovery::snapshot_to_markdown(&snapshot);
         println!("{md}");
     }
@@ -326,16 +317,7 @@ pub async fn handle_logs(
         .transpose()?;
 
     for t in &targets {
-        // Try loading an existing snapshot; fall back to a fresh scan.
-        let snapshot = match snapshots::load_snapshot(&t.name)? {
-            Some(snap) => snap,
-            None => {
-                info!("No snapshot for '{}', running discovery scan…", t.name);
-                let snap = scan_target(config, t).await?;
-                snapshots::save_snapshot(&t.name, &snap)?;
-                snap
-            }
-        };
+        let snapshot = scan_target(config, t).await?;
         let runner = match make_runner(config, t) {
             Ok(r) => r,
             Err(_) if t.project_type == ProjectType::Kubernetes => {
@@ -411,7 +393,7 @@ pub async fn handle_monitor(
     target: Option<String>,
     interval_secs: u64,
     once: bool,
-    openshell_ctx: &crate::openshell::OpenShellContext,
+    _openshell_ctx: &crate::openshell::OpenShellContext,
 ) -> Result<()> {
     let targets = resolve_targets(config, target.as_deref(), target.is_none())?;
 
@@ -419,435 +401,59 @@ pub async fn handle_monitor(
         bail!("No projects configured. Add [[projects]] to your config.");
     }
 
-    let notifier = make_notifier(config);
-    let mut failure_counts: std::collections::HashMap<String, u32> =
-        std::collections::HashMap::new();
-
-    // Initialise escalation managers for targets that have an escalation policy.
-    let mut escalation_managers: std::collections::HashMap<String, EscalationManager> =
-        std::collections::HashMap::new();
-    for t in &targets {
-        if let Some(policy) = parse_escalation_policy(t) {
-            let store_path = escalation_store_path(&t.name)?;
-            let mgr = if store_path.exists() {
-                match EscalationManager::load(&store_path) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!(
-                            "   Warning: failed to load escalation state for '{}': {e}",
-                            t.name
-                        );
-                        EscalationManager::new(policy, store_path)
-                    }
-                }
-            } else {
-                EscalationManager::new(policy, store_path)
-            };
-            escalation_managers.insert(t.name.clone(), mgr);
-        }
-    }
+    let project_names: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
 
     loop {
-        for t in &targets {
-            // Build a command runner for projects that support it (SSH/local).
-            // Kubernetes projects use the kube API for scanning, so runner is None.
-            let runner: Option<Box<dyn CommandRunner>> = match make_runner(config, t) {
-                Ok(r) => Some(r),
-                Err(_) if t.project_type == ProjectType::Kubernetes => None,
-                Err(e) => return Err(e),
-            };
+        for name in &project_names {
+            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
 
-            let current = match scan_target(config, t).await {
-                Ok(snap) => {
-                    failure_counts.remove(&t.name);
-                    snap
+            let prompt = format!(
+                "You are OpsClaw, an autonomous SRE agent.\n\n\
+                 Run a health check on project '{name}' using the monitor tool. \
+                 Examine the snapshot carefully. If anything looks concerning \
+                 (high memory/disk/load, missing containers or services, \
+                 unusual state), investigate further using the ssh tool. \
+                 Store important observations in memory for future reference.\n\n\
+                 If everything looks healthy, say so briefly."
+            );
+
+            let extra_tools = crate::tools::registry::create_opsclaw_tools(config).ok();
+            let allowed = Some(vec![
+                "ssh".to_string(),
+                "monitor".to_string(),
+                "memory_store".to_string(),
+                "memory_recall".to_string(),
+            ]);
+
+            println!("[{ts}] Checking {name}...");
+
+            match Box::pin(zeroclaw::agent::run(
+                config.inner.clone(),
+                Some(prompt),
+                None,
+                config.diagnosis.model.clone(),
+                0.0,
+                vec![],
+                false,
+                None,
+                allowed,
+                extra_tools,
+            ))
+            .await
+            {
+                Ok(response) => {
+                    println!("[{ts}] {name}: {}", response.lines().next().unwrap_or(&response));
+                    if response.to_lowercase().contains("concern")
+                        || response.to_lowercase().contains("critical")
+                        || response.to_lowercase().contains("warning")
+                        || response.to_lowercase().contains("issue")
+                        || response.to_lowercase().contains("alert")
+                    {
+                        eprintln!("{response}");
+                    }
                 }
                 Err(e) => {
-                    let count = failure_counts.entry(t.name.clone()).or_insert(0);
-                    *count += 1;
-                    eprintln!(
-                        "[{}] Scan error for {}: {e}",
-                        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-                        t.name
-                    );
-                    if *count >= 3 {
-                        let msg = format!(
-                            "\u{26a0}\u{fe0f} Cannot reach project '{}' \u{2014} {} consecutive scan failures. Last error: {}",
-                            t.name, count, e
-                        );
-                        if let Err(ne) = notifier.notify_text(&t.name, &msg).await {
-                            eprintln!("   Warning: escalation notification failed: {ne}");
-                        }
-                    }
-                    continue;
-                }
-            };
-
-            let baseline = snapshots::load_snapshot(&t.name)?;
-
-            match baseline {
-                None => {
-                    snapshots::save_snapshot(&t.name, &current)?;
-                    info!("Baseline established for {}", t.name);
-                    println!(
-                        "[{}] {} baseline established ({} containers, {} services)",
-                        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-                        t.name,
-                        current.containers.len(),
-                        current.services.len()
-                    );
-                }
-                Some(ref baseline) => {
-                    let mut hc = monitoring::check_health(&t.name, baseline, &current);
-
-                    // Run configured + auto-discovered probes
-                    let configured_probes = t.probes.clone().unwrap_or_default();
-                    let discovered = probes::discover_probes(&current, t.host.as_deref());
-
-                    let mut probe_results = Vec::new();
-                    for probe in configured_probes.iter().chain(discovered.iter()) {
-                        let Some(ref runner) = runner else { continue };
-                        match probes::run_probe(runner.as_ref(), probe).await {
-                            Ok(result) => {
-                                if let Some(alert) = probes::probe_result_to_alert(&result) {
-                                    hc.alerts.push(alert);
-                                }
-                                probe_results.push(result);
-                            }
-                            Err(e) => {
-                                eprintln!("   Probe '{}' error: {e}", probe.name);
-                            }
-                        }
-                    }
-
-                    // --- Baseline learning: extract metrics, record, detect anomalies ---
-                    let metrics = extract_metrics(&current);
-                    let bl_path = baseline::baseline_path(&t.name)?;
-                    let mut bl_store = BaselineStore::load(&bl_path)?;
-                    let anomalies = bl_store.check_anomalies(&t.name, &metrics, 3.0);
-                    bl_store.record(&t.name, &metrics);
-                    bl_store.save()?;
-
-                    if !anomalies.is_empty() {
-                        let anomaly_alerts = anomalies_to_alerts(&anomalies);
-                        hc.alerts.extend(anomaly_alerts);
-                    }
-                    let baseline_summary = bl_store.summary(&t.name);
-                    // --- End baseline learning ---
-
-                    // Recalculate status after all alerts (probes + baselines)
-                    hc.status = if hc
-                        .alerts
-                        .iter()
-                        .any(|a| a.severity == monitoring::AlertSeverity::Critical)
-                    {
-                        monitoring::HealthStatus::Critical
-                    } else if hc
-                        .alerts
-                        .iter()
-                        .any(|a| a.severity == monitoring::AlertSeverity::Warning)
-                    {
-                        monitoring::HealthStatus::Warning
-                    } else {
-                        monitoring::HealthStatus::Healthy
-                    };
-
-                    let log_line = monitor_log::format_log_line(&hc);
-                    println!("{log_line}");
-                    monitor_log::append_log(&hc)?;
-
-                    if hc.status != monitoring::HealthStatus::Healthy {
-                        let mut md = monitoring::health_check_to_markdown(&hc);
-                        if !probe_results.is_empty() {
-                            md.push_str(&probes::probe_results_to_markdown(&probe_results));
-                        }
-                        eprintln!("{md}");
-
-                        // Collect recent error logs for diagnosis context.
-                        let error_log_context = if let Some(ref r) = runner {
-                            collect_error_logs_for_diagnosis(r.as_ref(), &current).await
-                        } else {
-                            String::new()
-                        };
-
-                        // Collect git deploy correlation context.
-                        let deploy_context = if let Some(ref r) = runner {
-                            let ds_cfg = t.data_sources.clone().unwrap_or_default();
-                            collect_deploy_context(r.as_ref(), &ds_cfg).await
-                        } else {
-                            String::new()
-                        };
-
-                        // Fetch all configured data sources for diagnosis enrichment.
-                        let ds_snapshot = crate::ops::data_sources::fetch_all(
-                            t,
-                            runner.as_ref().map(|r| r.as_ref()),
-                        )
-                        .await;
-                        let ds_context =
-                            crate::ops::data_sources::format_for_diagnosis(&ds_snapshot);
-
-                        if let Err(e) = notifier.notify(&t.name, &hc).await {
-                            eprintln!("   Warning: notification failed: {e}");
-                        }
-
-                        // LLM diagnosis when an API key is available.
-                        if let Some(agent) = make_monitoring_agent(config) {
-                            // Load target context file if configured.
-                            let mut context_content = t
-                                .context_file
-                                .as_ref()
-                                .and_then(|path| std::fs::read_to_string(expand_tilde(path)).ok());
-
-                            // Append error logs to context for the LLM.
-                            if !error_log_context.is_empty() {
-                                let combined = context_content.unwrap_or_default();
-                                context_content = Some(format!(
-                                    "{combined}\n\n## Recent Error Logs\n\n{error_log_context}"
-                                ));
-                            }
-
-                            // Append deploy correlation context for the LLM.
-                            if !deploy_context.is_empty() {
-                                let combined = context_content.unwrap_or_default();
-                                context_content = Some(format!("{combined}\n\n{deploy_context}"));
-                            }
-
-                            // Append external data sources context for the LLM.
-                            if !ds_context.is_empty() {
-                                let combined = context_content.unwrap_or_default();
-                                context_content = Some(format!("{combined}\n\n{ds_context}"));
-                            }
-
-                            // Append baseline summary to context.
-                            let context_with_baselines = match context_content {
-                                Some(ctx) => format!("{ctx}\n\n{baseline_summary}"),
-                                None => baseline_summary.clone(),
-                            };
-
-                            // Search past incidents for similar issues.
-                            let incident_context = match IncidentIndex::load(&t.name) {
-                                Ok(index) => {
-                                    let similar = index.search_similar(&hc.alerts, 3);
-                                    if similar.is_empty() {
-                                        String::new()
-                                    } else {
-                                        eprintln!(
-                                            "   Found {} similar past incident(s)",
-                                            similar.len()
-                                        );
-                                        IncidentIndex::format_context(&similar)
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("   Warning: failed to load past incidents: {e}");
-                                    String::new()
-                                }
-                            };
-
-                            let full_context = if incident_context.is_empty() {
-                                context_with_baselines
-                            } else {
-                                format!("{context_with_baselines}\n\n{incident_context}")
-                            };
-
-                            match agent.diagnose(&hc, Some(&full_context)).await {
-                                Ok(Some(diag)) => {
-                                    eprintln!("\u{1f50d} Diagnosis: {}", diag.llm_assessment);
-                                    eprintln!("   Actions: {}", diag.suggested_actions.join(", "));
-                                    eprintln!("   Severity: {}", diag.severity);
-
-                                    // Send diagnosis to notification channel.
-                                    let alert_text = format_diagnosis_alert(&hc, &diag);
-                                    if let Err(e) = notifier.notify_text(&t.name, &alert_text).await
-                                    {
-                                        eprintln!("   Warning: diagnosis notification failed: {e}");
-                                    }
-
-                                    if let Err(e) = agent.record_incident(&diag) {
-                                        eprintln!("   Warning: failed to record incident: {e}");
-                                    } else {
-                                        let date = diag.timestamp.format("%Y-%m-%d").to_string();
-                                        let path = agent.incident_log_path(&t.name, &date);
-                                        eprintln!(
-                                            "   Incident ID: {} logged to {}",
-                                            diag.incident_id,
-                                            path.display()
-                                        );
-                                    }
-                                }
-                                Ok(None) => {} // healthy — shouldn't happen here
-                                Err(e) => {
-                                    eprintln!("   Diagnosis skipped (LLM error): {e}");
-                                }
-                            }
-                        } else {
-                            tracing::info!("no LLM provider configured, skipping diagnosis");
-                        }
-
-                        // --- Runbook matching (requires a command runner) ---
-                        if let Some(runner) = &runner {
-                            if let Ok(store) = RunbookStore::default_dir().map(RunbookStore::new)
-                        {
-                            if let Ok(matched) = store.match_alerts(&hc.alerts, &t.name) {
-                                for rb in &matched {
-                                    match t.autonomy {
-                                        OpsClawAutonomy::DryRun => {
-                                            eprintln!(
-                                                "   WOULD_EXECUTE_RUNBOOK: {} ({})",
-                                                rb.name, rb.id
-                                            );
-                                            for (i, step) in rb.steps.iter().enumerate() {
-                                                eprintln!(
-                                                    "     Step {}: {}{}",
-                                                    i + 1,
-                                                    step.description,
-                                                    step.command
-                                                        .as_deref()
-                                                        .map(|c| format!(" — `{c}`"))
-                                                        .unwrap_or_default()
-                                                );
-                                            }
-                                        }
-                                        OpsClawAutonomy::Approve => {
-                                            eprintln!(
-                                                "   Found matching runbook '{}'. Requesting approval...",
-                                                rb.name
-                                            );
-                                            let action_desc = format!(
-                                                "runbook '{}': {}",
-                                                rb.name, rb.description
-                                            );
-                                            let approved = crate::ops::approval::request_approval(
-                                                notifier.as_ref(),
-                                                &t.name,
-                                                &action_desc,
-                                                120,
-                                                openshell_ctx,
-                                            )
-                                            .await
-                                            .unwrap_or(false);
-
-                                            if approved {
-                                                eprintln!(
-                                                    "   Approved — executing runbook: {} ...",
-                                                    rb.name
-                                                );
-                                                match runbooks::execute_runbook(
-                                                    runner.as_ref(),
-                                                    rb,
-                                                    &t.name,
-                                                    &hc.alerts,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(exec) => {
-                                                        let exec_md =
-                                                            runbooks::execution_to_markdown(
-                                                                &exec, &rb.name,
-                                                            );
-                                                        eprintln!("{exec_md}");
-                                                        if let Err(e) = notifier
-                                                            .notify_text(&t.name, &exec_md)
-                                                            .await
-                                                        {
-                                                            eprintln!(
-                                                                "   Warning: runbook notification failed: {e}"
-                                                            );
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        eprintln!(
-                                                            "   Runbook execution failed: {e}"
-                                                        );
-                                                    }
-                                                }
-                                            } else {
-                                                eprintln!(
-                                                    "   Approval denied/timed out for runbook '{}' — skipping",
-                                                    rb.name
-                                                );
-                                            }
-                                        }
-                                        OpsClawAutonomy::Auto => {
-                                            eprintln!("   Executing runbook: {} ...", rb.name);
-                                            match runbooks::execute_runbook(
-                                                runner.as_ref(),
-                                                rb,
-                                                &t.name,
-                                                &hc.alerts,
-                                            )
-                                            .await
-                                            {
-                                                Ok(exec) => {
-                                                    let exec_md = runbooks::execution_to_markdown(
-                                                        &exec, &rb.name,
-                                                    );
-                                                    eprintln!("{exec_md}");
-                                                    if let Err(e) = notifier
-                                                        .notify_text(&t.name, &exec_md)
-                                                        .await
-                                                    {
-                                                        eprintln!(
-                                                            "   Warning: runbook notification failed: {e}"
-                                                        );
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("   Runbook execution failed: {e}");
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        } else {
-                            tracing::info!(
-                                "Skipping runbook execution for Kubernetes project '{}'",
-                                t.name
-                            );
-                        }
-                        // --- End runbook matching ---
-
-                        // --- Escalation: create for unhealthy targets ---
-                        if let Some(mgr) = escalation_managers.get_mut(&t.name) {
-                            let alert_summary: Vec<String> =
-                                hc.alerts.iter().map(|a| a.message.clone()).collect();
-                            let diagnosis_text = alert_summary.join("; ");
-                            let incident_id = format!(
-                                "{}-{}",
-                                t.name,
-                                chrono::Utc::now().format("%Y%m%dT%H%M%S")
-                            );
-                            mgr.create(&incident_id, &t.name, &diagnosis_text, &alert_summary);
-
-                            // Send initial notification to the first contact.
-                            let actions = mgr.check_timeouts(chrono::Utc::now());
-                            for action in actions {
-                                process_escalation_action(notifier.as_ref(), mgr, action).await;
-                            }
-                            if let Err(e) = mgr.save() {
-                                eprintln!("   Warning: failed to save escalation state: {e}");
-                            }
-                        }
-                        // --- End escalation ---
-                    }
-                }
-            }
-        }
-
-        // --- Escalation: check timeouts for all managers ---
-        for (target_name, mgr) in &mut escalation_managers {
-            let actions = mgr.check_timeouts(chrono::Utc::now());
-            if !actions.is_empty() {
-                for action in actions {
-                    process_escalation_action(notifier.as_ref(), mgr, action).await;
-                }
-                if let Err(e) = mgr.save() {
-                    eprintln!(
-                        "   Warning: failed to save escalation state for '{target_name}': {e}"
-                    );
+                    eprintln!("[{ts}] {name}: agent error — {e}");
                 }
             }
         }
@@ -856,7 +462,6 @@ pub async fn handle_monitor(
             break;
         }
 
-        // Wait for the next interval OR a shutdown signal.
         tokio::select! {
             () = tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)) => {}
             () = shutdown_signal() => {
@@ -1038,9 +643,9 @@ pub async fn handle_probe(
 
         // Gather configured + auto-discovered probes
         let configured = t.probes.clone().unwrap_or_default();
-        let discovered = match snapshots::load_snapshot(&t.name)? {
-            Some(snap) => probes::discover_probes(&snap, t.host.as_deref()),
-            None => vec![],
+        let discovered = match scan_target(config, t).await {
+            Ok(snap) => probes::discover_probes(&snap, t.host.as_deref()),
+            Err(_) => vec![],
         };
 
         if configured.is_empty() && discovered.is_empty() {
@@ -1167,76 +772,6 @@ fn make_notifier(config: &OpsConfig) -> Box<dyn AlertNotifier> {
     Box::new(NullNotifier)
 }
 
-/// Create a [`MonitoringAgent`] from config, falling back to env vars.
-fn make_monitoring_agent(config: &OpsConfig) -> Option<MonitoringAgent> {
-    let api_key = config
-        .diagnosis
-        .api_key
-        .clone()
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .filter(|k| !k.is_empty())?;
-    let model = config
-        .diagnosis
-        .model
-        .clone()
-        .or_else(|| std::env::var("OPSCLAW_DIAGNOSIS_MODEL").ok())
-        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-    Some(MonitoringAgent::new(model, api_key))
-}
-
-/// Format a Telegram-friendly diagnosis alert combining health summary and LLM assessment.
-fn format_diagnosis_alert(hc: &HealthCheck, diag: &Diagnosis) -> String {
-    let mut msg = format!("🔍 *Diagnosis* — {}\n", hc.target_name);
-    let _ = write!(msg, "Severity: *{}*\n\n", diag.severity);
-    msg.push_str(&diag.llm_assessment);
-    if !diag.suggested_actions.is_empty() {
-        msg.push_str("\n\n*Suggested actions:*\n");
-        for action in &diag.suggested_actions {
-            let _ = writeln!(msg, "• {action}");
-        }
-    }
-    let _ = write!(msg, "\nIncident: `{}`", diag.incident_id);
-    msg
-}
-
-// ---------------------------------------------------------------------------
-// baseline command
-// ---------------------------------------------------------------------------
-
-pub fn handle_baseline(config: &OpsConfig, target: Option<&str>, reset: bool) -> Result<()> {
-    let targets = config.projects.as_deref().unwrap_or_default();
-
-    if targets.is_empty() {
-        bail!("No [[projects]] defined in config. Add at least one project.");
-    }
-
-    let selected: Vec<&ProjectConfig> = if let Some(name) = target {
-        let t = targets
-            .iter()
-            .find(|t| t.name == name)
-            .with_context(|| format!("Project '{name}' not found in config"))?;
-        vec![t]
-    } else {
-        targets.iter().collect()
-    };
-
-    for t in &selected {
-        let bl_path = baseline::baseline_path(&t.name)?;
-        let mut store = BaselineStore::load(&bl_path)?;
-
-        if reset {
-            store.reset_target(&t.name);
-            store.save()?;
-            println!("Baseline data cleared for '{}'.", t.name);
-        } else {
-            let summary = store.summary(&t.name);
-            println!("{summary}");
-        }
-    }
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // incidents command
 // ---------------------------------------------------------------------------
@@ -1359,33 +894,6 @@ fn search_all_targets(query: &str) -> Result<Vec<crate::ops::incident_search::In
         }
     }
     Ok(all)
-}
-
-// ---------------------------------------------------------------------------
-// postmortem command
-// ---------------------------------------------------------------------------
-
-pub fn handle_postmortem(incident_id: &str, output: Option<&std::path::Path>) -> Result<()> {
-    use crate::ops::postmortem::PostMortem;
-
-    let all = load_all_targets()?;
-    let incident = all
-        .iter()
-        .find(|inc| inc.incident_id == incident_id)
-        .ok_or_else(|| anyhow::anyhow!("Incident '{incident_id}' not found"))?;
-
-    let pm = PostMortem::generate(incident, &[]);
-    let md = pm.to_markdown();
-
-    if let Some(path) = output {
-        std::fs::write(path, &md)
-            .with_context(|| format!("Failed to write to {}", path.display()))?;
-        println!("Post-mortem written to {}", path.display());
-    } else {
-        print!("{md}");
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1570,88 +1078,6 @@ fn escalation_store_path(target_name: &str) -> Result<std::path::PathBuf> {
     Ok(dir.join(format!("{target_name}.json")))
 }
 
-
-// ---------------------------------------------------------------------------
-// Digest
-// ---------------------------------------------------------------------------
-
-pub async fn handle_digest(
-    config: &OpsConfig,
-    target: Option<String>,
-    hours: u32,
-    notify: bool,
-) -> Result<()> {
-    let targets = resolve_targets(config, target.as_deref(), true)?;
-
-    let mut inputs: Vec<ProjectInput> = Vec::new();
-
-    for t in &targets {
-        // Incidents
-        let incidents = match IncidentIndex::load(&t.name) {
-            Ok(index) => index.incidents().to_vec(),
-            Err(e) => {
-                tracing::warn!("digest: failed to load incidents for {}: {e:#}", t.name);
-                Vec::new()
-            }
-        };
-
-        // Baseline anomalies
-        let anomalies = match baseline::baseline_path(&t.name) {
-            Ok(bl_path) => match BaselineStore::load(&bl_path) {
-                Ok(store) => {
-                    // Run a quick discovery to get current metrics for anomaly check
-                    let snapshot = scan_target(config, t).await?;
-                    let metrics = extract_metrics(&snapshot);
-                    store.check_anomalies(&t.name, &metrics, 3.0)
-                }
-                Err(e) => {
-                    tracing::warn!("digest: failed to load baseline for {}: {e:#}", t.name);
-                    Vec::new()
-                }
-            },
-            Err(e) => {
-                tracing::warn!("digest: failed to resolve baseline path for {}: {e:#}", t.name);
-                Vec::new()
-            }
-        };
-
-        // Derive health status from incidents and anomalies
-        let health = if incidents
-            .iter()
-            .any(|i| i.severity == "critical" && i.resolution.is_none())
-        {
-            monitoring::HealthStatus::Critical
-        } else if !anomalies.is_empty() || incidents.iter().any(|i| i.resolution.is_none()) {
-            monitoring::HealthStatus::Warning
-        } else {
-            monitoring::HealthStatus::Healthy
-        };
-
-        // Collect alert strings from recent anomalies
-        let alerts: Vec<String> = anomalies.iter().map(|a| a.message.clone()).collect();
-
-        inputs.push(ProjectInput {
-            name: t.name.clone(),
-            health_status: health,
-            incidents,
-            alerts,
-            baseline_anomalies: anomalies,
-            probe_failures: 0,
-        });
-    }
-
-    let report = DigestReport::generate(inputs, hours);
-    println!("{}", report.to_markdown());
-
-    if notify {
-        let notifier = make_notifier(config);
-        let summary = report.to_short_summary();
-        notifier.notify_text("digest", &summary).await?;
-        println!("Digest sent via notifier.");
-    }
-
-    Ok(())
-}
 
 fn resolve_targets<'a>(
     config: &'a OpsConfig,
@@ -1849,56 +1275,6 @@ async fn shutdown_signal() {
 // ---------------------------------------------------------------------------
 // SkillForge
 // ---------------------------------------------------------------------------
-
-pub async fn handle_skills_forge(config: &OpsConfig, dry_run: bool) -> Result<()> {
-    use crate::skillforge::{SkillForge, SkillForgeConfig};
-    use crate::skillforge::evaluate::Recommendation;
-
-    let mut forge_cfg = SkillForgeConfig::default();
-    // Enable the pipeline for this CLI-driven run.
-    forge_cfg.enabled = true;
-    // In dry-run mode, disable auto-integration so nothing is written.
-    if dry_run {
-        forge_cfg.auto_integrate = false;
-    }
-    // Resolve output directory relative to the workspace.
-    forge_cfg.output_dir = config
-        .workspace_dir
-        .join("skills")
-        .to_string_lossy()
-        .into_owned();
-
-    let forge = SkillForge::new(forge_cfg);
-    let report = forge.forge().await?;
-
-    println!("SkillForge discovery complete");
-    println!("  Discovered : {}", report.discovered);
-    println!("  Evaluated  : {}", report.evaluated);
-    if dry_run {
-        println!("  (dry-run — no skills were integrated)");
-    } else {
-        println!("  Integrated : {}", report.auto_integrated);
-    }
-    println!("  Review     : {}", report.manual_review);
-    println!("  Skipped    : {}", report.skipped);
-
-    if !report.results.is_empty() {
-        println!();
-        for res in &report.results {
-            let tag = match res.recommendation {
-                Recommendation::Auto => "AUTO",
-                Recommendation::Manual => "REVIEW",
-                Recommendation::Skip => "SKIP",
-            };
-            println!(
-                "  [{tag:^6}] {} (score: {:.2}) — {}",
-                res.candidate.name, res.total_score, res.candidate.url,
-            );
-        }
-    }
-
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // project commands

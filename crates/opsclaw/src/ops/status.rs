@@ -6,7 +6,6 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::ops::snapshots;
 use crate::tools::discovery::TargetSnapshot;
 use crate::ops_config::ProjectConfig;
 
@@ -15,7 +14,6 @@ use crate::ops_config::ProjectConfig;
 pub struct ProjectStatus {
     pub name: String,
     pub host: String,
-    pub snapshot_path: String,
     pub snapshot: Option<TargetSnapshot>,
     pub autonomy: String,
 }
@@ -53,17 +51,14 @@ fn parse_uptime(raw: &str) -> String {
     raw.trim_start_matches("up ").to_string()
 }
 
-/// Build a `ProjectStatus` from config + snapshot on disk.
+/// Build a `ProjectStatus` from config.
 pub fn gather_project_status(target: &ProjectConfig) -> Result<ProjectStatus> {
     let host = target.host.as_deref().unwrap_or("localhost").to_string();
-    let snap_path = snapshots::snapshot_path(&target.name)?;
-    let snapshot = snapshots::load_snapshot(&target.name)?;
 
     Ok(ProjectStatus {
         name: target.name.clone(),
         host,
-        snapshot_path: snap_path.display().to_string(),
-        snapshot,
+        snapshot: None,
         autonomy: format!("{:?}", target.autonomy).to_lowercase(),
     })
 }
@@ -88,7 +83,6 @@ pub fn render_project_status(status: &ProjectStatus) -> String {
     let scanned = snap.scanned_at.format("%Y-%m-%d %H:%M UTC");
     let ago = time_ago(snap.scanned_at);
     let _ = writeln!(out, "Last scan:     {scanned} ({ago})");
-    let _ = writeln!(out, "Snapshot:      {}", status.snapshot_path);
     let _ = writeln!(out);
 
     // System
@@ -194,7 +188,6 @@ mod tests {
         ProjectStatus {
             name: "sacra".into(),
             host: "159.69.92.65".into(),
-            snapshot_path: "~/.opsclaw/snapshots/sacra.json".into(),
             snapshot: Some(TargetSnapshot {
                 scanned_at: Utc::now() - chrono::Duration::minutes(3),
                 os: OsInfo {
@@ -303,7 +296,6 @@ mod tests {
         let status = ProjectStatus {
             name: "missing".into(),
             host: "localhost".into(),
-            snapshot_path: "~/.opsclaw/snapshots/missing.json".into(),
             snapshot: None,
             autonomy: "approve".into(),
         };

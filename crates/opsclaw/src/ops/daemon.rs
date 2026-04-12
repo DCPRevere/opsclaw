@@ -56,23 +56,6 @@ pub async fn start_daemon(
         });
     }
 
-    // --- Periodic digest ---
-    {
-        let cfg = config.clone();
-        tasks.spawn(async move {
-            info!("Starting periodic digest (every 24h)");
-            loop {
-                // Wait 24 hours between digests.
-                tokio::time::sleep(tokio::time::Duration::from_secs(24 * 60 * 60)).await;
-
-                info!("Generating scheduled digest");
-                if let Err(e) = ops_cli::handle_digest(&cfg, None, 24, true).await {
-                    error!("Digest generation failed: {e:#}");
-                }
-            }
-        });
-    }
-
     // --- A2A server ---
     if let Some(a2a_config) = &config.a2a {
         if a2a_config.server.enabled {

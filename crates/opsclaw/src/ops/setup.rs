@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 use console::style;
 use dialoguer::{Confirm, Input, Select};
 
-use crate::ops::snapshots;
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::ssh_command_runner::{LocalCommandRunner, SshCommandRunner};
 use crate::tools::ssh_tool::RealSshExecutor;
@@ -432,11 +431,6 @@ pub async fn step_discovery_scan(
                     "Disk: {} / {} ({}% used)",
                     d.used, d.size, d.use_percent
                 ));
-            }
-
-            // Save snapshot for future monitoring baselines
-            if let Err(e) = snapshots::save_snapshot(target_name, &snapshot) {
-                eprintln!("  Warning: could not save snapshot: {e}");
             }
 
             Some(snapshot)

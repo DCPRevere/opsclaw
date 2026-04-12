@@ -1318,7 +1318,7 @@ async fn run_gateway_chat_with_tools(
     session_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let config = state.config.lock().clone();
-    Box::pin(crate::agent::process_message(config, message, session_id)).await
+    Box::pin(crate::agent::process_message(config, message, session_id, None)).await
 }
 
 /// Webhook request body

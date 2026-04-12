@@ -328,6 +328,7 @@ async fn run_agent_job(
                 false,
                 None,
                 job.allowed_tools.clone(),
+                None,
             ))
             .await
         }

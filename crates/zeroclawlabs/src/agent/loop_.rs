@@ -3471,6 +3471,7 @@ pub async fn run(
     interactive: bool,
     session_state_file: Option<PathBuf>,
     allowed_tools: Option<Vec<String>>,
+    extra_tools: Option<Vec<Box<dyn Tool>>>,
 ) -> Result<String> {
     // ── Wire up agnostic subsystems ──────────────────────────────
     let base_observer = observability::create_observer(&config.observability);
@@ -3538,6 +3539,14 @@ pub async fn run(
     if !peripheral_tools.is_empty() {
         tracing::info!(count = peripheral_tools.len(), "Peripheral tools added");
         tools_registry.extend(peripheral_tools);
+    }
+
+    // ── Extra tools (injected by host binary, e.g. OpsClaw SRE tools) ──
+    if let Some(extra) = extra_tools {
+        if !extra.is_empty() {
+            tracing::info!(count = extra.len(), "Extra tools added");
+            tools_registry.extend(extra);
+        }
     }
 
     // ── Capability-based tool access control ─────────────────────
@@ -4470,6 +4479,7 @@ pub async fn process_message(
     config: Config,
     message: &str,
     session_id: Option<&str>,
+    extra_tools: Option<Vec<Box<dyn Tool>>>,
 ) -> Result<String> {
     let observer: Arc<dyn Observer> =
         Arc::from(observability::create_observer(&config.observability));
@@ -4522,6 +4532,14 @@ pub async fn process_message(
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
     tools_registry.extend(peripheral_tools);
+
+    // ── Extra tools (injected by host binary, e.g. OpsClaw SRE tools) ──
+    if let Some(extra) = extra_tools {
+        if !extra.is_empty() {
+            tracing::info!(count = extra.len(), "Extra tools added (process_message)");
+            tools_registry.extend(extra);
+        }
+    }
 
     // ── Wire MCP tools (non-fatal) — process_message path ────────
     // NOTE: Same ordering contract as the CLI path above — MCP tools must be

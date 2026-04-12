@@ -135,7 +135,6 @@ mod openshell;
 mod ops;
 mod ops_cli;
 mod ops_config;
-mod skillforge;
 mod tools;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -713,23 +712,6 @@ Examples:
         level: Option<String>,
     },
 
-    /// Show or reset metric baselines for monitored projects
-    #[command(long_about = "\
-Show or reset metric baselines for monitored projects.
-
-Examples:
-  opsclaw baseline                         # all projects
-  opsclaw baseline --target sacra          # single target
-  opsclaw baseline --reset                 # clear all baselines
-  opsclaw baseline --target sacra --reset  # clear one target")]
-    Baseline {
-        /// Target name to show baselines for
-        #[arg(long)]
-        target: Option<String>,
-        /// Clear baseline data
-        #[arg(long)]
-        reset: bool,
-    },
 
     /// List, search, or resolve past incidents
     #[command(long_about = "\
@@ -764,42 +746,6 @@ Examples:
         action: ops_cli::RunbookActions,
     },
 
-    /// Generate a daily digest report summarising monitoring activity
-    #[command(long_about = "\
-Generate a digest report summarising incidents, anomalies, and health
-status across all (or one) configured projects for a rolling time window.
-
-Examples:
-  opsclaw digest                         # last 24 hours, all projects
-  opsclaw digest --hours 8               # last 8 hours
-  opsclaw digest --target sacra          # single target
-  opsclaw digest --notify                # also send via notifier")]
-    Digest {
-        /// Target name (from config [[projects]])
-        #[arg(long)]
-        target: Option<String>,
-        /// Rolling window in hours (default: 24)
-        #[arg(long, default_value = "24")]
-        hours: u32,
-        /// Send the digest via the configured notifier
-        #[arg(long)]
-        notify: bool,
-    },
-
-    /// Generate a post-mortem report for an incident
-    #[command(long_about = "\
-Generate a structured post-mortem report from a recorded incident.
-
-Examples:
-  opsclaw postmortem inc-42
-  opsclaw postmortem inc-42 -o report.md")]
-    Postmortem {
-        /// Incident ID to generate report for
-        incident_id: String,
-        /// Output file path (default: stdout)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-    },
 
 }
 
@@ -1291,6 +1237,8 @@ async fn main() -> Result<()> {
             peripheral,
         } => {
             let final_temperature = temperature.unwrap_or(config.default_temperature);
+            let extra_tools = crate::tools::registry::create_opsclaw_tools(&ops_config)
+                .ok();
 
             Box::pin(agent::run(
                 config,
@@ -1302,6 +1250,7 @@ async fn main() -> Result<()> {
                 true,
                 session_state_file,
                 None,
+                extra_tools,
             ))
             .await
             .map(|_| ())
@@ -1882,10 +1831,6 @@ async fn main() -> Result<()> {
             ops_cli::handle_logs(&ops_config, target, source, lines, level).await
         }
 
-        Commands::Baseline { target, reset } => {
-            ops_cli::handle_baseline(&ops_config, target.as_deref(), reset)
-        }
-
         Commands::Incidents { target, action } => {
             let (search_query, resolve_id, resolve_msg) = match action {
                 Some(IncidentActions::Search { query }) => (Some(query), None, None),
@@ -1900,19 +1845,6 @@ async fn main() -> Result<()> {
         Commands::Runbook { action } => {
             ops_cli::handle_runbook(&ops_config, action).await
         }
-
-        Commands::Digest {
-            target,
-            hours,
-            notify,
-        } => {
-            ops_cli::handle_digest(&ops_config, target, hours, notify).await
-        }
-
-        Commands::Postmortem {
-            incident_id,
-            output,
-        } => ops_cli::handle_postmortem(&incident_id, output.as_deref()),
 
         Commands::Props { props_command } => match props_command {
             PropsCommands::List { filter, secrets } => {

@@ -12,10 +12,46 @@ pub mod jaeger;
 pub mod prometheus;
 pub mod seq;
 
+use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ops::log_sources::LogEntry;
+// ---------------------------------------------------------------------------
+// Log entry types (used by Elasticsearch and Seq sources)
+// ---------------------------------------------------------------------------
+
+/// A single structured log entry returned from an external log source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub timestamp: Option<DateTime<Utc>>,
+    pub source: String,
+    pub level: Option<LogLevel>,
+    pub message: String,
+    pub raw: String,
+}
+
+/// Log severity level.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Debug => write!(f, "debug"),
+            Self::Info => write!(f, "info"),
+            Self::Warn => write!(f, "warn"),
+            Self::Error => write!(f, "error"),
+            Self::Fatal => write!(f, "fatal"),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shared snapshot type

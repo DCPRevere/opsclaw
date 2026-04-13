@@ -7,8 +7,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::ops::data_sources::ElasticsearchConfig;
-use crate::ops::log_sources::{LogEntry, LogLevel};
+use crate::ops::data_sources::{ElasticsearchConfig, LogEntry, LogLevel};
 
 /// Maximum number of hits to return per query.
 const MAX_HITS: u32 = 50;

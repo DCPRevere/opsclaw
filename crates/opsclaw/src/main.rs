@@ -687,50 +687,6 @@ Examples:
         once: bool,
     },
 
-    /// Collect and display logs from discovered sources
-    #[command(long_about = "\
-Collect recent logs from Docker containers, systemd units, and log
-files on configured targets.
-
-Examples:
-  opsclaw logs --target sacra                # all sources, last 50 lines
-  opsclaw logs --target sacra --source docker   # Docker containers only
-  opsclaw logs --target sacra --level error     # errors and above only
-  opsclaw logs --target sacra --lines 200       # last 200 lines per source")]
-    Logs {
-        /// Target name (from config [[projects]])
-        #[arg(long)]
-        target: Option<String>,
-        /// Filter by source type: docker, systemd, file
-        #[arg(long)]
-        source: Option<String>,
-        /// Number of recent lines per source (default: 50)
-        #[arg(long, default_value = "50")]
-        lines: usize,
-        /// Minimum log level to display: debug, info, warn, error, fatal
-        #[arg(long)]
-        level: Option<String>,
-    },
-
-
-    /// List, search, or resolve past incidents
-    #[command(long_about = "\
-List, search, or resolve past diagnostic incidents.
-
-Examples:
-  opsclaw incidents                              # list recent incidents (all projects)
-  opsclaw incidents --target sacra               # list incidents for a target
-  opsclaw incidents search \"container crashed\"   # search by keyword
-  opsclaw incidents resolve inc-123 \"fixed by restarting\" --target sacra")]
-    Incidents {
-        /// Filter by target name
-        #[arg(long)]
-        target: Option<String>,
-
-        #[command(subcommand)]
-        action: Option<IncidentActions>,
-    },
-
     /// Manage runbooks (remediation procedures)
     #[command(long_about = "\
 Manage runbooks — executable remediation procedures that can be
@@ -843,23 +799,6 @@ enum ProjectCommands {
         name: String,
     },
 }
-
-#[derive(Subcommand, Debug)]
-enum IncidentActions {
-    /// Search incidents by keyword
-    Search {
-        /// Search query
-        query: String,
-    },
-    /// Mark an incident as resolved
-    Resolve {
-        /// Incident ID
-        id: String,
-        /// Resolution description
-        resolution: String,
-    },
-}
-
 
 #[derive(Subcommand, Debug)]
 enum EstopSubcommands {
@@ -1820,26 +1759,6 @@ async fn main() -> Result<()> {
         } => {
             let openshell = openshell::OpenShellContext::detect();
             ops_cli::handle_monitor(&ops_config, target, interval, once, &openshell).await
-        }
-
-        Commands::Logs {
-            target,
-            source,
-            lines,
-            level,
-        } => {
-            ops_cli::handle_logs(&ops_config, target, source, lines, level).await
-        }
-
-        Commands::Incidents { target, action } => {
-            let (search_query, resolve_id, resolve_msg) = match action {
-                Some(IncidentActions::Search { query }) => (Some(query), None, None),
-                Some(IncidentActions::Resolve { id, resolution }) => {
-                    (None, Some(id), Some(resolution))
-                }
-                None => (None, None, None),
-            };
-            ops_cli::handle_incidents(target, search_query, resolve_id, resolve_msg)
         }
 
         Commands::Runbook { action } => {

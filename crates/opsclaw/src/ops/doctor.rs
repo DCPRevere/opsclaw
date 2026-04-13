@@ -503,7 +503,7 @@ fn check_data_directories(config: &OpsConfig, results: &mut Vec<CheckResult>) {
         format!("{} exists", opsclaw_dir.display()),
     ));
 
-    let subdirs = ["snapshots", "incidents", "baselines"];
+    let subdirs = ["snapshots", "incidents"];
     for name in &subdirs {
         let path = opsclaw_dir.join(name);
         if path.is_dir() {

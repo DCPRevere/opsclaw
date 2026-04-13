@@ -7,8 +7,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::ops::data_sources::SeqConfig;
-use crate::ops::log_sources::{LogEntry, LogLevel};
+use crate::ops::data_sources::{LogEntry, LogLevel, SeqConfig};
 
 // ---------------------------------------------------------------------------
 // Seq API response types

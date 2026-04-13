@@ -128,12 +128,7 @@ pub fn diagnostics_to_markdown(snapshots: &[DbDiagnosticSnapshot]) -> String {
     }
     let mut md = String::from("## Database Diagnostics\n\n");
     for snap in snapshots {
-        let _ = writeln!(
-            md,
-            "### {} ({})\n",
-            snap.name,
-            type_label(&snap.db_type)
-        );
+        let _ = writeln!(md, "### {} ({})\n", snap.name, type_label(&snap.db_type));
         match &snap.metrics {
             DbMetrics::Postgres(pg) => {
                 if let Some(count) = pg.connection_count {
@@ -146,11 +141,7 @@ pub fn diagnostics_to_markdown(snapshots: &[DbDiagnosticSnapshot]) -> String {
                     let _ = writeln!(md, "- **Replication LSN**: {lsn}");
                 }
                 if !pg.active_queries.is_empty() {
-                    let _ = writeln!(
-                        md,
-                        "- **Active queries**: {}\n",
-                        pg.active_queries.len()
-                    );
+                    let _ = writeln!(md, "- **Active queries**: {}\n", pg.active_queries.len());
                     md.push_str("| PID | State | Started | Query |\n");
                     md.push_str("|-----|-------|---------|-------|\n");
                     for q in &pg.active_queries {

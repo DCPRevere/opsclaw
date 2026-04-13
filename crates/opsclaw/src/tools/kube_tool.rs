@@ -5,7 +5,6 @@
 //! [`KubernetesInfo`] snapshot structs defined in [`super::discovery`].
 
 use anyhow::{Context, Result};
-use tracing::{debug, warn};
 use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Event, Namespace, Node, Pod, Service};
@@ -13,6 +12,7 @@ use kube::api::{Api, ListParams, LogParams, Patch, PatchParams};
 use kube::config::KubeConfigOptions;
 use kube::Client;
 use serde::Serialize;
+use tracing::{debug, warn};
 
 use super::discovery::{
     K8sDeployment, K8sNode, K8sPod, K8sService, KubernetesInfo, TargetSnapshot,
@@ -341,7 +341,11 @@ fn deployment_to_snapshot(dep: Deployment) -> K8sDeployment {
     let desired = spec.replicas.unwrap_or(0);
     let ready_replicas = status.ready_replicas.unwrap_or(0);
     let up_to_date = status.updated_replicas.unwrap_or(0).max(0).cast_unsigned();
-    let available = status.available_replicas.unwrap_or(0).max(0).cast_unsigned();
+    let available = status
+        .available_replicas
+        .unwrap_or(0)
+        .max(0)
+        .cast_unsigned();
 
     K8sDeployment {
         name: meta.name.unwrap_or_default(),

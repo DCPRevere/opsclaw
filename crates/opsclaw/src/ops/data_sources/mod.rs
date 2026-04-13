@@ -366,10 +366,7 @@ pub fn format_for_diagnosis(snap: &DataSourcesSnapshot) -> String {
         return String::new();
     }
 
-    format!(
-        "=== External Data Sources ===\n\n{}",
-        sections.join("\n\n")
-    )
+    format!("=== External Data Sources ===\n\n{}", sections.join("\n\n"))
 }
 
 /// Print a human-readable summary of the snapshot.
@@ -427,31 +424,26 @@ pub fn print_summary(snap: &DataSourcesSnapshot) {
     }
 
     if !snap.github_runs.is_empty() {
-        println!(
-            "\n── GitHub workflow runs ({}) ──",
-            snap.github_runs.len()
-        );
+        println!("\n── GitHub workflow runs ({}) ──", snap.github_runs.len());
         for run in &snap.github_runs {
-            let conclusion = run
-                .conclusion
-                .as_deref()
-                .unwrap_or("-");
+            let conclusion = run.conclusion.as_deref().unwrap_or("-");
             let name = run.name.as_deref().unwrap_or("unnamed");
             let ts = run
                 .updated_at
                 .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
                 .unwrap_or_else(|| "unknown".into());
-            println!(
-                "  {} [{}→{}] {ts}",
-                name, run.status, conclusion
-            );
+            println!("  {} [{}→{}] {ts}", name, run.status, conclusion);
         }
     }
 
     if !snap.github_tags.is_empty() {
         println!("\n── GitHub tags ({}) ──", snap.github_tags.len());
         for tag in &snap.github_tags {
-            println!("  {} ({})", tag.name, &tag.commit_sha[..7.min(tag.commit_sha.len())]);
+            println!(
+                "  {} ({})",
+                tag.name,
+                &tag.commit_sha[..7.min(tag.commit_sha.len())]
+            );
         }
     }
 

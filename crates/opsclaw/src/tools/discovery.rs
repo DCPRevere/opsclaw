@@ -6,9 +6,9 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::warn;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // CommandRunner abstraction
@@ -376,7 +376,9 @@ pub fn parse_k8s_pods_json(raw: &str) -> Vec<K8sPod> {
                     .count();
                 let restarts: u32 = cs
                     .iter()
-                    .map(|c| u32::try_from(c["restartCount"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX))
+                    .map(|c| {
+                        u32::try_from(c["restartCount"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX)
+                    })
                     .sum();
                 // Detect waiting reason like CrashLoopBackOff
                 let waiting_reason = cs.iter().find_map(|c| {
@@ -425,9 +427,12 @@ pub fn parse_k8s_deployments_json(raw: &str) -> Vec<K8sDeployment> {
             let status = &item["status"];
             let spec = &item["spec"];
             let desired = u32::try_from(spec["replicas"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
-            let available = u32::try_from(status["availableReplicas"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
-            let up_to_date = u32::try_from(status["updatedReplicas"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
-            let ready_replicas = u32::try_from(status["readyReplicas"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
+            let available = u32::try_from(status["availableReplicas"].as_u64().unwrap_or(0))
+                .unwrap_or(u32::MAX);
+            let up_to_date =
+                u32::try_from(status["updatedReplicas"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
+            let ready_replicas =
+                u32::try_from(status["readyReplicas"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
             K8sDeployment {
                 name: metadata["name"].as_str().unwrap_or("").to_string(),
                 namespace: metadata["namespace"].as_str().unwrap_or("").to_string(),

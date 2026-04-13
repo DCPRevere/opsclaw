@@ -46,7 +46,10 @@ pub async fn check_policy(ctx: &OpenShellContext, action: &str, target: &str) ->
 
     match result {
         Ok(resp) if resp.status().is_success() => {
-            let policy: PolicyResponse = resp.json().await.unwrap_or(PolicyResponse { allowed: true });
+            let policy: PolicyResponse = resp
+                .json()
+                .await
+                .unwrap_or(PolicyResponse { allowed: true });
             Ok(policy.allowed)
         }
         Ok(resp) => {

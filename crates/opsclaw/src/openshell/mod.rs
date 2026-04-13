@@ -87,10 +87,7 @@ mod tests {
             ctx.policy_endpoint.as_deref(),
             Some("http://localhost:7070")
         );
-        assert_eq!(
-            ctx.audit_endpoint.as_deref(),
-            Some("http://localhost:7071")
-        );
+        assert_eq!(ctx.audit_endpoint.as_deref(), Some("http://localhost:7071"));
 
         // Cleanup
         std::env::remove_var("OPENSHELL_ACTIVE");

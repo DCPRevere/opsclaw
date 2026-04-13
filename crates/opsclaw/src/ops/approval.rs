@@ -155,8 +155,7 @@ pub async fn request_approval(
 ) -> Result<bool> {
     // If OpenShell is active, check its policy engine first.
     if openshell_ctx.is_active() {
-        let allowed =
-            openshell::policy::check_policy(openshell_ctx, action, target).await?;
+        let allowed = openshell::policy::check_policy(openshell_ctx, action, target).await?;
         if !allowed {
             warn!("OpenShell policy denied: {action} on {target}");
             return Ok(false);
@@ -326,9 +325,15 @@ mod tests {
     async fn request_approval_times_out_and_returns_false() {
         let notifier = RecordingNotifier::new();
 
-        let result = request_approval(&notifier, "web-1", "restart nginx", 1, &inactive_openshell())
-            .await
-            .unwrap();
+        let result = request_approval(
+            &notifier,
+            "web-1",
+            "restart nginx",
+            1,
+            &inactive_openshell(),
+        )
+        .await
+        .unwrap();
 
         assert!(!result, "should deny when timed out");
         let msgs = notifier.messages.lock().await;
@@ -341,9 +346,15 @@ mod tests {
     async fn request_approval_sends_buttons() {
         let notifier = RecordingNotifier::new();
 
-        let _ = request_approval(&notifier, "web-1", "restart nginx", 1, &inactive_openshell())
-            .await
-            .unwrap();
+        let _ = request_approval(
+            &notifier,
+            "web-1",
+            "restart nginx",
+            1,
+            &inactive_openshell(),
+        )
+        .await
+        .unwrap();
 
         let btns = notifier.buttons.lock().await;
         assert_eq!(btns.len(), 1, "should have sent one set of buttons");

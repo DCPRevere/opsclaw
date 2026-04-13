@@ -701,8 +701,6 @@ Examples:
         #[command(subcommand)]
         action: ops_cli::RunbookActions,
     },
-
-
 }
 
 #[derive(Subcommand, Debug)]
@@ -968,7 +966,6 @@ enum DoctorCommands {
     },
 }
 
-
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
@@ -1057,8 +1054,7 @@ async fn main() -> Result<()> {
 
         // Handle --reinit: backup and reset configuration
         if reinit {
-            let (opsclaw_dir, _) =
-                config::schema::resolve_runtime_dirs_for_onboarding().await?;
+            let (opsclaw_dir, _) = config::schema::resolve_runtime_dirs_for_onboarding().await?;
 
             if opsclaw_dir.exists() {
                 let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S");
@@ -1176,8 +1172,7 @@ async fn main() -> Result<()> {
             peripheral,
         } => {
             let final_temperature = temperature.unwrap_or(config.default_temperature);
-            let extra_tools = crate::tools::registry::create_opsclaw_tools(&ops_config)
-                .ok();
+            let extra_tools = crate::tools::registry::create_opsclaw_tools(&ops_config).ok();
 
             Box::pin(agent::run(
                 config,
@@ -1729,28 +1724,20 @@ async fn main() -> Result<()> {
             }
         },
 
-        Commands::Project { project_command } => {
-            match project_command {
-                ProjectCommands::Add => ops_cli::handle_project_add(&ops_config).await,
-                ProjectCommands::List => ops_cli::handle_project_list(&ops_config),
-                ProjectCommands::Remove { name } => {
-                    ops_cli::handle_project_remove(&ops_config, &name).await
-                }
-                ProjectCommands::Context { name } => {
-                    ops_cli::handle_context_print(&ops_config, &name)
-                }
-                ProjectCommands::ContextEdit { name } => {
-                    ops_cli::handle_context_edit(&ops_config, &name).await
-                }
-                ProjectCommands::Show { name } => {
-                    ops_cli::handle_project_show(&ops_config, &name)
-                }
+        Commands::Project { project_command } => match project_command {
+            ProjectCommands::Add => ops_cli::handle_project_add(&ops_config).await,
+            ProjectCommands::List => ops_cli::handle_project_list(&ops_config),
+            ProjectCommands::Remove { name } => {
+                ops_cli::handle_project_remove(&ops_config, &name).await
             }
-        }
+            ProjectCommands::Context { name } => ops_cli::handle_context_print(&ops_config, &name),
+            ProjectCommands::ContextEdit { name } => {
+                ops_cli::handle_context_edit(&ops_config, &name).await
+            }
+            ProjectCommands::Show { name } => ops_cli::handle_project_show(&ops_config, &name),
+        },
 
-        Commands::Scan { target, all } => {
-            ops_cli::handle_scan(&ops_config, target, all).await
-        }
+        Commands::Scan { target, all } => ops_cli::handle_scan(&ops_config, target, all).await,
 
         Commands::Monitor {
             target,
@@ -1761,9 +1748,7 @@ async fn main() -> Result<()> {
             ops_cli::handle_monitor(&ops_config, target, interval, once, &openshell).await
         }
 
-        Commands::Runbook { action } => {
-            ops_cli::handle_runbook(&ops_config, action).await
-        }
+        Commands::Runbook { action } => ops_cli::handle_runbook(&ops_config, action).await,
 
         Commands::Props { props_command } => match props_command {
             PropsCommands::List { filter, secrets } => {
@@ -3149,9 +3134,8 @@ mod tests {
 
     #[test]
     fn agent_command_parses_session_state_file() {
-        let cli =
-            Cli::try_parse_from(["opsclaw", "agent", "--session-state-file", "session.json"])
-                .expect("agent command with session state file should parse");
+        let cli = Cli::try_parse_from(["opsclaw", "agent", "--session-state-file", "session.json"])
+            .expect("agent command with session state file should parse");
 
         match cli.command {
             Commands::Agent {

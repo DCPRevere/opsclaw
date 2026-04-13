@@ -151,10 +151,7 @@ pub async fn fetch_recent_runs(cfg: &GithubConfig) -> Result<Vec<WorkflowRun>> {
 
 /// Fetch recent tags for the configured repository.
 pub async fn fetch_recent_tags(cfg: &GithubConfig) -> Result<Vec<RepoTag>> {
-    let url = format!(
-        "https://api.github.com/repos/{}/tags?per_page=10",
-        cfg.repo
-    );
+    let url = format!("https://api.github.com/repos/{}/tags?per_page=10", cfg.repo);
 
     let client = reqwest::Client::builder()
         .user_agent("opsclaw")

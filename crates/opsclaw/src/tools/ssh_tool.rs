@@ -234,7 +234,11 @@ impl SshClientHandler {
             format!("[{host}]:{port}")
         };
         let line = format!("{host_field} {key_type} {key_b64}\n");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = std::io::Write::write_all(&mut f, line.as_bytes());
         }
     }

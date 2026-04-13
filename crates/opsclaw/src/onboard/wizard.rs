@@ -4122,7 +4122,10 @@ fn setup_channels() -> Result<ChannelsConfig> {
                         .collect()
                 };
 
-                config.imessage = Some(IMessageConfig { enabled: true, allowed_contacts });
+                config.imessage = Some(IMessageConfig {
+                    enabled: true,
+                    allowed_contacts,
+                });
                 println!(
                     "  {} iMessage configured (contacts: {})",
                     style("✅").green().bold(),
@@ -6322,9 +6325,7 @@ mod tests {
             Some("/opt/homebrew")
         );
         assert_eq!(
-            homebrew_prefix_for_exe(Path::new(
-                "/opt/homebrew/Cellar/opsclaw/0.5.0/bin/opsclaw",
-            )),
+            homebrew_prefix_for_exe(Path::new("/opt/homebrew/Cellar/opsclaw/0.5.0/bin/opsclaw",)),
             Some("/opt/homebrew")
         );
         assert_eq!(

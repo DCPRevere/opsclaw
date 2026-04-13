@@ -10,7 +10,7 @@ use std::ops::{Deref, DerefMut};
 
 /// OpsClaw configuration — wraps the upstream zeroclawlabs `Config` with
 /// SRE-specific fields (projects, notifications, diagnosis, a2a).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OpsConfig {
     /// The upstream zeroclawlabs configuration.
     #[serde(flatten)]
@@ -33,18 +33,6 @@ pub struct OpsConfig {
     pub a2a: Option<A2aConfig>,
 }
 
-impl Default for OpsConfig {
-    fn default() -> Self {
-        Self {
-            inner: zeroclaw::Config::default(),
-            projects: None,
-            notifications: None,
-            diagnosis: DiagnosisConfig::default(),
-            a2a: None,
-        }
-    }
-}
-
 impl Deref for OpsConfig {
     type Target = zeroclaw::Config;
     fn deref(&self) -> &Self::Target {
@@ -63,7 +51,11 @@ impl OpsConfig {
     ///
     /// If the value is not encrypted (no `enc2:` prefix) it is returned as-is.
     pub fn decrypt_secret(&self, value: &str) -> Result<String> {
-        let config_dir = self.inner.config_path.parent().context("config path has no parent")?;
+        let config_dir = self
+            .inner
+            .config_path
+            .parent()
+            .context("config path has no parent")?;
         let store = zeroclaw::security::SecretStore::new(config_dir, self.inner.secrets.encrypt);
         store.decrypt(value)
     }
@@ -179,7 +171,7 @@ impl OpsConfig {
             {
                 a2a.server.token = store.encrypt(&a2a.server.token)?;
             }
-            for peer in a2a.peers.iter_mut() {
+            for peer in &mut a2a.peers {
                 if !peer.token.is_empty()
                     && !zeroclaw::security::SecretStore::is_encrypted(&peer.token)
                 {
@@ -188,8 +180,7 @@ impl OpsConfig {
             }
         }
 
-        let toml_str =
-            toml::to_string_pretty(&to_save).context("Failed to serialize OpsConfig")?;
+        let toml_str = toml::to_string_pretty(&to_save).context("Failed to serialize OpsConfig")?;
         tokio::fs::write(config_path, toml_str)
             .await
             .with_context(|| format!("Failed to write config to {}", config_path.display()))

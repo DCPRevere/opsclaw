@@ -10,12 +10,12 @@ use anyhow::{Context, Result};
 use console::style;
 use dialoguer::{Confirm, Input, Select};
 
+use crate::ops_config::OpsConfig;
+use crate::ops_config::{OpsClawAutonomy, ProjectConfig, ProjectType};
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::ssh_command_runner::{LocalCommandRunner, SshCommandRunner};
-use crate::tools::ssh_tool::RealSshExecutor;
 use crate::tools::ssh_tool::ProjectEntry;
-use crate::ops_config::{OpsClawAutonomy, ProjectConfig, ProjectType};
-use crate::ops_config::OpsConfig;
+use crate::tools::ssh_tool::RealSshExecutor;
 
 fn print_bullet(text: &str) {
     println!("  {} {}", style("›").cyan(), text);
@@ -485,7 +485,11 @@ pub fn step_data_sources() -> Result<Option<crate::ops::data_sources::DataSource
             .interact_text()?;
         config.seq = Some(SeqConfig {
             url,
-            api_key: if api_key.is_empty() { None } else { Some(api_key) },
+            api_key: if api_key.is_empty() {
+                None
+            } else {
+                Some(api_key)
+            },
         });
         any = true;
     }
@@ -504,9 +508,12 @@ pub fn step_data_sources() -> Result<Option<crate::ops::data_sources::DataSource
         any = true;
     }
 
-    if any { Ok(Some(config)) } else { Ok(None) }
+    if any {
+        Ok(Some(config))
+    } else {
+        Ok(None)
+    }
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -541,5 +548,4 @@ mod tests {
         }
         result.unwrap();
     }
-
 }

@@ -15,10 +15,8 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 
 use super::discovery::{CommandOutput, CommandRunner};
+use super::ssh_tool::{is_read_only_command, write_audit_entry, ProjectEntry, SshExecutor};
 use crate::ops_config::OpsClawAutonomy;
-use super::ssh_tool::{
-    is_read_only_command, write_audit_entry, SshExecutor, ProjectEntry,
-};
 
 // ---------------------------------------------------------------------------
 // SshCommandRunner

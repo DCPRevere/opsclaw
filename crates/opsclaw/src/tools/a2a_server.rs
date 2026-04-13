@@ -5,8 +5,8 @@
 //! - `POST /a2a` — JSON-RPC 2.0 endpoint for task lifecycle
 
 use super::a2a_types::{
-    A2aRequest, A2aResponse, A2A_TASK_NOT_FOUND, A2A_UNAUTHORIZED, AgentAuth, AgentCard,
-    AgentSkill, JSONRPC_INVALID_PARAMS, JSONRPC_METHOD_NOT_FOUND, Task, TaskStatus,
+    A2aRequest, A2aResponse, AgentAuth, AgentCard, AgentSkill, Task, TaskStatus,
+    A2A_TASK_NOT_FOUND, A2A_UNAUTHORIZED, JSONRPC_INVALID_PARAMS, JSONRPC_METHOD_NOT_FOUND,
 };
 use anyhow::{Context, Result};
 use axum::{
@@ -181,10 +181,10 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops_config::A2aAgentSkill;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
-    use crate::ops_config::A2aAgentSkill;
 
     fn test_config() -> A2aServerConfig {
         A2aServerConfig {

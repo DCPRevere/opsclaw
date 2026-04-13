@@ -4,9 +4,9 @@
 //! SSH target reachability, notification credentials, LLM provider readiness,
 //! disk space, and data-directory integrity.
 
+use crate::ops_config::{OpsConfig, ProjectType};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use crate::ops_config::{OpsConfig, ProjectType};
 
 use super::data_sources::DataSourcesConfig;
 
@@ -562,23 +562,16 @@ async fn check_data_sources(config: &OpsConfig, results: &mut Vec<CheckResult>) 
     };
 
     for target in targets {
-        let ds_config: DataSourcesConfig = target
-            .data_sources
-            .clone()
-            .unwrap_or_default();
+        let ds_config: DataSourcesConfig = target.data_sources.clone().unwrap_or_default();
 
         if let Some(ref seq) = ds_config.seq {
             let mut url = format!("{}/api/events?count=1", seq.url.trim_end_matches('/'));
             if let Some(ref key) = seq.api_key {
                 if !key.is_empty() {
-                    let _ = std::fmt::Write::write_fmt(
-                        &mut url,
-                        format_args!("&apiKey={key}"),
-                    );
+                    let _ = std::fmt::Write::write_fmt(&mut url, format_args!("&apiKey={key}"));
                 }
             }
-            check_http_endpoint(&client, cat, "Seq", &seq.url, &url, &target.name, results)
-                .await;
+            check_http_endpoint(&client, cat, "Seq", &seq.url, &url, &target.name, results).await;
         }
 
         if let Some(ref jaeger) = ds_config.jaeger {
@@ -596,10 +589,7 @@ async fn check_data_sources(config: &OpsConfig, results: &mut Vec<CheckResult>) 
         }
 
         if let Some(ref prom) = ds_config.prometheus {
-            let url = format!(
-                "{}/api/v1/query?query=up",
-                prom.url.trim_end_matches('/')
-            );
+            let url = format!("{}/api/v1/query?query=up", prom.url.trim_end_matches('/'));
             check_http_endpoint(
                 &client,
                 cat,
@@ -763,8 +753,8 @@ mod tests {
 
     #[tokio::test]
     async fn check_data_sources_reports_unreachable() {
-use crate::ops_config::{OpsClawAutonomy, ProjectConfig};
-use crate::ops_config::OpsConfig;
+        use crate::ops_config::OpsConfig;
+        use crate::ops_config::{OpsClawAutonomy, ProjectConfig};
 
         let ds = crate::ops::data_sources::DataSourcesConfig {
             seq: Some(crate::ops::data_sources::SeqConfig {

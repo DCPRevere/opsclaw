@@ -6,8 +6,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::tools::discovery::TargetSnapshot;
 use crate::ops_config::ProjectConfig;
+use crate::tools::discovery::TargetSnapshot;
 
 /// Collected data for a single project's status display.
 #[derive(Debug, Serialize)]

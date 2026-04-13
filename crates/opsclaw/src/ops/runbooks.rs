@@ -360,8 +360,7 @@ pub async fn execute_runbook(
                                         execute_step(runner, &resolved, step).await
                                     {
                                         if retry_result.success {
-                                            let Some(last) =
-                                                execution.steps_completed.last_mut()
+                                            let Some(last) = execution.steps_completed.last_mut()
                                             else {
                                                 break;
                                             };
@@ -371,7 +370,10 @@ pub async fn execute_runbook(
                                                 command: Some(resolved),
                                                 output: retry_result.output,
                                                 success: true,
-                                                duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                                                duration_ms: u64::try_from(
+                                                    start.elapsed().as_millis(),
+                                                )
+                                                .unwrap_or(u64::MAX),
                                             };
                                             retried = true;
                                             break;

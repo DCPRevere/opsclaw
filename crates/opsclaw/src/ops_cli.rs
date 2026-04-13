@@ -34,13 +34,13 @@ pub enum RunbookActions {
 
 // Re-import from the same crate tree the binary uses — discovery/monitoring
 // types are fine because they don't reference Config.
-use crate::ops::runbooks::{self, RunbookStore};
 use crate::ops::probes;
+use crate::ops::runbooks::{self, RunbookStore};
+use crate::ops_config::{OpsClawAutonomy, OpsConfig};
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::kube_tool::KubeClient;
 use crate::tools::ssh_command_runner::{DryRunCommandRunner, LocalCommandRunner, SshCommandRunner};
-use crate::tools::ssh_tool::{RealSshExecutor, ProjectEntry};
-use crate::ops_config::{OpsClawAutonomy, OpsConfig};
+use crate::tools::ssh_tool::{ProjectEntry, RealSshExecutor};
 
 // ---------------------------------------------------------------------------
 // Runner factory
@@ -52,7 +52,10 @@ use crate::ops_config::{OpsClawAutonomy, OpsConfig};
 /// write commands are logged instead of executed.
 fn make_runner(config: &OpsConfig, project: &ProjectConfig) -> Result<Box<dyn CommandRunner>> {
     let runner: Box<dyn CommandRunner> = match project.project_type {
-        ProjectType::Local => Box::new(LocalCommandRunner::new(project.autonomy, project.name.clone())),
+        ProjectType::Local => Box::new(LocalCommandRunner::new(
+            project.autonomy,
+            project.name.clone(),
+        )),
         ProjectType::Kubernetes => {
             bail!("Kubernetes projects use the kube API client, not a command runner");
         }
@@ -65,7 +68,8 @@ fn make_runner(config: &OpsConfig, project: &ProjectConfig) -> Result<Box<dyn Co
                 .key_secret
                 .as_deref()
                 .context("SSH project requires key_secret (encrypted PEM in config)")?;
-            let key_pem = config.decrypt_secret(raw_key)
+            let key_pem = config
+                .decrypt_secret(raw_key)
                 .context("Failed to decrypt SSH private key")?;
 
             let entry = ProjectEntry {
@@ -88,8 +92,7 @@ fn make_runner(config: &OpsConfig, project: &ProjectConfig) -> Result<Box<dyn Co
             Ok(Box::new(DryRunCommandRunner::new(runner, dry_run_log)))
         }
         // Approve / Auto: pass through (approval gate is at a higher level).
-        OpsClawAutonomy::Approve
-        | OpsClawAutonomy::Auto => Ok(runner),
+        OpsClawAutonomy::Approve | OpsClawAutonomy::Auto => Ok(runner),
     }
 }
 
@@ -218,7 +221,10 @@ pub fn handle_context_print(config: &OpsConfig, target: &str) -> Result<()> {
     let abs_path = PathBuf::from(expand_tilde(&tilde_path));
 
     if !abs_path.exists() {
-        println!("No context file for '{}'. Run `project context edit {}` to create one.", target, target);
+        println!(
+            "No context file for '{}'. Run `project context edit {}` to create one.",
+            target, target
+        );
         return Ok(());
     }
 
@@ -348,7 +354,10 @@ pub async fn handle_monitor(
             .await
             {
                 Ok(response) => {
-                    println!("[{ts}] {name}: {}", response.lines().next().unwrap_or(&response));
+                    println!(
+                        "[{ts}] {name}: {}",
+                        response.lines().next().unwrap_or(&response)
+                    );
                     if response.to_lowercase().contains("concern")
                         || response.to_lowercase().contains("critical")
                         || response.to_lowercase().contains("warning")
@@ -476,10 +485,7 @@ pub async fn handle_runbook(config: &OpsConfig, action: RunbookActions) -> Resul
                 println!("No runbooks found. Run `opsclaw runbook init` to install defaults.");
                 return Ok(());
             }
-            println!(
-                "{:<22} {:<25} {:<6} DESCRIPTION",
-                "ID", "NAME", "RUNS"
-            );
+            println!("{:<22} {:<25} {:<6} DESCRIPTION", "ID", "NAME", "RUNS");
             println!("{}", "-".repeat(80));
             for rb in &runbooks {
                 println!(
@@ -625,7 +631,10 @@ pub async fn handle_infra_setup_user(config: &OpsConfig, target_name: &str) -> R
         .with_context(|| format!("Project '{target_name}' not found in config"))?;
 
     if target.project_type != ProjectType::Ssh {
-        bail!("infra setup-user only works on SSH projects (project '{target_name}' is {:?})", target.project_type);
+        bail!(
+            "infra setup-user only works on SSH projects (project '{target_name}' is {:?})",
+            target.project_type
+        );
     }
 
     // Build a runner that bypasses dry-run (this is an explicit admin action).
@@ -663,10 +672,14 @@ pub async fn handle_infra_setup_user(config: &OpsConfig, target_name: &str) -> R
         println!("  Generating ed25519 keypair…");
         let status = std::process::Command::new("ssh-keygen")
             .args([
-                "-t", "ed25519",
-                "-f", &private_key_path.to_string_lossy(),
-                "-N", "",
-                "-C", &format!("opsclaw@{target_name}"),
+                "-t",
+                "ed25519",
+                "-f",
+                &private_key_path.to_string_lossy(),
+                "-N",
+                "",
+                "-C",
+                &format!("opsclaw@{target_name}"),
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -715,9 +728,7 @@ pub async fn handle_infra_setup_user(config: &OpsConfig, target_name: &str) -> R
     println!("  [[projects]]");
     println!("  name = \"{target_name}\"");
     println!("  user = \"opsclaw\"");
-    println!(
-        "  key_file = \"~/.opsclaw/keys/{key_stem}\""
-    );
+    println!("  key_file = \"~/.opsclaw/keys/{key_stem}\"");
 
     Ok(())
 }
@@ -726,7 +737,10 @@ pub async fn handle_infra_setup_user(config: &OpsConfig, target_name: &str) -> R
 ///
 /// Uses `Auto` autonomy so that write commands are not blocked — this is an
 /// explicit administrator action, not an autonomous agent decision.
-fn make_runner_for_setup(config: &OpsConfig, target: &ProjectConfig) -> Result<Box<dyn CommandRunner>> {
+fn make_runner_for_setup(
+    config: &OpsConfig,
+    target: &ProjectConfig,
+) -> Result<Box<dyn CommandRunner>> {
     let host = target.host.clone().unwrap_or_default();
     let user = target.user.clone().unwrap_or_default();
     let port = target.port.unwrap_or(22);
@@ -735,7 +749,8 @@ fn make_runner_for_setup(config: &OpsConfig, target: &ProjectConfig) -> Result<B
         .key_secret
         .as_deref()
         .context("SSH project requires key_secret (encrypted PEM in config)")?;
-    let key_pem = config.decrypt_secret(raw_key)
+    let key_pem = config
+        .decrypt_secret(raw_key)
         .context("Failed to decrypt SSH private key")?;
 
     let entry = ProjectEntry {
@@ -785,11 +800,11 @@ async fn shutdown_signal() {
 pub async fn handle_project_add(_config: &OpsConfig) -> Result<()> {
     use crate::ops::setup::{
         load_existing_config, opsclaw_config_path, step_autonomy, step_data_sources,
-        step_discovery_scan, step_kubernetes_project, step_local_project, step_ssh_project,
-        step_project_context, step_project_type,
+        step_discovery_scan, step_kubernetes_project, step_local_project, step_project_context,
+        step_project_type, step_ssh_project,
     };
-    use console::style;
     use crate::ops_config::ProjectType;
+    use console::style;
 
     println!();
     println!("  {}", style("Add Project").cyan().bold());
@@ -890,7 +905,11 @@ pub fn handle_project_show(config: &OpsConfig, name: &str) -> Result<()> {
     println!(
         "  {} ssh key: {}",
         style("›").cyan(),
-        if project.key_secret.is_some() { "configured" } else { "none" }
+        if project.key_secret.is_some() {
+            "configured"
+        } else {
+            "none"
+        }
     );
 
     if let Some(ctx) = &project.context_file {

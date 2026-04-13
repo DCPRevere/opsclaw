@@ -5,9 +5,9 @@
 
 use anyhow::Result;
 
+use crate::ops_config::{ProbeConfig, ProbeType};
 use crate::tools::discovery::{CommandRunner, TargetSnapshot};
 use crate::tools::monitoring::{Alert, AlertCategory, AlertSeverity};
-use crate::ops_config::{ProbeConfig, ProbeType};
 
 // ---------------------------------------------------------------------------
 // Probe result

@@ -380,8 +380,11 @@ pub fn derive_configurable(input: TokenStream) -> TokenStream {
         let is_option = is_option_type(&field.ty);
         let inner_ty = extract_option_inner(&field.ty).unwrap_or(&field.ty);
 
-        // Skip compound types (Vec, HashMap, PathBuf)
-        if is_compound_type(inner_ty) {
+        // Skip compound types (Vec, HashMap, PathBuf), but expose Vec<String> as StringArray.
+        let is_vec_string = extract_vec_inner(inner_ty)
+            .map(|t| t.to_token_stream().to_string() == "String")
+            .unwrap_or(false);
+        if is_compound_type(inner_ty) && !is_vec_string {
             continue;
         }
 
@@ -403,15 +406,24 @@ pub fn derive_configurable(input: TokenStream) -> TokenStream {
         // config enums in schema.rs via impl_enum_prop_kind!.
         let kind_token = quote! { <#inner_ty as crate::config::HasPropKind>::PROP_KIND };
         let enum_variants_expr = quote! {
-            if <#inner_ty as crate::config::HasPropKind>::PROP_KIND == crate::config::PropKind::Enum {
-                Some(|| {
-                    crate::config::enum_variants::<#inner_ty>()
-                        .split(", ")
-                        .map(|s| s.to_string())
-                        .collect()
-                })
-            } else {
-                None
+            {
+                #[cfg(feature = "schema-export")]
+                {
+                    if <#inner_ty as crate::config::HasPropKind>::PROP_KIND == crate::config::PropKind::Enum {
+                        Some(|| {
+                            crate::config::enum_variants::<#inner_ty>()
+                                .split(", ")
+                                .map(|s| s.to_string())
+                                .collect()
+                        })
+                    } else {
+                        None
+                    }
+                }
+                #[cfg(not(feature = "schema-export"))]
+                {
+                    None::<fn() -> Vec<String>>
+                }
             }
         };
 

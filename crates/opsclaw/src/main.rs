@@ -1171,7 +1171,13 @@ async fn main() -> Result<()> {
             temperature,
             peripheral,
         } => {
-            let final_temperature = temperature.unwrap_or(config.default_temperature);
+            let final_temperature = temperature.unwrap_or_else(|| {
+                config
+                    .providers
+                    .fallback_provider()
+                    .and_then(|p| p.temperature)
+                    .unwrap_or(0.7)
+            });
             let extra_tools = crate::tools::registry::create_opsclaw_tools(&ops_config).ok();
 
             Box::pin(agent::run(
@@ -1309,7 +1315,36 @@ async fn main() -> Result<()> {
             } else {
                 info!("🧠 Starting OpsClaw Daemon on {host}:{port}");
             }
-            Box::pin(daemon::run(config, host, port)).await
+            let subsystems = daemon::DaemonSubsystems {
+                gateway_start: Some(Box::new(|host, port, config, tx| {
+                    Box::pin(async move {
+                        Box::pin(zeroclaw_gateway::run_gateway(&host, port, config, tx)).await
+                    })
+                })),
+                channels_start: Some(Box::new(|config| {
+                    Box::pin(async move {
+                        Box::pin(zeroclaw_channels::orchestrator::start_channels(config)).await
+                    })
+                })),
+                mqtt_start: Some(Box::new(|mqtt_config| {
+                    Box::pin(async move {
+                        use std::sync::{Arc, Mutex};
+                        use zeroclaw_config::schema::SopConfig;
+                        use zeroclaw_memory::NoneMemory;
+                        use zeroclaw_runtime::sop::{SopAuditLogger, SopEngine};
+
+                        let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
+                        let audit = Arc::new(SopAuditLogger::new(Arc::new(NoneMemory)));
+                        zeroclaw_channels::orchestrator::mqtt::run_mqtt_sop_listener(
+                            &mqtt_config,
+                            engine,
+                            audit,
+                        )
+                        .await
+                    })
+                })),
+            };
+            Box::pin(daemon::run(config, host, port, subsystems)).await
         }
 
         Commands::Status { format } => {
@@ -1344,11 +1379,15 @@ async fn main() -> Result<()> {
             println!();
             println!(
                 "🤖 Provider:      {}",
-                config.default_provider.as_deref().unwrap_or("openrouter")
+                config.providers.fallback.as_deref().unwrap_or("openrouter")
             );
             println!(
                 "   Model:         {}",
-                config.default_model.as_deref().unwrap_or("(default)")
+                config
+                    .providers
+                    .fallback_provider()
+                    .and_then(|p| p.model.as_deref())
+                    .unwrap_or("(default)")
             );
             println!("📊 Observability:  {}", config.observability.backend);
             println!(
@@ -1408,7 +1447,7 @@ async fn main() -> Result<()> {
             println!();
             println!("Channels:");
             println!("  CLI:      ✅ always");
-            for (channel, configured) in config.channels_config.channels() {
+            for (channel, configured) in config.channels.channels() {
                 println!(
                     "  {:9} {}",
                     channel.name(),
@@ -1470,7 +1509,8 @@ async fn main() -> Result<()> {
         Commands::Providers => {
             let providers = providers::list_providers();
             let current = config
-                .default_provider
+                .providers
+                .fallback
                 .as_deref()
                 .unwrap_or("openrouter")
                 .trim()
@@ -1725,10 +1765,10 @@ async fn main() -> Result<()> {
         },
 
         Commands::Project { project_command } => match project_command {
-            ProjectCommands::Add => ops_cli::handle_project_add(&ops_config).await,
+            ProjectCommands::Add => Box::pin(ops_cli::handle_project_add(&ops_config)).await,
             ProjectCommands::List => ops_cli::handle_project_list(&ops_config),
             ProjectCommands::Remove { name } => {
-                ops_cli::handle_project_remove(&ops_config, &name).await
+                Box::pin(ops_cli::handle_project_remove(&ops_config, &name)).await
             }
             ProjectCommands::Context { name } => ops_cli::handle_context_print(&ops_config, &name),
             ProjectCommands::ContextEdit { name } => {
@@ -3148,27 +3188,43 @@ mod tests {
     }
 
     #[test]
-    fn agent_fallback_uses_config_default_temperature() {
-        // Test that when user doesn't provide --temperature,
-        // the fallback logic works correctly
-        let mut config = Config::default(); // default_temperature = 0.7
-        config.default_temperature = 1.5;
+    fn agent_fallback_uses_fallback_provider_temperature() {
+        use zeroclaw::config::schema::ModelProviderConfig;
 
-        // Simulate None temperature (user didn't provide --temperature)
+        let mut config = Config::default();
+        config.providers.fallback = Some("test".to_string());
+        config.providers.models.insert(
+            "test".to_string(),
+            ModelProviderConfig {
+                temperature: Some(1.5),
+                ..Default::default()
+            },
+        );
+
         let user_temperature: Option<f64> = std::hint::black_box(None);
-        let final_temperature = user_temperature.unwrap_or(config.default_temperature);
+        let final_temperature = user_temperature.unwrap_or_else(|| {
+            config
+                .providers
+                .fallback_provider()
+                .and_then(|p| p.temperature)
+                .unwrap_or(0.7)
+        });
 
         assert!((final_temperature - 1.5).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn agent_fallback_uses_hardcoded_when_config_uses_default() {
-        // Test that when config uses default value (0.7), fallback still works
-        let config = Config::default(); // default_temperature = 0.7
+    fn agent_fallback_uses_hardcoded_when_no_provider_temperature() {
+        let config = Config::default();
 
-        // Simulate None temperature (user didn't provide --temperature)
         let user_temperature: Option<f64> = std::hint::black_box(None);
-        let final_temperature = user_temperature.unwrap_or(config.default_temperature);
+        let final_temperature = user_temperature.unwrap_or_else(|| {
+            config
+                .providers
+                .fallback_provider()
+                .and_then(|p| p.temperature)
+                .unwrap_or(0.7)
+        });
 
         assert!((final_temperature - 0.7).abs() < f64::EPSILON);
     }

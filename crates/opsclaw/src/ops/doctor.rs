@@ -160,33 +160,29 @@ fn check_config(config: &OpsConfig, results: &mut Vec<CheckResult>) {
         ));
     }
 
-    if config.default_provider.is_some() {
+    let fallback = config.providers.fallback.as_deref();
+    if let Some(provider_name) = fallback {
         results.push(CheckResult::ok(
             cat,
-            format!(
-                "default provider: {}",
-                config.default_provider.as_deref().unwrap_or("?")
-            ),
+            format!("default provider: {provider_name}"),
         ));
     } else {
-        results.push(CheckResult::error(cat, "no default_provider configured"));
+        results.push(CheckResult::error(cat, "no providers.fallback configured"));
     }
 
-    if config.default_model.is_some() {
-        results.push(CheckResult::ok(
-            cat,
-            format!(
-                "default model: {}",
-                config.default_model.as_deref().unwrap_or("?")
-            ),
-        ));
+    let fallback_provider = config.providers.fallback_provider();
+    if let Some(model) = fallback_provider.and_then(|p| p.model.as_deref()) {
+        results.push(CheckResult::ok(cat, format!("default model: {model}")));
     } else {
-        results.push(CheckResult::warn(cat, "no default_model configured"));
+        results.push(CheckResult::warn(cat, "no default model configured"));
     }
 
-    if config.api_key.is_some() {
+    if fallback_provider
+        .and_then(|p| p.api_key.as_deref())
+        .is_some()
+    {
         results.push(CheckResult::ok(cat, "API key configured"));
-    } else if config.default_provider.as_deref() != Some("ollama") {
+    } else if fallback != Some("ollama") {
         results.push(CheckResult::warn(
             cat,
             "no api_key set (may rely on env vars)",
@@ -392,7 +388,11 @@ fn check_llm_provider(config: &OpsConfig, results: &mut Vec<CheckResult>) {
     let diag = &config.diagnosis;
     let has_diag_key = diag.api_key.is_some()
         || std::env::var("ANTHROPIC_API_KEY").is_ok()
-        || config.api_key.is_some();
+        || config
+            .providers
+            .fallback_provider()
+            .and_then(|p| p.api_key.as_deref())
+            .is_some();
 
     if has_diag_key {
         results.push(CheckResult::ok(
@@ -412,10 +412,15 @@ fn check_llm_provider(config: &OpsConfig, results: &mut Vec<CheckResult>) {
         .or_else(|| std::env::var("OPSCLAW_DIAGNOSIS_MODEL").ok());
     if let Some(ref model) = diag_model {
         results.push(CheckResult::ok(cat, format!("diagnosis model: {model}")));
-    } else if config.default_model.is_some() {
+    } else if config
+        .providers
+        .fallback_provider()
+        .and_then(|p| p.model.as_deref())
+        .is_some()
+    {
         results.push(CheckResult::ok(
             cat,
-            "no explicit diagnosis model — will use default_model",
+            "no explicit diagnosis model — will use fallback provider's default model",
         ));
     } else {
         results.push(CheckResult::warn(cat, "no diagnosis model configured"));
@@ -711,12 +716,12 @@ mod tests {
     #[test]
     fn check_config_reports_missing_provider() {
         let mut config = OpsConfig::default();
-        config.inner.default_provider = None;
+        config.inner.providers.fallback = None;
         let mut results = Vec::new();
         check_config(&config, &mut results);
         let provider_item = results
             .iter()
-            .find(|r| r.message.contains("default_provider"));
+            .find(|r| r.message.contains("providers.fallback"));
         assert!(provider_item.is_some());
         assert_eq!(provider_item.unwrap().severity, Severity::Error);
     }

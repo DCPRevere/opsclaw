@@ -11,7 +11,13 @@ name = "opsclaw"
 path = "src/main.rs"
 
 [dependencies]
-zeroclawlabs = { path = "../zeroclawlabs" }
+zeroclawlabs = { path = "../.." }
+zeroclaw-runtime = { path = "../zeroclaw-runtime" }
+zeroclaw-api = { path = "../zeroclaw-api" }
+zeroclaw-gateway = { path = "../zeroclaw-gateway" }
+zeroclaw-channels = { path = "../zeroclaw-channels" }
+zeroclaw-config = { path = "../zeroclaw-config" }
+zeroclaw-memory = { path = "../zeroclaw-memory" }
 
 # Deps used directly by opsclaw modules
 anyhow = "1.0"

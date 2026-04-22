@@ -1,27 +1,55 @@
-pub mod wizard;
+use anyhow::Result;
+use zeroclaw::Config;
+use zeroclaw_runtime::onboard::wizard::{self as rt_wizard, WizardCallbacks};
 
-// Re-exported for CLI and external use
-#[allow(unused_imports)]
-pub use wizard::{
-    run_channels_repair_wizard, run_models_list, run_models_refresh, run_models_refresh_all,
-    run_models_set, run_models_status, run_quick_setup, run_wizard,
-};
+pub async fn run_wizard(force: bool) -> Result<Config> {
+    Box::pin(rt_wizard::run_wizard(force, WizardCallbacks::default())).await
+}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub async fn run_channels_repair_wizard() -> Result<Config> {
+    Box::pin(rt_wizard::run_channels_repair_wizard(
+        WizardCallbacks::default(),
+    ))
+    .await
+}
 
-    fn assert_reexport_exists<F>(_value: F) {}
+pub async fn run_quick_setup(
+    credential_override: Option<&str>,
+    provider: Option<&str>,
+    model_override: Option<&str>,
+    memory_backend: Option<&str>,
+    force: bool,
+) -> Result<Config> {
+    Box::pin(rt_wizard::run_quick_setup(
+        credential_override,
+        provider,
+        model_override,
+        memory_backend,
+        force,
+    ))
+    .await
+}
 
-    #[test]
-    fn wizard_functions_are_reexported() {
-        assert_reexport_exists(run_channels_repair_wizard);
-        assert_reexport_exists(run_quick_setup);
-        assert_reexport_exists(run_wizard);
-        assert_reexport_exists(run_models_refresh);
-        assert_reexport_exists(run_models_list);
-        assert_reexport_exists(run_models_set);
-        assert_reexport_exists(run_models_status);
-        assert_reexport_exists(run_models_refresh_all);
-    }
+pub async fn run_models_refresh(
+    config: &Config,
+    provider_override: Option<&str>,
+    force: bool,
+) -> Result<()> {
+    rt_wizard::run_models_refresh(config, provider_override, force).await
+}
+
+pub async fn run_models_list(config: &Config, provider_override: Option<&str>) -> Result<()> {
+    rt_wizard::run_models_list(config, provider_override).await
+}
+
+pub async fn run_models_set(config: &Config, model: &str) -> Result<()> {
+    Box::pin(rt_wizard::run_models_set(config, model)).await
+}
+
+pub async fn run_models_status(config: &Config) -> Result<()> {
+    rt_wizard::run_models_status(config).await
+}
+
+pub async fn run_models_refresh_all(config: &Config, force: bool) -> Result<()> {
+    rt_wizard::run_models_refresh_all(config, force).await
 }

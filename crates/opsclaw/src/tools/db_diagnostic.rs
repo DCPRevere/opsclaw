@@ -6,6 +6,7 @@
 use std::fmt::Write;
 
 use anyhow::Result;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::tools::discovery::CommandRunner;
@@ -15,7 +16,7 @@ use crate::tools::discovery::CommandRunner;
 // ---------------------------------------------------------------------------
 
 /// Type of database to diagnose.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseType {
     Postgres,
@@ -23,7 +24,7 @@ pub enum DatabaseType {
 }
 
 /// Per-database configuration entry (lives under `[[targets.databases]]`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DatabaseConfig {
     /// Human-readable name for this database instance.
     pub name: String,

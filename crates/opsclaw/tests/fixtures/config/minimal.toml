@@ -1,0 +1,5 @@
+workspace_dir = "/tmp/opsclaw-test"
+
+[[targets]]
+name = "local-box"
+type = "local"

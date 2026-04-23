@@ -567,3 +567,115 @@ pub struct A2aPeerConfig {
     #[serde(default)]
     pub token: String,
 }
+
+#[cfg(test)]
+mod golden_tests {
+    //! Golden-file tests for `OpsConfig` TOML parsing.
+    //!
+    //! Lock in the on-disk schema shape. A parse failure against any fixture
+    //! means the schema changed — either update the fixture or fix the
+    //! regression.
+
+    use super::*;
+
+    fn load(name: &str) -> OpsConfig {
+        let path = format!(
+            "{}/tests/fixtures/config/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        );
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read fixture {path}: {e}"));
+        toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"))
+    }
+
+    #[test]
+    fn minimal_parses() {
+        let cfg = load("minimal.toml");
+        let targets = cfg.targets.as_ref().expect("targets present");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "local-box");
+        assert!(matches!(targets[0].connection_type, ConnectionType::Local));
+        assert!(matches!(targets[0].autonomy, OpsClawAutonomy::Approve));
+    }
+
+    #[test]
+    fn full_parses_all_sections() {
+        let cfg = load("full.toml");
+
+        let targets = cfg.targets.as_ref().expect("targets present");
+        assert_eq!(targets.len(), 2);
+
+        let web = &targets[0];
+        assert_eq!(web.name, "prod-web-1");
+        assert!(matches!(web.connection_type, ConnectionType::Ssh));
+        assert_eq!(web.host.as_deref(), Some("10.0.0.1"));
+        assert!(matches!(web.autonomy, OpsClawAutonomy::Approve));
+
+        let probes = web.probes.as_ref().expect("probes present");
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].name, "healthcheck");
+        assert!(matches!(probes[0].probe_type, ProbeType::Http { .. }));
+
+        let databases = web.databases.as_ref().expect("databases present");
+        assert_eq!(databases.len(), 1);
+        assert_eq!(databases[0].name, "primary");
+
+        let esc = web.escalation.as_ref().expect("escalation present");
+        assert_eq!(esc.primary.as_deref(), Some("oncall-primary"));
+        assert_eq!(esc.secondary_after_minutes, Some(10));
+        assert_eq!(esc.manager_after_minutes, Some(30));
+
+        let k8s = &targets[1];
+        assert_eq!(k8s.name, "k8s-cluster");
+        assert!(matches!(k8s.connection_type, ConnectionType::Kubernetes));
+        assert_eq!(k8s.kubeconfig.as_deref(), Some("~/.kube/prod-eks"));
+        assert_eq!(k8s.namespace.as_deref(), Some("default"));
+
+        let notif = cfg.notifications.as_ref().expect("notifications present");
+        assert!(matches!(notif.min_severity, AlertSeverity::Warning));
+    }
+
+    #[test]
+    fn legacy_autonomy_aliases_rejected() {
+        let toml_with_legacy = r#"
+workspace_dir = "/tmp/x"
+
+[[targets]]
+name = "legacy"
+type = "local"
+autonomy = "observe"
+"#;
+        let result: Result<OpsConfig, _> = toml::from_str(toml_with_legacy);
+        assert!(
+            result.is_err(),
+            "legacy autonomy alias 'observe' must not deserialise"
+        );
+    }
+
+    #[test]
+    fn severity_is_typed_not_string() {
+        let good = r#"
+workspace_dir = "/tmp/x"
+[notifications]
+min_severity = "critical"
+"#;
+        let cfg: OpsConfig = toml::from_str(good).expect("critical parses");
+        assert!(matches!(
+            cfg.notifications.unwrap().min_severity,
+            AlertSeverity::Critical
+        ));
+
+        let bad = r#"
+workspace_dir = "/tmp/x"
+[notifications]
+min_severity = "bogus"
+"#;
+        let result: Result<OpsConfig, _> = toml::from_str(bad);
+        assert!(
+            result.is_err(),
+            "invalid severity string must fail to deserialise"
+        );
+    }
+}

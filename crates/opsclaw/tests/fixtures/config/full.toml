@@ -1,0 +1,45 @@
+workspace_dir = "/tmp/opsclaw-test"
+
+[[targets]]
+name = "prod-web-1"
+type = "ssh"
+host = "10.0.0.1"
+port = 22
+user = "opsclaw"
+autonomy = "approve"
+context_file = "~/.opsclaw/context/prod-web-1.md"
+
+[[targets.probes]]
+name = "healthcheck"
+type = "http"
+url = "https://example.com/health"
+expected_status = 200
+timeout_secs = 5
+
+[[targets.databases]]
+name = "primary"
+type = "postgres"
+host = "10.0.0.10"
+port = 5432
+
+[targets.escalation]
+primary = "oncall-primary"
+secondary = "oncall-secondary"
+manager = "sre-manager"
+secondary_after_minutes = 10
+manager_after_minutes = 30
+
+[[targets]]
+name = "k8s-cluster"
+type = "kubernetes"
+kubeconfig = "~/.kube/prod-eks"
+namespace = "default"
+autonomy = "approve"
+
+[notifications]
+telegram_bot_token = "bot-token"
+telegram_chat_id = "-100"
+min_severity = "warning"
+
+[diagnosis]
+model = "anthropic/claude-sonnet-4"

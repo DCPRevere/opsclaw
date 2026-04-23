@@ -31,6 +31,65 @@ pub struct OpsConfig {
     /// A2A (Agent-to-Agent) protocol configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2a: Option<A2aConfig>,
+
+    /// Prometheus query endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prometheus: Option<Vec<PrometheusEndpointConfig>>,
+
+    /// Loki log-query endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loki: Option<Vec<LokiEndpointConfig>>,
+
+    /// Elasticsearch / OpenSearch endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elk: Option<Vec<ElkEndpointConfig>>,
+
+    /// PagerDuty configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pagerduty: Option<PagerDutyConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PrometheusEndpointConfig {
+    pub name: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LokiEndpointConfig {
+    pub name: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ElkEndpointConfig {
+    pub name: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_index: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PagerDutyConfig {
+    pub api_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_service_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_from: Option<String>,
+    #[serde(default)]
+    pub autonomy: OpsClawAutonomy,
 }
 
 impl Deref for OpsConfig {

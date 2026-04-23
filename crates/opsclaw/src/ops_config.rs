@@ -32,39 +32,51 @@ pub struct OpsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2a: Option<A2aConfig>,
 
-    /// Prometheus query endpoints.
+    // ----------------------------------------------------------------
+    // Shared endpoint pools.
+    //
+    // These are Environment-scoped at the model level (see ADR-005 and
+    // docs/environments.md), but live at the root today because the
+    // implicit Environment IS the root. Phase 5 of the hierarchy
+    // migration moves them under `[[projects.environments.endpoints]]`.
+    //
+    // When adding a new shared endpoint pool, put it here rather than on
+    // TargetConfig — it reduces migration churn and matches the final
+    // resting place.
+    // ----------------------------------------------------------------
+    /// Prometheus query endpoints. Environment-scoped after Phase 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prometheus: Option<Vec<PrometheusEndpointConfig>>,
 
-    /// Loki log-query endpoints.
+    /// Loki log-query endpoints. Environment-scoped after Phase 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loki: Option<Vec<LokiEndpointConfig>>,
 
-    /// Elasticsearch / OpenSearch endpoints.
+    /// Elasticsearch / OpenSearch endpoints. Environment-scoped after Phase 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elk: Option<Vec<ElkEndpointConfig>>,
 
-    /// PagerDuty configuration.
+    /// PagerDuty configuration. Environment-scoped after Phase 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pagerduty: Option<PagerDutyConfig>,
 
-    /// GitHub configuration.
+    /// GitHub configuration. Environment-scoped after Phase 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github: Option<GithubConfig>,
 
-    /// Cloudflare configuration.
+    /// Cloudflare configuration. Environment-scoped after Phase 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloudflare: Option<CloudflareConfig>,
 
-    /// RabbitMQ management API.
+    /// RabbitMQ management API. Environment-scoped after Phase 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rabbitmq: Option<RabbitMqConfig>,
 
-    /// Azure Service Bus.
+    /// Azure Service Bus. Environment-scoped after Phase 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure_service_bus: Option<AzureServiceBusConfig>,
 
-    /// Jaeger query endpoints.
+    /// Jaeger query endpoints. Environment-scoped after Phase 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jaeger: Option<Vec<JaegerEndpointConfig>>,
 }

@@ -1,4 +1,4 @@
-//! OpsClaw CLI command handlers: scan, probe, runbook, and friends.
+//! OpsClaw CLI command handlers: scan, probe, and friends.
 //!
 //! The autonomous monitoring loop lives in the upstream zeroclaw daemon
 //! (heartbeat subsystem). OpsClaw hooks in via the peripheral-tools
@@ -8,38 +8,14 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use clap::Subcommand;
 use tokio::signal;
 use tracing::info;
 
 use crate::ops_config::{TargetConfig, ConnectionType};
 
-/// Runbook subcommands
-#[derive(Subcommand, Debug)]
-pub enum RunbookActions {
-    /// List all runbooks
-    List,
-    /// Show runbook details and steps
-    Show {
-        /// Runbook ID
-        id: String,
-    },
-    /// Install default runbooks
-    Init,
-    /// Manually execute a runbook against a target
-    Run {
-        /// Runbook ID
-        id: String,
-        /// Project name (from config [[projects]])
-        #[arg(long)]
-        target: String,
-    },
-}
-
 // Re-import from the same crate tree the binary uses — discovery/monitoring
 // types are fine because they don't reference Config.
 use crate::ops::probes;
-use crate::ops::runbooks::{self, RunbookStore};
 use crate::ops_config::{OpsClawAutonomy, OpsConfig};
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::kube_tool::KubeClient;
@@ -377,102 +353,6 @@ fn print_probe_result(r: &probes::ProbeResult) {
     }
 }
 
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        let end = s.char_indices().nth(max).map_or(s.len(), |(i, _)| i);
-        &s[..end]
-    }
-}
-
-// ---------------------------------------------------------------------------
-// runbook command
-// ---------------------------------------------------------------------------
-
-pub async fn handle_runbook(config: &OpsConfig, action: RunbookActions) -> Result<()> {
-    let store = RunbookStore::new(RunbookStore::default_dir()?);
-
-    match action {
-        RunbookActions::List => {
-            let runbooks = store.load_all()?;
-            if runbooks.is_empty() {
-                println!("No runbooks found. Run `opsclaw runbook init` to install defaults.");
-                return Ok(());
-            }
-            println!("{:<22} {:<25} {:<6} DESCRIPTION", "ID", "NAME", "RUNS");
-            println!("{}", "-".repeat(80));
-            for rb in &runbooks {
-                println!(
-                    "{:<22} {:<25} {:<6} {}",
-                    rb.id,
-                    truncate(&rb.name, 24),
-                    rb.execution_count,
-                    truncate(&rb.description, 40)
-                );
-            }
-        }
-        RunbookActions::Show { id } => {
-            let rb = store.load(&id)?;
-            println!("Runbook: {} ({})", rb.name, rb.id);
-            println!("Description: {}", rb.description);
-            println!();
-            println!("Trigger:");
-            if !rb.trigger.alert_categories.is_empty() {
-                println!("  Categories: {}", rb.trigger.alert_categories.join(", "));
-            }
-            if !rb.trigger.keywords.is_empty() {
-                println!("  Keywords: {}", rb.trigger.keywords.join(", "));
-            }
-            if let Some(ref pat) = rb.trigger.target_pattern {
-                println!("  Target pattern: {}", pat);
-            }
-            println!();
-            println!("Steps:");
-            for (i, step) in rb.steps.iter().enumerate() {
-                println!("  {}. {}", i + 1, step.description);
-                if let Some(ref cmd) = step.command {
-                    println!("     Command: `{}`", cmd);
-                }
-                println!(
-                    "     On failure: {:?}  Timeout: {}s",
-                    step.on_failure, step.timeout_secs
-                );
-            }
-            println!();
-            println!(
-                "Executions: {}  Success rate: {:.0}%",
-                rb.execution_count,
-                rb.success_rate * 100.0
-            );
-        }
-        RunbookActions::Init => {
-            let defaults = runbooks::default_runbooks();
-            let mut count = 0;
-            for rb in &defaults {
-                store.save(rb)?;
-                count += 1;
-                println!("  Installed: {} ({})", rb.name, rb.id);
-            }
-            println!("{} default runbook(s) installed.", count);
-        }
-        RunbookActions::Run { id, target } => {
-            let targets = config.targets.as_deref().unwrap_or_default();
-            let t = targets
-                .iter()
-                .find(|t| t.name == target)
-                .with_context(|| format!("Project '{}' not found in config", target))?;
-            let runner = make_runner(config, t).await?;
-            let rb = store.load(&id)?;
-            println!("Executing runbook '{}' on project '{}'...", rb.name, target);
-            let exec = runbooks::execute_runbook(runner.as_ref(), &rb, &target, &[]).await?;
-            let md = runbooks::execution_to_markdown(&exec, &rb.name);
-            println!("{md}");
-        }
-    }
-
-    Ok(())
-}
 
 pub async fn handle_sources(config: &OpsConfig, target: Option<String>, all: bool) -> Result<()> {
     let targets = resolve_targets(config, target.as_deref(), all)?;

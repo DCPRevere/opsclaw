@@ -506,13 +506,16 @@ Examples:
     #[command(long_about = "\
 Manage OpsClaw configuration.
 
-Inspect and export configuration settings. Use 'schema' to dump \
-the full JSON Schema for the config file, which documents every \
-available key, type, and default value.
+View and edit config properties by dotted path, dump the JSON Schema, \
+and manage the Project/Environment/Target hierarchy (see ADR-005).
 
 Examples:
-  opsclaw config schema              # print JSON Schema to stdout
-  opsclaw config schema > schema.json")]
+  opsclaw config list                                # list all properties
+  opsclaw config get providers.fallback              # get a value
+  opsclaw config set providers.fallback openrouter   # set a value
+  opsclaw config schema                              # print JSON Schema
+  opsclaw config target list                         # list targets
+  opsclaw config target add                          # add a target (wizard)")]
     Config {
         #[command(subcommand)]
         config_command: ConfigCommands,
@@ -599,50 +602,11 @@ Examples:
         install: bool,
     },
 
-    /// View or change config properties by dotted path
-    #[command(long_about = "\
-View, set, or initialize config properties.
-
-Properties are addressed by dotted path (e.g. channels.matrix.mention-only).
-Secret fields (API keys, tokens) automatically use masked input.
-Enum fields offer interactive selection when value is omitted.
-
-Examples:
-  zeroclaw props list                                  # list all properties
-  zeroclaw props list --secrets                        # list only secrets
-  zeroclaw props list --filter channels.matrix         # filter by prefix
-  zeroclaw props get channels.matrix.mention-only      # get a value
-  zeroclaw props set channels.matrix.mention-only true # set a value
-  zeroclaw props set channels.matrix.access-token      # secret: masked input
-  zeroclaw props set channels.matrix.stream-mode       # enum: interactive select
-  zeroclaw props init channels.matrix                  # init section with defaults
-
-Property path tab completion is included automatically in `zeroclaw completions <shell>`.")]
-    Props {
-        #[command(subcommand)]
-        props_command: PropsCommands,
-    },
-
     /// Manage WASM plugins
     #[cfg(feature = "plugins-wasm")]
     Plugin {
         #[command(subcommand)]
         plugin_command: PluginCommands,
-    },
-
-    /// Manage targets (monitored endpoints)
-    #[command(long_about = "\
-Manage OpsClaw targets. A target is a single addressable endpoint —
-a server, a website, a Kubernetes cluster, or any endpoint you want
-OpsClaw to watch.
-
-Examples:
-  opsclaw target add              # interactive wizard to add a target
-  opsclaw target list             # list all configured targets
-  opsclaw target remove mysite    # remove a target from config")]
-    Target {
-        #[command(subcommand)]
-        target_command: TargetCommands,
     },
 
     /// Run a discovery scan on a target host
@@ -663,25 +627,32 @@ Examples:
         #[arg(long)]
         all: bool,
     },
+}
 
-    /// Manage runbooks (remediation procedures)
-    #[command(long_about = "\
-Manage runbooks — executable remediation procedures that can be
-triggered manually or automatically when alerts fire.
-
-Examples:
-  opsclaw runbook list                       # list all runbooks
-  opsclaw runbook show restart-container     # show runbook details + steps
-  opsclaw runbook init                       # install default runbooks
-  opsclaw runbook run restart-container --target sacra  # manually execute")]
-    Runbook {
-        #[command(subcommand)]
-        action: ops_cli::RunbookActions,
+#[cfg(feature = "plugins-wasm")]
+#[derive(Subcommand, Debug)]
+enum PluginCommands {
+    /// List installed plugins
+    List,
+    /// Install a plugin from a directory or URL
+    Install {
+        /// Path to plugin directory or manifest
+        source: String,
+    },
+    /// Remove an installed plugin
+    Remove {
+        /// Plugin name
+        name: String,
+    },
+    /// Show information about a plugin
+    Info {
+        /// Plugin name
+        name: String,
     },
 }
 
 #[derive(Subcommand, Debug)]
-enum PropsCommands {
+enum ConfigCommands {
     /// List all config properties with current values
     List {
         /// Filter by path prefix (e.g. "channels.telegram")
@@ -717,34 +688,23 @@ enum PropsCommands {
         /// Partial path to complete
         partial: Option<String>,
     },
-}
-
-#[cfg(feature = "plugins-wasm")]
-#[derive(Subcommand, Debug)]
-enum PluginCommands {
-    /// List installed plugins
-    List,
-    /// Install a plugin from a directory or URL
-    Install {
-        /// Path to plugin directory or manifest
-        source: String,
-    },
-    /// Remove an installed plugin
-    Remove {
-        /// Plugin name
-        name: String,
-    },
-    /// Show information about a plugin
-    Info {
-        /// Plugin name
-        name: String,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum ConfigCommands {
     /// Dump the full configuration JSON Schema to stdout
     Schema,
+    /// Manage targets (addressable endpoints)
+    Target {
+        #[command(subcommand)]
+        target_command: TargetCommands,
+    },
+    /// Manage projects (top-level product wrappers — not yet implemented)
+    Project {
+        #[command(subcommand)]
+        project_command: ProjectCommands,
+    },
+    /// Manage environments (policy boundaries — not yet implemented)
+    Env {
+        #[command(subcommand)]
+        env_command: EnvCommands,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -771,6 +731,42 @@ enum TargetCommands {
     /// Show all configuration for a target
     Show {
         /// Target name
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ProjectCommands {
+    /// Interactively add a new project (not yet implemented)
+    Add,
+    /// List all configured projects (not yet implemented)
+    List,
+    /// Remove a project from the config (not yet implemented)
+    Remove {
+        /// Project name to remove
+        name: String,
+    },
+    /// Show all configuration for a project (not yet implemented)
+    Show {
+        /// Project name
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum EnvCommands {
+    /// Interactively add a new environment (not yet implemented)
+    Add,
+    /// List all configured environments (not yet implemented)
+    List,
+    /// Remove an environment from the config (not yet implemented)
+    Remove {
+        /// Environment address (project::env)
+        name: String,
+    },
+    /// Show all configuration for an environment (not yet implemented)
+    Show {
+        /// Environment address (project::env)
         name: String,
     },
 }
@@ -1746,35 +1742,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Config { config_command } => match config_command {
-            ConfigCommands::Schema => {
-                let schema = schemars::schema_for!(config::Config);
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&schema).expect("failed to serialize JSON Schema")
-                );
-                Ok(())
-            }
-        },
-
-        Commands::Target { target_command } => match target_command {
-            TargetCommands::Add => Box::pin(ops_cli::handle_target_add(&ops_config)).await,
-            TargetCommands::List => ops_cli::handle_target_list(&ops_config),
-            TargetCommands::Remove { name } => {
-                Box::pin(ops_cli::handle_target_remove(&ops_config, &name)).await
-            }
-            TargetCommands::Context { name } => ops_cli::handle_context_print(&ops_config, &name),
-            TargetCommands::ContextEdit { name } => {
-                ops_cli::handle_context_edit(&ops_config, &name).await
-            }
-            TargetCommands::Show { name } => ops_cli::handle_target_show(&ops_config, &name),
-        },
-
-        Commands::Scan { target, all } => ops_cli::handle_scan(&ops_config, target, all).await,
-
-        Commands::Runbook { action } => ops_cli::handle_runbook(&ops_config, action).await,
-
-        Commands::Props { props_command } => match props_command {
-            PropsCommands::List { filter, secrets } => {
+            ConfigCommands::List { filter, secrets } => {
                 let entries = config.prop_fields();
                 let mut current_category = "";
                 for entry in &entries {
@@ -1801,7 +1769,7 @@ async fn main() -> Result<()> {
                 }
                 Ok(())
             }
-            PropsCommands::Get { path } => {
+            ConfigCommands::Get { path } => {
                 if Config::prop_is_secret(&path) {
                     let entries = config.prop_fields();
                     let is_set = entries
@@ -1822,16 +1790,15 @@ async fn main() -> Result<()> {
                 }
                 Ok(())
             }
-            PropsCommands::Set {
+            ConfigCommands::Set {
                 path,
                 value,
                 no_interactive,
             } => {
                 if no_interactive {
-                    // Scripted mode: require value on CLI, no prompts
                     let val = value.ok_or_else(|| {
                         anyhow::anyhow!(
-                            "Value required in --no-interactive mode. Usage: zeroclaw props set --no-interactive {path} <value>"
+                            "Value required in --no-interactive mode. Usage: opsclaw config set --no-interactive {path} <value>"
                         )
                     })?;
                     config.set_prop(&path, &val)?;
@@ -1852,7 +1819,6 @@ async fn main() -> Result<()> {
                 } else if let Some(val) = value {
                     config.set_prop(&path, &val)?;
                 } else {
-                    // Enum fields get interactive selection; everything else needs a value
                     let variants = config
                         .prop_fields()
                         .into_iter()
@@ -1874,14 +1840,14 @@ async fn main() -> Result<()> {
                             .interact()?;
                         config.set_prop(&path, &variants[selected])?;
                     } else {
-                        anyhow::bail!("Value required. Usage: zeroclaw props set {path} <value>");
+                        anyhow::bail!("Value required. Usage: opsclaw config set {path} <value>");
                     }
                 }
                 config.save().await?;
                 println!("{path} updated.");
                 Ok(())
             }
-            PropsCommands::Init { section } => {
+            ConfigCommands::Init { section } => {
                 let initialized = config.init_defaults(section.as_deref());
                 if initialized.is_empty() {
                     println!("All sections already configured.");
@@ -1894,11 +1860,11 @@ async fn main() -> Result<()> {
                         println!("  {name}");
                     }
                     config.save().await?;
-                    println!("\nRun `zeroclaw props list` to review, then set required fields.");
+                    println!("\nRun `opsclaw config list` to review, then set required fields.");
                 }
                 Ok(())
             }
-            PropsCommands::Complete { partial } => {
+            ConfigCommands::Complete { partial } => {
                 let prefix = partial.as_deref().unwrap_or("");
                 for entry in config.prop_fields() {
                     if entry.name.starts_with(prefix) {
@@ -1907,7 +1873,57 @@ async fn main() -> Result<()> {
                 }
                 Ok(())
             }
+            ConfigCommands::Schema => {
+                let schema = schemars::schema_for!(config::Config);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&schema).expect("failed to serialize JSON Schema")
+                );
+                Ok(())
+            }
+            ConfigCommands::Target { target_command } => match target_command {
+                TargetCommands::Add => Box::pin(ops_cli::handle_target_add(&ops_config)).await,
+                TargetCommands::List => ops_cli::handle_target_list(&ops_config),
+                TargetCommands::Remove { name } => {
+                    Box::pin(ops_cli::handle_target_remove(&ops_config, &name)).await
+                }
+                TargetCommands::Context { name } => {
+                    ops_cli::handle_context_print(&ops_config, &name)
+                }
+                TargetCommands::ContextEdit { name } => {
+                    ops_cli::handle_context_edit(&ops_config, &name).await
+                }
+                TargetCommands::Show { name } => ops_cli::handle_target_show(&ops_config, &name),
+            },
+            ConfigCommands::Project { project_command } => {
+                let action = match project_command {
+                    ProjectCommands::Add => "add",
+                    ProjectCommands::List => "list",
+                    ProjectCommands::Remove { .. } => "remove",
+                    ProjectCommands::Show { .. } => "show",
+                };
+                eprintln!(
+                    "opsclaw config project {action}: not yet implemented \
+                     (hierarchy work is tracked under ADR-005)"
+                );
+                Ok(())
+            }
+            ConfigCommands::Env { env_command } => {
+                let action = match env_command {
+                    EnvCommands::Add => "add",
+                    EnvCommands::List => "list",
+                    EnvCommands::Remove { .. } => "remove",
+                    EnvCommands::Show { .. } => "show",
+                };
+                eprintln!(
+                    "opsclaw config env {action}: not yet implemented \
+                     (hierarchy work is tracked under ADR-005)"
+                );
+                Ok(())
+            }
         },
+
+        Commands::Scan { target, all } => ops_cli::handle_scan(&ops_config, target, all).await,
 
         #[cfg(feature = "plugins-wasm")]
         Commands::Plugin { plugin_command } => match plugin_command {
@@ -2137,20 +2153,20 @@ fn write_shell_completion<W: Write>(shell: CompletionShell, writer: &mut W) -> R
     match shell {
         CompletionShell::Bash => {
             generate(shells::Bash, &mut cmd, bin_name.clone(), writer);
-            // Wrap clap's _zeroclaw to inject dynamic props path completion
+            // Wrap clap's _opsclaw to inject dynamic config path completion
             writeln!(
                 writer,
                 r#"
-# Dynamic completion for zeroclaw props get/set paths
-if type _zeroclaw &>/dev/null; then
-    _zeroclaw_clap_orig() {{ _zeroclaw "$@"; }}
-    _zeroclaw() {{
+# Dynamic completion for opsclaw config get/set/init paths
+if type _opsclaw &>/dev/null; then
+    _opsclaw_clap_orig() {{ _opsclaw "$@"; }}
+    _opsclaw() {{
         local cur="${{COMP_WORDS[COMP_CWORD]}}"
-        if [[ "${{COMP_WORDS[*]}}" =~ "props "(get|set)" " ]]; then
-            COMPREPLY=($(compgen -W "$(zeroclaw props complete "$cur" 2>/dev/null)" -- "$cur"))
+        if [[ "${{COMP_WORDS[*]}}" =~ "config "(get|set|init)" " ]]; then
+            COMPREPLY=($(compgen -W "$(opsclaw config complete "$cur" 2>/dev/null)" -- "$cur"))
             return
         fi
-        _zeroclaw_clap_orig "$@"
+        _opsclaw_clap_orig "$@"
     }}
 fi"#
             )?;
@@ -2160,28 +2176,28 @@ fi"#
             writeln!(
                 writer,
                 r#"
-# Dynamic completion for zeroclaw props get/set paths
-complete -c zeroclaw -n '__fish_seen_subcommand_from props; and __fish_seen_subcommand_from get set' \
-    -a '(zeroclaw props complete (commandline -ct) 2>/dev/null)' -f"#
+# Dynamic completion for opsclaw config get/set/init paths
+complete -c opsclaw -n '__fish_seen_subcommand_from config; and __fish_seen_subcommand_from get set init' \
+    -a '(opsclaw config complete (commandline -ct) 2>/dev/null)' -f"#
             )?;
         }
         CompletionShell::Zsh => {
             generate(shells::Zsh, &mut cmd, bin_name.clone(), writer);
-            // Wrap clap's _zeroclaw to inject dynamic props path completion
+            // Wrap clap's _opsclaw to inject dynamic config path completion
             writeln!(
                 writer,
                 r#"
-# Dynamic completion for zeroclaw props get/set paths
-if (( $+functions[_zeroclaw] )); then
-    functions[_zeroclaw_clap_orig]=$functions[_zeroclaw]
-    _zeroclaw() {{
-        if [[ "${{words[*]}}" == *"props "(get|set)* ]] && (( CURRENT > 3 )); then
-            local -a props
-            props=(${{(f)"$(zeroclaw props complete "$words[CURRENT]" 2>/dev/null)"}})
-            compadd -a props
+# Dynamic completion for opsclaw config get/set/init paths
+if (( $+functions[_opsclaw] )); then
+    functions[_opsclaw_clap_orig]=$functions[_opsclaw]
+    _opsclaw() {{
+        if [[ "${{words[*]}}" == *"config "(get|set|init)* ]] && (( CURRENT > 3 )); then
+            local -a paths
+            paths=(${{(f)"$(opsclaw config complete "$words[CURRENT]" 2>/dev/null)"}})
+            compadd -a paths
             return
         fi
-        _zeroclaw_clap_orig "$@"
+        _opsclaw_clap_orig "$@"
     }}
 fi"#
             )?;

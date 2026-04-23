@@ -138,7 +138,7 @@ pub fn is_read_only_command(command: &str) -> Result<(), String> {
 
 /// Per-project SSH configuration resolved at construction time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectEntry {
+pub struct TargetEntry {
     pub name: String,
     pub host: String,
     pub port: u16,
@@ -151,7 +151,7 @@ pub struct ProjectEntry {
 /// Configuration bundle passed to [`SshTool`] at construction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshToolConfig {
-    pub projects: Vec<ProjectEntry>,
+    pub targets: Vec<TargetEntry>,
 }
 
 // ── SSH executor trait (for testability) ────────────────
@@ -161,7 +161,7 @@ pub struct SshToolConfig {
 pub trait SshExecutor: Send + Sync {
     async fn run(
         &self,
-        project: &ProjectEntry,
+        project: &TargetEntry,
         command: &str,
         timeout: Duration,
         pty: bool,
@@ -290,7 +290,7 @@ impl russh::client::Handler for SshClientHandler {
 impl SshExecutor for RealSshExecutor {
     async fn run(
         &self,
-        project: &ProjectEntry,
+        project: &TargetEntry,
         command: &str,
         timeout: Duration,
         pty: bool,
@@ -306,7 +306,7 @@ impl SshExecutor for RealSshExecutor {
 impl RealSshExecutor {
     async fn run_inner(
         &self,
-        project: &ProjectEntry,
+        project: &TargetEntry,
         command: &str,
         pty: bool,
     ) -> anyhow::Result<SshOutput> {
@@ -437,7 +437,7 @@ pub fn write_audit_entry(
 /// A resolved, ready-to-use SSH runner for a single project.
 /// Created by `OpsClawContext::ssh_runner_for` with the key already resolved.
 pub struct SshCommandRunner {
-    project: ProjectEntry,
+    project: TargetEntry,
     executor: Box<dyn SshExecutor>,
     timeout: Duration,
 }
@@ -452,7 +452,7 @@ impl std::fmt::Debug for SshCommandRunner {
 }
 
 impl SshCommandRunner {
-    pub fn new(project: ProjectEntry) -> Self {
+    pub fn new(project: TargetEntry) -> Self {
         Self {
             project,
             executor: Box::new(RealSshExecutor),
@@ -461,7 +461,7 @@ impl SshCommandRunner {
     }
 
     /// Construct with a custom executor (for testing).
-    pub fn with_executor(project: ProjectEntry, executor: Box<dyn SshExecutor>) -> Self {
+    pub fn with_executor(project: TargetEntry, executor: Box<dyn SshExecutor>) -> Self {
         Self {
             project,
             executor,
@@ -469,7 +469,7 @@ impl SshCommandRunner {
         }
     }
 
-    pub fn project(&self) -> &ProjectEntry {
+    pub fn project(&self) -> &TargetEntry {
         &self.project
     }
 
@@ -536,8 +536,8 @@ impl SshTool {
         self
     }
 
-    fn resolve_project(&self, name: &str) -> Option<&ProjectEntry> {
-        self.config.projects.iter().find(|t| t.name == name)
+    fn resolve_project(&self, name: &str) -> Option<&TargetEntry> {
+        self.config.targets.iter().find(|t| t.name == name)
     }
 }
 
@@ -712,8 +712,8 @@ impl Tool for SshTool {
 mod tests {
     use super::*;
 
-    fn default_project(autonomy: OpsClawAutonomy) -> ProjectEntry {
-        ProjectEntry {
+    fn default_project(autonomy: OpsClawAutonomy) -> TargetEntry {
+        TargetEntry {
             name: "prod-web-1".into(),
             host: "10.0.0.1".into(),
             port: 22,
@@ -723,8 +723,8 @@ mod tests {
         }
     }
 
-    fn config_with(projects: Vec<ProjectEntry>) -> SshToolConfig {
-        SshToolConfig { projects }
+    fn config_with(targets: Vec<TargetEntry>) -> SshToolConfig {
+        SshToolConfig { targets }
     }
 
     // ── Autonomy / command filtering ────────────────────

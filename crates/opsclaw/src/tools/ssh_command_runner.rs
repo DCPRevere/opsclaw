@@ -15,7 +15,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 
 use super::discovery::{CommandOutput, CommandRunner};
-use super::ssh_tool::{is_read_only_command, write_audit_entry, ProjectEntry, SshExecutor};
+use super::ssh_tool::{is_read_only_command, write_audit_entry, TargetEntry, SshExecutor};
 use crate::ops_config::OpsClawAutonomy;
 
 // ---------------------------------------------------------------------------
@@ -24,14 +24,14 @@ use crate::ops_config::OpsClawAutonomy;
 
 /// Executes commands on a remote host via SSH, implementing [`CommandRunner`].
 pub struct SshCommandRunner {
-    project: ProjectEntry,
+    project: TargetEntry,
     executor: Box<dyn SshExecutor>,
     timeout: Duration,
     audit_dir: Option<PathBuf>,
 }
 
 impl SshCommandRunner {
-    pub fn new(project: ProjectEntry, executor: Box<dyn SshExecutor>) -> Self {
+    pub fn new(project: TargetEntry, executor: Box<dyn SshExecutor>) -> Self {
         Self {
             timeout: Duration::from_secs(30),
             project,
@@ -270,8 +270,8 @@ mod tests {
     use super::*;
     use crate::tools::ssh_tool::SshOutput;
 
-    fn test_project(autonomy: OpsClawAutonomy) -> ProjectEntry {
-        ProjectEntry {
+    fn test_project(autonomy: OpsClawAutonomy) -> TargetEntry {
+        TargetEntry {
             name: "test-host".into(),
             host: "127.0.0.1".into(),
             port: 22,
@@ -308,7 +308,7 @@ mod tests {
     impl SshExecutor for StubExecutor {
         async fn run(
             &self,
-            _project: &ProjectEntry,
+            _project: &TargetEntry,
             _command: &str,
             _timeout: Duration,
             _pty: bool,

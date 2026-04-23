@@ -4,7 +4,7 @@
 //! SSH target reachability, notification credentials, LLM provider readiness,
 //! disk space, and data-directory integrity.
 
-use crate::ops_config::{OpsConfig, ProjectType};
+use crate::ops_config::{OpsConfig, ConnectionType};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -195,7 +195,7 @@ fn check_config(config: &OpsConfig, results: &mut Vec<CheckResult>) {
 fn check_targets(config: &OpsConfig, results: &mut Vec<CheckResult>) {
     let cat = "projects";
 
-    let targets = match config.projects.as_ref() {
+    let targets = match config.targets.as_ref() {
         Some(t) if !t.is_empty() => t,
         _ => {
             results.push(CheckResult::warn(
@@ -212,8 +212,8 @@ fn check_targets(config: &OpsConfig, results: &mut Vec<CheckResult>) {
     ));
 
     for target in targets {
-        match target.project_type {
-            ProjectType::Ssh => {
+        match target.connection_type {
+            ConnectionType::Ssh => {
                 let mut missing = Vec::new();
                 if target.host.is_none() {
                     missing.push("host");
@@ -246,13 +246,13 @@ fn check_targets(config: &OpsConfig, results: &mut Vec<CheckResult>) {
                     ));
                 }
             }
-            ProjectType::Local => {
+            ConnectionType::Local => {
                 results.push(CheckResult::ok(
                     cat,
                     format!("project \"{}\" (local)", target.name),
                 ));
             }
-            ProjectType::Kubernetes => {
+            ConnectionType::Kubernetes => {
                 results.push(CheckResult::ok(
                     cat,
                     format!(
@@ -271,14 +271,14 @@ fn check_targets(config: &OpsConfig, results: &mut Vec<CheckResult>) {
 async fn check_ssh_connectivity(config: &OpsConfig, results: &mut Vec<CheckResult>) {
     let cat = "ssh";
 
-    let targets = match config.projects.as_ref() {
+    let targets = match config.targets.as_ref() {
         Some(t) => t,
         None => return,
     };
 
     let ssh_targets: Vec<_> = targets
         .iter()
-        .filter(|t| t.project_type == ProjectType::Ssh)
+        .filter(|t| t.connection_type == ConnectionType::Ssh)
         .collect();
 
     if ssh_targets.is_empty() {
@@ -547,7 +547,7 @@ fn check_data_directories(config: &OpsConfig, results: &mut Vec<CheckResult>) {
 async fn check_data_sources(config: &OpsConfig, results: &mut Vec<CheckResult>) {
     let cat = "data_sources";
 
-    let targets = match config.projects.as_ref() {
+    let targets = match config.targets.as_ref() {
         Some(t) => t,
         None => return,
     };
@@ -759,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn check_data_sources_reports_unreachable() {
         use crate::ops_config::OpsConfig;
-        use crate::ops_config::{OpsClawAutonomy, ProjectConfig};
+        use crate::ops_config::{OpsClawAutonomy, TargetConfig};
 
         let ds = crate::ops::data_sources::DataSourcesConfig {
             seq: Some(crate::ops::data_sources::SeqConfig {
@@ -773,9 +773,9 @@ mod tests {
         };
 
         let config = OpsConfig {
-            projects: Some(vec![ProjectConfig {
+            targets: Some(vec![TargetConfig {
                 name: "test-project".into(),
-                project_type: ProjectType::Local,
+                connection_type: ConnectionType::Local,
                 host: None,
                 port: None,
                 user: None,

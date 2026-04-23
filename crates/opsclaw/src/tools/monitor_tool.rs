@@ -51,7 +51,7 @@ impl Tool for MonitorTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'project' parameter"))?;
 
-        let projects = self.config.projects.as_deref().unwrap_or_default();
+        let projects = self.config.targets.as_deref().unwrap_or_default();
         let project = match projects.iter().find(|p| p.name == project_name) {
             Some(p) => p,
             None => {

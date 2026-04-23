@@ -11,7 +11,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::ops_config::{OpsConfig, ProjectType};
+use crate::ops_config::{OpsConfig, ConnectionType};
 use crate::tools::registry::create_opsclaw_tools;
 
 /// Register the opsclaw SRE tools with the runtime via the existing
@@ -51,10 +51,10 @@ pub async fn seed_heartbeat_file(workspace_dir: &Path, ops_config: &OpsConfig) -
         return Ok(());
     }
 
-    let projects = ops_config.projects.as_deref().unwrap_or_default();
+    let projects = ops_config.targets.as_deref().unwrap_or_default();
     let scan_targets: Vec<&str> = projects
         .iter()
-        .filter(|p| p.project_type == ProjectType::Ssh)
+        .filter(|p| p.connection_type == ConnectionType::Ssh)
         .map(|p| p.name.as_str())
         .collect();
 

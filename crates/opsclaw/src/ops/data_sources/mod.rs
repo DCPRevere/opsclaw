@@ -72,7 +72,7 @@ pub struct DataSourcesSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Per-project data-source configuration (lives inside ProjectConfig)
+// Per-project data-source configuration (lives inside TargetConfig)
 // ---------------------------------------------------------------------------
 
 /// Optional data-source configuration block for a project.
@@ -214,7 +214,7 @@ pub async fn collect_all(
 /// [`DataSourcesConfig`], then delegates to [`collect_all`].  Missing or
 /// malformed config is silently treated as "no data sources configured".
 pub async fn fetch_all(
-    project: &crate::ops_config::ProjectConfig,
+    project: &crate::ops_config::TargetConfig,
     runner: Option<&dyn crate::tools::discovery::CommandRunner>,
 ) -> DataSourcesSnapshot {
     let ds_config = project.data_sources.clone().unwrap_or_default();

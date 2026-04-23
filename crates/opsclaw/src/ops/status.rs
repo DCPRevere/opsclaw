@@ -6,12 +6,12 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::ops_config::ProjectConfig;
+use crate::ops_config::TargetConfig;
 use crate::tools::discovery::TargetSnapshot;
 
 /// Collected data for a single project's status display.
 #[derive(Debug, Serialize)]
-pub struct ProjectStatus {
+pub struct TargetStatus {
     pub name: String,
     pub host: String,
     pub snapshot: Option<TargetSnapshot>,
@@ -51,11 +51,11 @@ fn parse_uptime(raw: &str) -> String {
     raw.trim_start_matches("up ").to_string()
 }
 
-/// Build a `ProjectStatus` from config.
-pub fn gather_project_status(target: &ProjectConfig) -> Result<ProjectStatus> {
+/// Build a `TargetStatus` from config.
+pub fn gather_target_status(target: &TargetConfig) -> Result<TargetStatus> {
     let host = target.host.as_deref().unwrap_or("localhost").to_string();
 
-    Ok(ProjectStatus {
+    Ok(TargetStatus {
         name: target.name.clone(),
         host,
         snapshot: None,
@@ -64,7 +64,7 @@ pub fn gather_project_status(target: &ProjectConfig) -> Result<ProjectStatus> {
 }
 
 /// Render a human-readable status report for a single project.
-pub fn render_project_status(status: &ProjectStatus) -> String {
+pub fn render_project_status(status: &TargetStatus) -> String {
     let mut out = String::new();
 
     let header = format!("OpsClaw Status \u{2014} {} ({})", status.name, status.host);
@@ -184,8 +184,8 @@ mod tests {
     use crate::tools::discovery::*;
     use chrono::Utc;
 
-    fn sample_status() -> ProjectStatus {
-        ProjectStatus {
+    fn sample_status() -> TargetStatus {
+        TargetStatus {
             name: "sacra".into(),
             host: "159.69.92.65".into(),
             snapshot: Some(TargetSnapshot {
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn no_snapshot_shows_message() {
-        let status = ProjectStatus {
+        let status = TargetStatus {
             name: "missing".into(),
             host: "localhost".into(),
             snapshot: None,

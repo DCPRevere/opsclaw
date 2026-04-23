@@ -16,9 +16,9 @@ pub struct OpsConfig {
     #[serde(flatten)]
     pub inner: zeroclaw::Config,
 
-    /// SRE projects (monitored environments).
-    #[serde(rename = "projects", default, skip_serializing_if = "Option::is_none")]
-    pub projects: Option<Vec<TargetConfig>>,
+    /// SRE targets (monitored endpoints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<TargetConfig>>,
 
     /// Notification delivery settings for alerts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,20 +194,20 @@ impl OpsConfig {
             })?;
         }
 
-        // Encrypt secret fields on projects before serializing.
+        // Encrypt secret fields on targets before serializing.
         let mut to_save = self.clone();
-        if let Some(ref mut projects) = to_save.projects {
+        if let Some(ref mut targets) = to_save.targets {
             let store = zeroclaw::security::SecretStore::new(
                 config_path.parent().context("config path has no parent")?,
                 self.inner.secrets.encrypt,
             );
-            for project in projects.iter_mut() {
-                if let Some(ref val) = project.key_secret {
+            for target in targets.iter_mut() {
+                if let Some(ref val) = target.key_secret {
                     if !zeroclaw::security::SecretStore::is_encrypted(val) {
-                        project.key_secret = Some(store.encrypt(val)?);
+                        target.key_secret = Some(store.encrypt(val)?);
                     }
                 }
-                if let Some(ref mut ds) = project.data_sources {
+                if let Some(ref mut ds) = target.data_sources {
                     if let Some(ref mut seq) = ds.seq {
                         if let Some(ref val) = seq.api_key {
                             if !zeroclaw::security::SecretStore::is_encrypted(val) {

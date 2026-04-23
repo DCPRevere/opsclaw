@@ -16,7 +16,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;
 
 pub struct FirewallToolConfig {
-    pub projects: Vec<TargetEntry>,
+    pub targets: Vec<TargetEntry>,
 }
 
 pub struct FirewallTool {
@@ -51,7 +51,7 @@ impl FirewallTool {
     }
 
     fn resolve<'a>(&'a self, name: &str) -> Option<&'a TargetEntry> {
-        self.config.projects.iter().find(|p| p.name == name)
+        self.config.targets.iter().find(|p| p.name == name)
     }
 }
 
@@ -398,7 +398,7 @@ mod tests {
         }
     }
 
-    fn project(autonomy: OpsClawAutonomy) -> TargetEntry {
+    fn target(autonomy: OpsClawAutonomy) -> TargetEntry {
         TargetEntry {
             name: "prod".into(),
             host: "h".into(),
@@ -414,7 +414,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = FirewallTool::with_executor(
             FirewallToolConfig {
-                projects: vec![project(autonomy)],
+                targets: vec![target(autonomy)],
             },
             Box::new(Recording {
                 last: last.clone(),

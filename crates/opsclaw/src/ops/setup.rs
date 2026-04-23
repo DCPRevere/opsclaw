@@ -11,10 +11,10 @@ use console::style;
 use dialoguer::{Confirm, Input, Select};
 
 use crate::ops_config::OpsConfig;
-use crate::ops_config::{OpsClawAutonomy, ProjectConfig, ProjectType};
+use crate::ops_config::{OpsClawAutonomy, TargetConfig, ConnectionType};
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::ssh_command_runner::{LocalCommandRunner, SshCommandRunner};
-use crate::tools::ssh_tool::ProjectEntry;
+use crate::tools::ssh_tool::TargetEntry;
 use crate::tools::ssh_tool::RealSshExecutor;
 
 fn print_bullet(text: &str) {
@@ -122,12 +122,12 @@ async fn test_ssh_connection(host: &str, user: &str, port: u16, key_path: Option
 // Individual wizard steps
 // ---------------------------------------------------------------------------
 
-pub struct ProjectResult {
-    pub config: ProjectConfig,
+pub struct TargetResult {
+    pub config: TargetConfig,
     pub runner: Option<Box<dyn CommandRunner>>,
 }
 
-pub fn step_project_type() -> Result<ProjectType> {
+pub fn step_connection_type() -> Result<ConnectionType> {
     let items = &["Remote (SSH)", "Local (this machine)", "Kubernetes cluster"];
     let selection = Select::new()
         .with_prompt("Where is the server you want to monitor?")
@@ -135,13 +135,13 @@ pub fn step_project_type() -> Result<ProjectType> {
         .default(0)
         .interact()?;
     Ok(match selection {
-        0 => ProjectType::Ssh,
-        1 => ProjectType::Local,
-        _ => ProjectType::Kubernetes,
+        0 => ConnectionType::Ssh,
+        1 => ConnectionType::Local,
+        _ => ConnectionType::Kubernetes,
     })
 }
 
-pub async fn step_ssh_project() -> Result<ProjectResult> {
+pub async fn step_ssh_target() -> Result<TargetResult> {
     let host: String = Input::new().with_prompt("SSH host").interact_text()?;
 
     let user: String = Input::new()
@@ -195,7 +195,7 @@ pub async fn step_ssh_project() -> Result<ProjectResult> {
 
     let runner: Box<dyn CommandRunner> = match &key_pem_result {
         Ok(key_pem) => {
-            let entry = ProjectEntry {
+            let entry = TargetEntry {
                 name: name.clone(),
                 host: host.clone(),
                 port,
@@ -222,9 +222,9 @@ pub async fn step_ssh_project() -> Result<ProjectResult> {
     // Store key PEM content (plain text here; Config::save() encrypts it as enc2:...).
     let key_secret = key_pem_result.ok();
 
-    let config = ProjectConfig {
+    let config = TargetConfig {
         name,
-        project_type: ProjectType::Ssh,
+        connection_type: ConnectionType::Ssh,
         host: Some(host),
         port: Some(port),
         user: Some(user),
@@ -239,13 +239,13 @@ pub async fn step_ssh_project() -> Result<ProjectResult> {
         namespace: None,
     };
 
-    Ok(ProjectResult {
+    Ok(TargetResult {
         config,
         runner: Some(runner),
     })
 }
 
-pub fn step_local_project() -> Result<ProjectResult> {
+pub fn step_local_target() -> Result<TargetResult> {
     let name: String = Input::new()
         .with_prompt("Project name")
         .default("this-box".into())
@@ -256,9 +256,9 @@ pub fn step_local_project() -> Result<ProjectResult> {
         name.clone(),
     ));
 
-    let config = ProjectConfig {
+    let config = TargetConfig {
         name,
-        project_type: ProjectType::Local,
+        connection_type: ConnectionType::Local,
         host: None,
         port: None,
         user: None,
@@ -273,13 +273,13 @@ pub fn step_local_project() -> Result<ProjectResult> {
         namespace: None,
     };
 
-    Ok(ProjectResult {
+    Ok(TargetResult {
         config,
         runner: Some(runner),
     })
 }
 
-pub fn step_kubernetes_project() -> Result<ProjectResult> {
+pub fn step_kubernetes_target() -> Result<TargetResult> {
     let name: String = Input::new()
         .with_prompt("Project name")
         .default("k8s-cluster".into())
@@ -295,9 +295,9 @@ pub fn step_kubernetes_project() -> Result<ProjectResult> {
         .allow_empty(true)
         .interact_text()?;
 
-    let config = ProjectConfig {
+    let config = TargetConfig {
         name,
-        project_type: ProjectType::Kubernetes,
+        connection_type: ConnectionType::Kubernetes,
         host: None,
         port: None,
         user: None,
@@ -320,7 +320,7 @@ pub fn step_kubernetes_project() -> Result<ProjectResult> {
         },
     };
 
-    Ok(ProjectResult {
+    Ok(TargetResult {
         config,
         runner: None,
     })
@@ -329,7 +329,7 @@ pub fn step_kubernetes_project() -> Result<ProjectResult> {
 /// Ask the user for optional project context and persist it to a file.
 ///
 /// Returns `Some(path)` (using `~/` prefix) if context was provided, `None` otherwise.
-pub fn step_project_context(target_name: &str) -> Result<Option<String>> {
+pub fn step_target_context(target_name: &str) -> Result<Option<String>> {
     println!();
     println!(
         "  {}",
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn test_load_existing_config_missing_file() {
         let cfg = load_existing_config(Path::new("/nonexistent/config.toml"));
-        assert!(cfg.projects.as_ref().map_or(true, |t| t.is_empty()));
+        assert!(cfg.targets.as_ref().map_or(true, |t| t.is_empty()));
         assert!(cfg.notifications.is_none());
     }
 

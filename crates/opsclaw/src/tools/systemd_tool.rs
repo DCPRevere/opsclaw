@@ -10,13 +10,13 @@ use serde_json::{json, Value};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
-use crate::tools::ssh_tool::{write_audit_entry, ProjectEntry, RealSshExecutor, SshExecutor};
+use crate::tools::ssh_tool::{write_audit_entry, TargetEntry, RealSshExecutor, SshExecutor};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;
 
 pub struct SystemdToolConfig {
-    pub projects: Vec<ProjectEntry>,
+    pub targets: Vec<TargetEntry>,
 }
 
 pub struct SystemdTool {
@@ -50,8 +50,8 @@ impl SystemdTool {
         self
     }
 
-    fn resolve<'a>(&'a self, name: &str) -> Option<&'a ProjectEntry> {
-        self.config.projects.iter().find(|p| p.name == name)
+    fn resolve<'a>(&'a self, name: &str) -> Option<&'a TargetEntry> {
+        self.config.targets.iter().find(|p| p.name == name)
     }
 }
 
@@ -354,7 +354,7 @@ mod tests {
     impl SshExecutor for RecordingExecutor {
         async fn run(
             &self,
-            _project: &ProjectEntry,
+            _project: &TargetEntry,
             command: &str,
             _timeout: Duration,
             _pty: bool,
@@ -364,8 +364,8 @@ mod tests {
         }
     }
 
-    fn project(autonomy: OpsClawAutonomy) -> ProjectEntry {
-        ProjectEntry {
+    fn target(autonomy: OpsClawAutonomy) -> TargetEntry {
+        TargetEntry {
             name: "prod".into(),
             host: "h".into(),
             port: 22,
@@ -390,7 +390,7 @@ mod tests {
         };
         let tool = SystemdTool::with_executor(
             SystemdToolConfig {
-                projects: vec![project(autonomy)],
+                targets: vec![target(autonomy)],
             },
             Box::new(exec),
         )

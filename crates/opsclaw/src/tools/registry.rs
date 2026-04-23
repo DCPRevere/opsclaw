@@ -28,16 +28,16 @@ pub fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool>>> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
     // SSH + systemd + firewall share the same project entries.
-    let ssh_projects = build_ssh_entries(config)?;
-    if !ssh_projects.is_empty() {
+    let ssh_targets = build_ssh_entries(config)?;
+    if !ssh_targets.is_empty() {
         tools.push(Box::new(SshTool::new(SshToolConfig {
-            projects: ssh_projects.clone(),
+            targets: ssh_targets.clone(),
         })));
         tools.push(Box::new(SystemdTool::new(SystemdToolConfig {
-            projects: ssh_projects.clone(),
+            targets: ssh_targets.clone(),
         })));
         tools.push(Box::new(FirewallTool::new(FirewallToolConfig {
-            projects: ssh_projects,
+            targets: ssh_targets,
         })));
     }
 
@@ -182,7 +182,7 @@ pub fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool>>> {
 
 /// Extract SSH project entries from config, decrypting keys as needed.
 fn build_ssh_entries(config: &OpsConfig) -> Result<Vec<TargetEntry>> {
-    let projects = config.projects.as_deref().unwrap_or_default();
+    let projects = config.targets.as_deref().unwrap_or_default();
     let mut entries = Vec::new();
 
     for project in projects {

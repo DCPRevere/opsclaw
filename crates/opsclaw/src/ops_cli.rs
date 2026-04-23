@@ -12,7 +12,7 @@ use clap::Subcommand;
 use tokio::signal;
 use tracing::info;
 
-use crate::ops_config::{ProjectConfig, ProjectType};
+use crate::ops_config::{TargetConfig, ConnectionType};
 
 /// Runbook subcommands
 #[derive(Subcommand, Debug)]
@@ -44,7 +44,7 @@ use crate::ops_config::{OpsClawAutonomy, OpsConfig};
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::kube_tool::KubeClient;
 use crate::tools::ssh_command_runner::{DryRunCommandRunner, LocalCommandRunner, SshCommandRunner};
-use crate::tools::ssh_tool::{ProjectEntry, RealSshExecutor};
+use crate::tools::ssh_tool::{TargetEntry, RealSshExecutor};
 
 // ---------------------------------------------------------------------------
 // Runner factory
@@ -54,16 +54,16 @@ use crate::tools::ssh_tool::{ProjectEntry, RealSshExecutor};
 ///
 /// In `DryRun` mode the runner is wrapped with [`DryRunCommandRunner`] so that
 /// write commands are logged instead of executed.
-fn make_runner(config: &OpsConfig, project: &ProjectConfig) -> Result<Box<dyn CommandRunner>> {
-    let runner: Box<dyn CommandRunner> = match project.project_type {
-        ProjectType::Local => Box::new(LocalCommandRunner::new(
+fn make_runner(config: &OpsConfig, project: &TargetConfig) -> Result<Box<dyn CommandRunner>> {
+    let runner: Box<dyn CommandRunner> = match project.connection_type {
+        ConnectionType::Local => Box::new(LocalCommandRunner::new(
             project.autonomy,
             project.name.clone(),
         )),
-        ProjectType::Kubernetes => {
+        ConnectionType::Kubernetes => {
             bail!("Kubernetes projects use the kube API client, not a command runner");
         }
-        ProjectType::Ssh => {
+        ConnectionType::Ssh => {
             let host = project.host.clone().unwrap_or_default();
             let user = project.user.clone().unwrap_or_default();
             let port = project.port.unwrap_or(22);
@@ -76,7 +76,7 @@ fn make_runner(config: &OpsConfig, project: &ProjectConfig) -> Result<Box<dyn Co
                 .decrypt_secret(raw_key)
                 .context("Failed to decrypt SSH private key")?;
 
-            let entry = ProjectEntry {
+            let entry = TargetEntry {
                 name: project.name.clone(),
                 host,
                 port,
@@ -110,8 +110,8 @@ fn opsclaw_dir() -> Result<std::path::PathBuf> {
 
 /// Run a discovery scan for a project, using the kube API for Kubernetes
 /// projects and a [`CommandRunner`] for everything else.
-pub async fn scan_target(config: &OpsConfig, project: &ProjectConfig) -> Result<TargetSnapshot> {
-    if project.project_type == ProjectType::Kubernetes {
+pub async fn scan_target(config: &OpsConfig, project: &TargetConfig) -> Result<TargetSnapshot> {
+    if project.connection_type == ConnectionType::Kubernetes {
         let kube = KubeClient::new(project.kubeconfig.as_deref()).await?;
         return kube.discover_snapshot().await;
     }
@@ -149,7 +149,7 @@ Describe this project so OpsClaw understands how to operate it.
 pub async fn handle_context_edit(config: &OpsConfig, target: &str) -> Result<()> {
     // Validate the project exists in config.
     let project_cfg = config
-        .projects
+        .targets
         .as_ref()
         .and_then(|projects| projects.iter().find(|t| t.name == target))
         .with_context(|| format!("project '{}' not found in config", target))?;
@@ -213,7 +213,7 @@ pub async fn handle_context_edit(config: &OpsConfig, target: &str) -> Result<()>
 
 pub fn handle_context_print(config: &OpsConfig, target: &str) -> Result<()> {
     let project_cfg = config
-        .projects
+        .targets
         .as_ref()
         .and_then(|projects| projects.iter().find(|t| t.name == target))
         .with_context(|| format!("project '{}' not found in config", target))?;
@@ -453,7 +453,7 @@ pub async fn handle_runbook(config: &OpsConfig, action: RunbookActions) -> Resul
             println!("{} default runbook(s) installed.", count);
         }
         RunbookActions::Run { id, target } => {
-            let targets = config.projects.as_deref().unwrap_or_default();
+            let targets = config.targets.as_deref().unwrap_or_default();
             let t = targets
                 .iter()
                 .find(|t| t.name == target)
@@ -501,8 +501,8 @@ fn resolve_targets<'a>(
     config: &'a OpsConfig,
     target_name: Option<&str>,
     all: bool,
-) -> Result<Vec<&'a ProjectConfig>> {
-    let projects = config.projects.as_deref().unwrap_or_default();
+) -> Result<Vec<&'a TargetConfig>> {
+    let projects = config.targets.as_deref().unwrap_or_default();
 
     if projects.is_empty() {
         bail!("No [[projects]] defined in config. Add at least one project.");
@@ -535,16 +535,16 @@ fn resolve_targets<'a>(
 /// `opsclaw` user, generates a local ed25519 keypair, uploads the public
 /// key, and configures a minimal sudoers policy.
 pub async fn handle_infra_setup_user(config: &OpsConfig, target_name: &str) -> Result<()> {
-    let projects = config.projects.as_deref().unwrap_or_default();
+    let projects = config.targets.as_deref().unwrap_or_default();
     let target = projects
         .iter()
         .find(|t| t.name == target_name)
         .with_context(|| format!("Project '{target_name}' not found in config"))?;
 
-    if target.project_type != ProjectType::Ssh {
+    if target.connection_type != ConnectionType::Ssh {
         bail!(
             "infra setup-user only works on SSH projects (project '{target_name}' is {:?})",
-            target.project_type
+            target.connection_type
         );
     }
 
@@ -650,7 +650,7 @@ pub async fn handle_infra_setup_user(config: &OpsConfig, target_name: &str) -> R
 /// explicit administrator action, not an autonomous agent decision.
 fn make_runner_for_setup(
     config: &OpsConfig,
-    target: &ProjectConfig,
+    target: &TargetConfig,
 ) -> Result<Box<dyn CommandRunner>> {
     let host = target.host.clone().unwrap_or_default();
     let user = target.user.clone().unwrap_or_default();
@@ -664,7 +664,7 @@ fn make_runner_for_setup(
         .decrypt_secret(raw_key)
         .context("Failed to decrypt SSH private key")?;
 
-    let entry = ProjectEntry {
+    let entry = TargetEntry {
         name: target.name.clone(),
         host,
         port,
@@ -708,13 +708,13 @@ async fn shutdown_signal() {
 // ---------------------------------------------------------------------------
 
 /// Interactive wizard to add a new project (target) to the config.
-pub async fn handle_project_add(_config: &OpsConfig) -> Result<()> {
+pub async fn handle_target_add(_config: &OpsConfig) -> Result<()> {
     use crate::ops::setup::{
         load_existing_config, opsclaw_config_path, step_autonomy, step_data_sources,
-        step_discovery_scan, step_kubernetes_project, step_local_project, step_project_context,
-        step_project_type, step_ssh_project,
+        step_discovery_scan, step_kubernetes_target, step_local_target, step_target_context,
+        step_connection_type, step_ssh_target,
     };
-    use crate::ops_config::ProjectType;
+    use crate::ops_config::ConnectionType;
     use console::style;
 
     println!();
@@ -724,14 +724,14 @@ pub async fn handle_project_add(_config: &OpsConfig) -> Result<()> {
         style("Configure a new project for OpsClaw to monitor.").dim()
     );
 
-    let project_type = step_project_type()?;
-    let mut project_result = match project_type {
-        ProjectType::Ssh => step_ssh_project().await?,
-        ProjectType::Local => step_local_project()?,
-        ProjectType::Kubernetes => step_kubernetes_project()?,
+    let connection_type = step_connection_type()?;
+    let mut project_result = match connection_type {
+        ConnectionType::Ssh => step_ssh_target().await?,
+        ConnectionType::Local => step_local_target()?,
+        ConnectionType::Kubernetes => step_kubernetes_target()?,
     };
 
-    project_result.config.context_file = step_project_context(&project_result.config.name)?;
+    project_result.config.context_file = step_target_context(&project_result.config.name)?;
     project_result.config.autonomy = step_autonomy()?;
 
     if let Some(ref runner) = project_result.runner {
@@ -749,7 +749,7 @@ pub async fn handle_project_add(_config: &OpsConfig) -> Result<()> {
     let mut cfg = load_existing_config(&config_path);
     cfg.config_path = config_path.clone();
 
-    let projects = cfg.projects.get_or_insert_with(Vec::new);
+    let projects = cfg.targets.get_or_insert_with(Vec::new);
     let name = project_result.config.name.clone();
     if let Some(pos) = projects.iter().position(|t| t.name == name) {
         projects[pos] = project_result.config;
@@ -776,11 +776,11 @@ pub async fn handle_project_add(_config: &OpsConfig) -> Result<()> {
 }
 
 /// List all configured projects.
-pub fn handle_project_show(config: &OpsConfig, name: &str) -> Result<()> {
+pub fn handle_target_show(config: &OpsConfig, name: &str) -> Result<()> {
     use console::style;
 
     let project = config
-        .projects
+        .targets
         .as_deref()
         .unwrap_or_default()
         .iter()
@@ -792,7 +792,7 @@ pub fn handle_project_show(config: &OpsConfig, name: &str) -> Result<()> {
     println!(
         "  {} type: {}",
         style("›").cyan(),
-        format!("{:?}", project.project_type).to_lowercase()
+        format!("{:?}", project.connection_type).to_lowercase()
     );
     println!(
         "  {} autonomy: {}",
@@ -859,10 +859,10 @@ pub fn handle_project_show(config: &OpsConfig, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn handle_project_list(config: &OpsConfig) -> Result<()> {
+pub fn handle_target_list(config: &OpsConfig) -> Result<()> {
     use console::style;
 
-    let targets = config.projects.as_deref().unwrap_or_default();
+    let targets = config.targets.as_deref().unwrap_or_default();
     if targets.is_empty() {
         println!("No projects configured. Run 'opsclaw project add' to add one.");
         return Ok(());
@@ -872,7 +872,7 @@ pub fn handle_project_list(config: &OpsConfig) -> Result<()> {
     println!("  {}", style("Configured projects:").white().bold());
     println!();
     for t in targets {
-        let kind = format!("{:?}", t.project_type);
+        let kind = format!("{:?}", t.connection_type);
         let host = t.host.as_deref().unwrap_or("—");
         let autonomy = format!("{:?}", t.autonomy);
         println!(
@@ -890,7 +890,7 @@ pub fn handle_project_list(config: &OpsConfig) -> Result<()> {
 }
 
 /// Remove a project from the config by name.
-pub async fn handle_project_remove(config: &OpsConfig, name: &str) -> Result<()> {
+pub async fn handle_target_remove(config: &OpsConfig, name: &str) -> Result<()> {
     use crate::ops::setup::{load_existing_config, opsclaw_config_path};
     use console::style;
 
@@ -898,7 +898,7 @@ pub async fn handle_project_remove(config: &OpsConfig, name: &str) -> Result<()>
     let mut cfg = load_existing_config(&config_path);
     cfg.config_path = config_path.clone();
 
-    let targets = cfg.projects.get_or_insert_with(Vec::new);
+    let targets = cfg.targets.get_or_insert_with(Vec::new);
     let before = targets.len();
     targets.retain(|t| t.name != name);
 

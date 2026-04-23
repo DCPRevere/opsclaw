@@ -629,24 +629,24 @@ Property path tab completion is included automatically in `zeroclaw completions 
         plugin_command: PluginCommands,
     },
 
-    /// Manage projects (monitored projects)
+    /// Manage targets (monitored endpoints)
     #[command(long_about = "\
-Manage OpsClaw projects. A project represents a monitored environment —
-a server, a website, a Kubernetes cluster, or any target you want OpsClaw
-to watch.
+Manage OpsClaw targets. A target is a single addressable endpoint —
+a server, a website, a Kubernetes cluster, or any endpoint you want
+OpsClaw to watch.
 
 Examples:
-  opsclaw project add              # interactive wizard to add a project
-  opsclaw project list             # list all configured projects
-  opsclaw project remove mysite    # remove a project from config")]
-    Project {
+  opsclaw target add              # interactive wizard to add a target
+  opsclaw target list             # list all configured targets
+  opsclaw target remove mysite    # remove a target from config")]
+    Target {
         #[command(subcommand)]
-        project_command: ProjectCommands,
+        target_command: TargetCommands,
     },
 
     /// Run a discovery scan on a target host
     #[command(long_about = "\
-Run a discovery scan on one or all configured projects.
+Run a discovery scan on one or all configured targets.
 
 Connects to the target (via SSH or locally), inventories the host
 (OS, containers, services, ports, disk, memory, load), and saves
@@ -654,11 +654,11 @@ the snapshot to ~/.opsclaw/snapshots/<target>.json.
 
 Examples:
   opsclaw scan sacra              # scan a single target
-  opsclaw scan --all              # scan all configured projects")]
+  opsclaw scan --all              # scan all configured targets")]
     Scan {
-        /// Target name to scan (from config [[projects]])
+        /// Target name to scan (from config [[targets]])
         target: Option<String>,
-        /// Scan all configured projects
+        /// Scan all configured targets
         #[arg(long)]
         all: bool,
     },
@@ -747,29 +747,29 @@ enum ConfigCommands {
 }
 
 #[derive(Subcommand, Debug)]
-enum ProjectCommands {
-    /// Interactively add a new project (target) to OpsClaw
+enum TargetCommands {
+    /// Interactively add a new target to OpsClaw
     Add,
-    /// List all configured projects
+    /// List all configured targets
     List,
-    /// Remove a project from the config
+    /// Remove a target from the config
     Remove {
-        /// Project name to remove
+        /// Target name to remove
         name: String,
     },
-    /// Print a project's context file
+    /// Print a target's context file
     Context {
-        /// Project name
+        /// Target name
         name: String,
     },
-    /// Open a project's context file in $EDITOR for editing
+    /// Open a target's context file in $EDITOR for editing
     ContextEdit {
-        /// Project name
+        /// Target name
         name: String,
     },
-    /// Show all configuration for a project
+    /// Show all configuration for a target
     Show {
-        /// Project name
+        /// Target name
         name: String,
     },
 }
@@ -1753,17 +1753,17 @@ async fn main() -> Result<()> {
             }
         },
 
-        Commands::Project { project_command } => match project_command {
-            ProjectCommands::Add => Box::pin(ops_cli::handle_project_add(&ops_config)).await,
-            ProjectCommands::List => ops_cli::handle_project_list(&ops_config),
-            ProjectCommands::Remove { name } => {
-                Box::pin(ops_cli::handle_project_remove(&ops_config, &name)).await
+        Commands::Target { target_command } => match target_command {
+            TargetCommands::Add => Box::pin(ops_cli::handle_target_add(&ops_config)).await,
+            TargetCommands::List => ops_cli::handle_target_list(&ops_config),
+            TargetCommands::Remove { name } => {
+                Box::pin(ops_cli::handle_target_remove(&ops_config, &name)).await
             }
-            ProjectCommands::Context { name } => ops_cli::handle_context_print(&ops_config, &name),
-            ProjectCommands::ContextEdit { name } => {
+            TargetCommands::Context { name } => ops_cli::handle_context_print(&ops_config, &name),
+            TargetCommands::ContextEdit { name } => {
                 ops_cli::handle_context_edit(&ops_config, &name).await
             }
-            ProjectCommands::Show { name } => ops_cli::handle_project_show(&ops_config, &name),
+            TargetCommands::Show { name } => ops_cli::handle_target_show(&ops_config, &name),
         },
 
         Commands::Scan { target, all } => ops_cli::handle_scan(&ops_config, target, all).await,

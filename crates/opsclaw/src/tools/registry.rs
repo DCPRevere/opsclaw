@@ -12,6 +12,7 @@ use crate::tools::dns_tool::DnsTool;
 use crate::tools::elk_tool::{ElkEndpoint, ElkTool};
 use crate::tools::firewall_tool::{FirewallTool, FirewallToolConfig};
 use crate::tools::github_tool::{GithubTool, GithubToolConfig};
+use crate::tools::jaeger_tool::{JaegerEndpoint, JaegerTool};
 use crate::tools::loki_tool::{LokiEndpoint, LokiTool};
 use crate::tools::monitor_tool::MonitorTool;
 use crate::tools::pagerduty_tool::{PagerDutyTool, PagerDutyToolConfig};
@@ -160,6 +161,24 @@ pub fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool>>> {
         cfg.default_vhost = rmq.default_vhost.clone();
         cfg.autonomy = rmq.autonomy;
         tools.push(Box::new(RabbitMqTool::new(cfg)));
+    }
+
+    // Jaeger.
+    if let Some(eps) = config.jaeger.as_ref() {
+        let endpoints: Vec<JaegerEndpoint> = eps
+            .iter()
+            .map(|e| JaegerEndpoint {
+                name: e.name.clone(),
+                url: e.url.clone(),
+                bearer_token: e
+                    .bearer_token
+                    .as_ref()
+                    .and_then(|t| config.decrypt_secret(t).ok()),
+            })
+            .collect();
+        if !endpoints.is_empty() {
+            tools.push(Box::new(JaegerTool::new(endpoints)));
+        }
     }
 
     // Azure Service Bus.

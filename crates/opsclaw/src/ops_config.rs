@@ -63,6 +63,18 @@ pub struct OpsConfig {
     /// Azure Service Bus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure_service_bus: Option<AzureServiceBusConfig>,
+
+    /// Jaeger query endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jaeger: Option<Vec<JaegerEndpointConfig>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct JaegerEndpointConfig {
+    pub name: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -309,19 +321,15 @@ impl OpsConfig {
 }
 
 /// Three user-facing modes: `dry-run`, `approve`, `auto`.
-/// Old names (`observe`, `suggest`, `act_on_known`, `full_auto`) are accepted
-/// for backward compatibility and mapped to the closest new mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OpsClawAutonomy {
     /// Log proposed actions without executing. Read-only commands still run.
-    #[serde(alias = "observe", alias = "suggest")]
     DryRun,
     /// Propose actions and wait for user approval before executing.
     #[default]
     Approve,
     /// Execute remediations automatically without asking.
-    #[serde(alias = "act_on_known", alias = "full_auto")]
     Auto,
 }
 
@@ -371,16 +379,38 @@ pub struct TargetConfig {
     pub data_sources: Option<crate::ops::data_sources::DataSourcesConfig>,
     /// Optional escalation policy for tiered on-call notification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub escalation: Option<serde_json::Value>,
+    pub escalation: Option<EscalationPolicy>,
     /// Optional database instances for diagnostic health queries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub databases: Option<serde_json::Value>,
+    pub databases: Option<Vec<crate::tools::db_diagnostic::DatabaseConfig>>,
     /// Path to a kubeconfig file (Kubernetes projects only; defaults to ~/.kube/config).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kubeconfig: Option<String>,
     /// Default namespace for Kubernetes operations (defaults to all namespaces).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+}
+
+/// Tiered on-call policy: who to page first, who to escalate to, and how long
+/// to wait between tiers. Consumed by the notifier when an alert or failed
+/// action requires human attention.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct EscalationPolicy {
+    /// Primary contact (name, channel id, or handle depending on transport).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<String>,
+    /// Fallback contact if the primary does not respond.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<String>,
+    /// Final escalation contact (e.g. a manager or incident commander).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager: Option<String>,
+    /// Minutes to wait before escalating from primary to secondary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_after_minutes: Option<u32>,
+    /// Minutes to wait before escalating from secondary to manager.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_after_minutes: Option<u32>,
 }
 
 /// Configuration for a single external probe.
@@ -437,32 +467,15 @@ fn default_warn_days() -> u32 {
 }
 
 /// Notification delivery settings for OpsClaw alerts.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct OpsClawNotificationConfig {
     pub telegram_bot_token: Option<String>,
     pub telegram_chat_id: Option<String>,
     pub slack_webhook_url: Option<String>,
     pub webhook_url: Option<String>,
     pub webhook_bearer_token: Option<String>,
-    #[serde(default = "default_min_severity_str")]
-    pub min_severity: String,
-}
-
-impl Default for OpsClawNotificationConfig {
-    fn default() -> Self {
-        Self {
-            telegram_bot_token: None,
-            telegram_chat_id: None,
-            slack_webhook_url: None,
-            webhook_url: None,
-            webhook_bearer_token: None,
-            min_severity: "warning".to_string(),
-        }
-    }
-}
-
-fn default_min_severity_str() -> String {
-    "warning".to_string()
+    #[serde(default)]
+    pub min_severity: AlertSeverity,
 }
 
 /// LLM-based diagnosis settings for OpsClaw monitoring alerts.
@@ -475,20 +488,13 @@ pub struct DiagnosisConfig {
 }
 
 /// Alert severity level (shared between config and monitoring).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
 pub enum AlertSeverity {
     Info,
+    #[default]
     Warning,
     Critical,
-}
-
-/// Parse a severity string into an `AlertSeverity` value.
-pub fn parse_min_severity(s: &str) -> AlertSeverity {
-    match s.to_lowercase().as_str() {
-        "info" => AlertSeverity::Info,
-        "critical" => AlertSeverity::Critical,
-        _ => AlertSeverity::Warning,
-    }
 }
 
 /// A capability advertised by an A2A agent.

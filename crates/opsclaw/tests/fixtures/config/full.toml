@@ -33,6 +33,7 @@ manager_after_minutes = 30
 name = "k8s-cluster"
 type = "kubernetes"
 kubeconfig = "~/.kube/prod-eks"
+context = "prod-us-east"
 namespace = "default"
 autonomy = "approve"
 

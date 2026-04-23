@@ -37,7 +37,7 @@ pub struct K8sEvent {
 /// substitute a fake.
 #[async_trait::async_trait]
 pub trait KubeClientFactory: Send + Sync {
-    async fn build(&self, kubeconfig: Option<&str>) -> Result<KubeClient>;
+    async fn build(&self, kubeconfig: Option<&str>, context: Option<&str>) -> Result<KubeClient>;
 }
 
 /// Default factory that creates a real client from the environment or a
@@ -46,8 +46,8 @@ pub struct DefaultKubeClientFactory;
 
 #[async_trait::async_trait]
 impl KubeClientFactory for DefaultKubeClientFactory {
-    async fn build(&self, kubeconfig: Option<&str>) -> Result<KubeClient> {
-        KubeClient::new(kubeconfig).await
+    async fn build(&self, kubeconfig: Option<&str>, context: Option<&str>) -> Result<KubeClient> {
+        KubeClient::new(kubeconfig, context).await
     }
 }
 
@@ -56,12 +56,18 @@ impl KubeClient {
     ///
     /// If `kubeconfig` is `Some`, that path is used; otherwise the default
     /// kubeconfig resolution order applies (~/.kube/config, in-cluster).
-    pub async fn new(kubeconfig: Option<&str>) -> Result<Self> {
+    /// If `context` is `Some`, that kubeconfig context is selected; otherwise
+    /// the kubeconfig's `current-context` applies.
+    pub async fn new(kubeconfig: Option<&str>, context: Option<&str>) -> Result<Self> {
+        let options = KubeConfigOptions {
+            context: context.map(String::from),
+            ..Default::default()
+        };
         let config = match kubeconfig {
             Some(path) => {
                 let kubeconfig = kube::config::Kubeconfig::read_from(path)
                     .context("failed to read kubeconfig")?;
-                kube::Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+                kube::Config::from_custom_kubeconfig(kubeconfig, &options)
                     .await
                     .context("failed to build kube config")?
             }

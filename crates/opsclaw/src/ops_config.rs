@@ -180,17 +180,26 @@ impl DerefMut for OpsConfig {
 }
 
 impl OpsConfig {
-    /// Decrypt a secret value using the config's `SecretStore`.
+    /// Resolve a secret reference from config to its plaintext value.
     ///
-    /// If the value is not encrypted (no `enc2:` prefix) it is returned as-is.
-    pub fn decrypt_secret(&self, value: &str) -> Result<String> {
+    /// Accepts any of: `enc2:<hex>` (encrypted store), `enc:<hex>` (legacy
+    /// XOR, auto-upgraded on next save), `env:<NAME>` (process env var),
+    /// `k8s:<ns>/<name>/<key>` (mounted Secret volume, kube API fallback),
+    /// or a bare plaintext value (returned as-is for backward compat).
+    ///
+    /// Async because the k8s mounted-file path does real I/O; the other
+    /// backends are cheap.
+    pub async fn decrypt_secret(&self, value: &str) -> Result<String> {
         let config_dir = self
             .inner
             .config_path
             .parent()
             .context("config path has no parent")?;
-        let store = zeroclaw::security::SecretStore::new(config_dir, self.inner.secrets.encrypt);
-        store.decrypt(value)
+        let composite = crate::secrets::CompositeResolver::default_for(
+            config_dir,
+            self.inner.secrets.encrypt,
+        );
+        composite.resolve(value).await
     }
 
     /// Serialize the full `OpsConfig` (including opsclaw-specific fields) to
@@ -215,40 +224,40 @@ impl OpsConfig {
             );
             for target in targets.iter_mut() {
                 if let Some(ref val) = target.key_secret {
-                    if !zeroclaw::security::SecretStore::is_encrypted(val) {
+                    if !crate::secrets::is_reference(val) {
                         target.key_secret = Some(store.encrypt(val)?);
                     }
                 }
                 if let Some(ref mut ds) = target.data_sources {
                     if let Some(ref mut seq) = ds.seq {
                         if let Some(ref val) = seq.api_key {
-                            if !zeroclaw::security::SecretStore::is_encrypted(val) {
+                            if !crate::secrets::is_reference(val) {
                                 seq.api_key = Some(store.encrypt(val)?);
                             }
                         }
                     }
                     if let Some(ref mut github) = ds.github {
                         if let Some(ref val) = github.token {
-                            if !zeroclaw::security::SecretStore::is_encrypted(val) {
+                            if !crate::secrets::is_reference(val) {
                                 github.token = Some(store.encrypt(val)?);
                             }
                         }
                     }
                     if let Some(ref mut prometheus) = ds.prometheus {
                         if let Some(ref val) = prometheus.token {
-                            if !zeroclaw::security::SecretStore::is_encrypted(val) {
+                            if !crate::secrets::is_reference(val) {
                                 prometheus.token = Some(store.encrypt(val)?);
                             }
                         }
                     }
                     if let Some(ref mut es) = ds.elasticsearch {
                         if let Some(ref val) = es.api_key {
-                            if !zeroclaw::security::SecretStore::is_encrypted(val) {
+                            if !crate::secrets::is_reference(val) {
                                 es.api_key = Some(store.encrypt(val)?);
                             }
                         }
                         if let Some(ref val) = es.password {
-                            if !zeroclaw::security::SecretStore::is_encrypted(val) {
+                            if !crate::secrets::is_reference(val) {
                                 es.password = Some(store.encrypt(val)?);
                             }
                         }
@@ -264,17 +273,17 @@ impl OpsConfig {
                 self.inner.secrets.encrypt,
             );
             if let Some(ref val) = notif.telegram_bot_token {
-                if !zeroclaw::security::SecretStore::is_encrypted(val) {
+                if !crate::secrets::is_reference(val) {
                     notif.telegram_bot_token = Some(store.encrypt(val)?);
                 }
             }
             if let Some(ref val) = notif.slack_webhook_url {
-                if !zeroclaw::security::SecretStore::is_encrypted(val) {
+                if !crate::secrets::is_reference(val) {
                     notif.slack_webhook_url = Some(store.encrypt(val)?);
                 }
             }
             if let Some(ref val) = notif.webhook_bearer_token {
-                if !zeroclaw::security::SecretStore::is_encrypted(val) {
+                if !crate::secrets::is_reference(val) {
                     notif.webhook_bearer_token = Some(store.encrypt(val)?);
                 }
             }
@@ -287,7 +296,7 @@ impl OpsConfig {
                 self.inner.secrets.encrypt,
             );
             if let Some(ref val) = to_save.diagnosis.api_key {
-                if !zeroclaw::security::SecretStore::is_encrypted(val) {
+                if !crate::secrets::is_reference(val) {
                     to_save.diagnosis.api_key = Some(store.encrypt(val)?);
                 }
             }
@@ -300,13 +309,13 @@ impl OpsConfig {
                 self.inner.secrets.encrypt,
             );
             if !a2a.server.token.is_empty()
-                && !zeroclaw::security::SecretStore::is_encrypted(&a2a.server.token)
+                && !crate::secrets::is_reference(&a2a.server.token)
             {
                 a2a.server.token = store.encrypt(&a2a.server.token)?;
             }
             for peer in &mut a2a.peers {
                 if !peer.token.is_empty()
-                    && !zeroclaw::security::SecretStore::is_encrypted(&peer.token)
+                    && !crate::secrets::is_reference(&peer.token)
                 {
                     peer.token = store.encrypt(&peer.token)?;
                 }
@@ -383,9 +392,14 @@ pub struct TargetConfig {
     /// Optional database instances for diagnostic health queries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub databases: Option<Vec<crate::tools::db_diagnostic::DatabaseConfig>>,
-    /// Path to a kubeconfig file (Kubernetes projects only; defaults to ~/.kube/config).
+    /// Path to a kubeconfig file (Kubernetes targets only; defaults to ~/.kube/config).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kubeconfig: Option<String>,
+    /// Kubeconfig context to select (Kubernetes targets only; defaults to the
+    /// kubeconfig's `current-context`). Required to disambiguate when the
+    /// kubeconfig contains multiple clusters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     /// Default namespace for Kubernetes operations (defaults to all namespaces).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -631,6 +645,7 @@ mod golden_tests {
         assert_eq!(k8s.name, "k8s-cluster");
         assert!(matches!(k8s.connection_type, ConnectionType::Kubernetes));
         assert_eq!(k8s.kubeconfig.as_deref(), Some("~/.kube/prod-eks"));
+        assert_eq!(k8s.context.as_deref(), Some("prod-us-east"));
         assert_eq!(k8s.namespace.as_deref(), Some("default"));
 
         let notif = cfg.notifications.as_ref().expect("notifications present");

@@ -54,7 +54,10 @@ use crate::tools::ssh_tool::{TargetEntry, RealSshExecutor};
 ///
 /// In `DryRun` mode the runner is wrapped with [`DryRunCommandRunner`] so that
 /// write commands are logged instead of executed.
-fn make_runner(config: &OpsConfig, project: &TargetConfig) -> Result<Box<dyn CommandRunner>> {
+async fn make_runner(
+    config: &OpsConfig,
+    project: &TargetConfig,
+) -> Result<Box<dyn CommandRunner>> {
     let runner: Box<dyn CommandRunner> = match project.connection_type {
         ConnectionType::Local => Box::new(LocalCommandRunner::new(
             project.autonomy,
@@ -74,6 +77,7 @@ fn make_runner(config: &OpsConfig, project: &TargetConfig) -> Result<Box<dyn Com
                 .context("SSH project requires key_secret (encrypted PEM in config)")?;
             let key_pem = config
                 .decrypt_secret(raw_key)
+                .await
                 .context("Failed to decrypt SSH private key")?;
 
             let entry = TargetEntry {
@@ -112,10 +116,10 @@ fn opsclaw_dir() -> Result<std::path::PathBuf> {
 /// projects and a [`CommandRunner`] for everything else.
 pub async fn scan_target(config: &OpsConfig, project: &TargetConfig) -> Result<TargetSnapshot> {
     if project.connection_type == ConnectionType::Kubernetes {
-        let kube = KubeClient::new(project.kubeconfig.as_deref()).await?;
+        let kube = KubeClient::new(project.kubeconfig.as_deref(), project.context.as_deref()).await?;
         return kube.discover_snapshot().await;
     }
-    let runner = make_runner(config, project)?;
+    let runner = make_runner(config, project).await?;
     discovery::run_discovery_scan(runner.as_ref()).await
 }
 
@@ -333,7 +337,7 @@ pub async fn handle_probe(
 
     for t in &targets {
         println!("--- Probes for project: {} ---", t.name);
-        let runner = make_runner(config, t)?;
+        let runner = make_runner(config, t).await?;
 
         // Gather configured + auto-discovered probes
         let configured = t.probes.clone().unwrap_or_default();
@@ -458,7 +462,7 @@ pub async fn handle_runbook(config: &OpsConfig, action: RunbookActions) -> Resul
                 .iter()
                 .find(|t| t.name == target)
                 .with_context(|| format!("Project '{}' not found in config", target))?;
-            let runner = make_runner(config, t)?;
+            let runner = make_runner(config, t).await?;
             let rb = store.load(&id)?;
             println!("Executing runbook '{}' on project '{}'...", rb.name, target);
             let exec = runbooks::execute_runbook(runner.as_ref(), &rb, &target, &[]).await?;
@@ -478,7 +482,7 @@ pub async fn handle_sources(config: &OpsConfig, target: Option<String>, all: boo
 
         let ds_cfg = t.data_sources.clone().unwrap_or_default();
 
-        let runner: Option<Box<dyn CommandRunner>> = match make_runner(config, t) {
+        let runner: Option<Box<dyn CommandRunner>> = match make_runner(config, t).await {
             Ok(r) => Some(r),
             Err(e) => {
                 tracing::warn!("could not create runner for {}: {e:#}", t.name);
@@ -549,7 +553,7 @@ pub async fn handle_infra_setup_user(config: &OpsConfig, target_name: &str) -> R
     }
 
     // Build a runner that bypasses dry-run (this is an explicit admin action).
-    let runner = make_runner_for_setup(config, target)?;
+    let runner = make_runner_for_setup(config, target).await?;
 
     println!("Connecting to {target_name}…");
 
@@ -648,7 +652,7 @@ pub async fn handle_infra_setup_user(config: &OpsConfig, target_name: &str) -> R
 ///
 /// Uses `Auto` autonomy so that write commands are not blocked — this is an
 /// explicit administrator action, not an autonomous agent decision.
-fn make_runner_for_setup(
+async fn make_runner_for_setup(
     config: &OpsConfig,
     target: &TargetConfig,
 ) -> Result<Box<dyn CommandRunner>> {
@@ -662,6 +666,7 @@ fn make_runner_for_setup(
         .context("SSH project requires key_secret (encrypted PEM in config)")?;
     let key_pem = config
         .decrypt_secret(raw_key)
+        .await
         .context("Failed to decrypt SSH private key")?;
 
     let entry = TargetEntry {

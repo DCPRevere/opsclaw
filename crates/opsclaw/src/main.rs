@@ -136,6 +136,7 @@ mod openshell;
 mod ops;
 mod ops_cli;
 mod ops_config;
+mod secrets;
 mod tools;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -1154,7 +1155,9 @@ async fn main() -> Result<()> {
                     .and_then(|p| p.temperature)
                     .unwrap_or(0.7)
             });
-            let extra_tools = crate::tools::registry::create_opsclaw_tools(&ops_config).ok();
+            let extra_tools = crate::tools::registry::create_opsclaw_tools(&ops_config)
+                .await
+                .ok();
 
             Box::pin(agent::run(
                 config,

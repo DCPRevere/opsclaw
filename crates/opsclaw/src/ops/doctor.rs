@@ -787,6 +787,7 @@ mod tests {
                 escalation: None,
                 databases: None,
                 kubeconfig: None,
+                context: None,
                 namespace: None,
             }]),
             ..OpsConfig::default()

@@ -236,6 +236,7 @@ pub async fn step_ssh_target() -> Result<TargetResult> {
         escalation: None,
         databases: None,
         kubeconfig: None,
+        context: None,
         namespace: None,
     };
 
@@ -270,6 +271,7 @@ pub fn step_local_target() -> Result<TargetResult> {
         escalation: None,
         databases: None,
         kubeconfig: None,
+        context: None,
         namespace: None,
     };
 
@@ -313,6 +315,7 @@ pub fn step_kubernetes_target() -> Result<TargetResult> {
         } else {
             Some(kubeconfig)
         },
+        context: None,
         namespace: if namespace.is_empty() {
             None
         } else {

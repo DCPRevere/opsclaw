@@ -21,7 +21,7 @@ pub fn register_sre_tools(ops_config: OpsConfig) {
     zeroclaw_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(move |_peripherals_cfg| {
         let ops = ops_config.clone();
         Box::pin(async move {
-            match create_opsclaw_tools(&ops) {
+            match create_opsclaw_tools(&ops).await {
                 Ok(tools) => Ok(tools),
                 Err(e) => {
                     tracing::warn!(

@@ -18,7 +18,7 @@ pub struct OpsConfig {
 
     /// SRE projects (monitored environments).
     #[serde(rename = "projects", default, skip_serializing_if = "Option::is_none")]
-    pub projects: Option<Vec<ProjectConfig>>,
+    pub projects: Option<Vec<TargetConfig>>,
 
     /// Notification delivery settings for alerts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,6 +47,68 @@ pub struct OpsConfig {
     /// PagerDuty configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pagerduty: Option<PagerDutyConfig>,
+
+    /// GitHub configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GithubConfig>,
+
+    /// Cloudflare configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflare: Option<CloudflareConfig>,
+
+    /// RabbitMQ management API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rabbitmq: Option<RabbitMqConfig>,
+
+    /// Azure Service Bus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure_service_bus: Option<AzureServiceBusConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GithubConfig {
+    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_repo: Option<String>,
+    #[serde(default)]
+    pub autonomy: OpsClawAutonomy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CloudflareConfig {
+    pub api_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_zone_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_account_id: Option<String>,
+    #[serde(default)]
+    pub autonomy: OpsClawAutonomy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RabbitMqConfig {
+    pub api_base: String,
+    pub username: String,
+    pub password: String,
+    #[serde(default = "default_vhost")]
+    pub default_vhost: String,
+    #[serde(default)]
+    pub autonomy: OpsClawAutonomy,
+}
+
+fn default_vhost() -> String {
+    "/".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AzureServiceBusConfig {
+    pub namespace: String,
+    pub sas_key_name: String,
+    pub sas_key: String,
+    #[serde(default)]
+    pub autonomy: OpsClawAutonomy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -266,7 +328,7 @@ pub enum OpsClawAutonomy {
 /// Connection type for an OpsClaw project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum ProjectType {
+pub enum ConnectionType {
     /// SSH connection to a remote host.
     Ssh,
     /// The local machine.
@@ -277,12 +339,12 @@ pub enum ProjectType {
 
 /// Configuration for a single OpsClaw SRE project (monitored environment).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ProjectConfig {
+pub struct TargetConfig {
     /// Unique name for this project.
     pub name: String,
     /// Connection type: `ssh` or `local`.
     #[serde(rename = "type")]
-    pub project_type: ProjectType,
+    pub connection_type: ConnectionType,
     /// Remote hostname or IP (required for SSH projects).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,

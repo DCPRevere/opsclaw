@@ -4,15 +4,20 @@
 use anyhow::Result;
 use zeroclaw::tools::Tool;
 
-use crate::ops_config::{OpsConfig, ProjectType};
+use crate::ops_config::{OpsConfig, ConnectionType};
+use crate::tools::azure_service_bus_tool::{AzureServiceBusTool, AzureServiceBusToolConfig};
 use crate::tools::cert_tool::CertTool;
+use crate::tools::cloudflare_tool::{CloudflareTool, CloudflareToolConfig};
 use crate::tools::dns_tool::DnsTool;
 use crate::tools::elk_tool::{ElkEndpoint, ElkTool};
+use crate::tools::firewall_tool::{FirewallTool, FirewallToolConfig};
+use crate::tools::github_tool::{GithubTool, GithubToolConfig};
 use crate::tools::loki_tool::{LokiEndpoint, LokiTool};
 use crate::tools::monitor_tool::MonitorTool;
 use crate::tools::pagerduty_tool::{PagerDutyTool, PagerDutyToolConfig};
 use crate::tools::prometheus_tool::{PrometheusEndpoint, PrometheusTool};
-use crate::tools::ssh_tool::{ProjectEntry, SshTool, SshToolConfig};
+use crate::tools::rabbitmq_tool::{RabbitMqTool, RabbitMqToolConfig};
+use crate::tools::ssh_tool::{TargetEntry, SshTool, SshToolConfig};
 use crate::tools::systemd_tool::{SystemdTool, SystemdToolConfig};
 
 /// Build OpsClaw-specific tools from the current configuration.
@@ -22,13 +27,16 @@ use crate::tools::systemd_tool::{SystemdTool, SystemdToolConfig};
 pub fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool>>> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
-    // SSH + systemd share the same project entries.
+    // SSH + systemd + firewall share the same project entries.
     let ssh_projects = build_ssh_entries(config)?;
     if !ssh_projects.is_empty() {
         tools.push(Box::new(SshTool::new(SshToolConfig {
             projects: ssh_projects.clone(),
         })));
         tools.push(Box::new(SystemdTool::new(SystemdToolConfig {
+            projects: ssh_projects.clone(),
+        })));
+        tools.push(Box::new(FirewallTool::new(FirewallToolConfig {
             projects: ssh_projects,
         })));
     }
@@ -116,16 +124,69 @@ pub fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool>>> {
         }
     }
 
+    // GitHub.
+    if let Some(gh) = config.github.as_ref() {
+        if let Ok(token) = config.decrypt_secret(&gh.token) {
+            let mut cfg = GithubToolConfig::new(token);
+            cfg.default_owner = gh.default_owner.clone();
+            cfg.default_repo = gh.default_repo.clone();
+            cfg.autonomy = gh.autonomy;
+            tools.push(Box::new(GithubTool::new(cfg)));
+        } else {
+            tracing::warn!("Skipping GitHub tool — failed to decrypt token");
+        }
+    }
+
+    // Cloudflare.
+    if let Some(cf) = config.cloudflare.as_ref() {
+        if let Ok(tok) = config.decrypt_secret(&cf.api_token) {
+            let mut cfg = CloudflareToolConfig::new(tok);
+            cfg.default_zone_id = cf.default_zone_id.clone();
+            cfg.default_account_id = cf.default_account_id.clone();
+            cfg.autonomy = cf.autonomy;
+            tools.push(Box::new(CloudflareTool::new(cfg)));
+        } else {
+            tracing::warn!("Skipping Cloudflare tool — failed to decrypt api_token");
+        }
+    }
+
+    // RabbitMQ.
+    if let Some(rmq) = config.rabbitmq.as_ref() {
+        let password = config
+            .decrypt_secret(&rmq.password)
+            .unwrap_or_else(|_| rmq.password.clone());
+        let mut cfg =
+            RabbitMqToolConfig::new(rmq.api_base.clone(), rmq.username.clone(), password);
+        cfg.default_vhost = rmq.default_vhost.clone();
+        cfg.autonomy = rmq.autonomy;
+        tools.push(Box::new(RabbitMqTool::new(cfg)));
+    }
+
+    // Azure Service Bus.
+    if let Some(sb) = config.azure_service_bus.as_ref() {
+        if let Ok(key) = config.decrypt_secret(&sb.sas_key) {
+            let mut cfg = AzureServiceBusToolConfig::new(
+                sb.namespace.clone(),
+                sb.sas_key_name.clone(),
+                key,
+            );
+            cfg.autonomy = sb.autonomy;
+            tools.push(Box::new(AzureServiceBusTool::new(cfg)));
+        } else {
+            tracing::warn!("Skipping Azure Service Bus tool — failed to decrypt sas_key");
+        }
+    }
+
     Ok(tools)
 }
 
 /// Extract SSH project entries from config, decrypting keys as needed.
-fn build_ssh_entries(config: &OpsConfig) -> Result<Vec<ProjectEntry>> {
+fn build_ssh_entries(config: &OpsConfig) -> Result<Vec<TargetEntry>> {
     let projects = config.projects.as_deref().unwrap_or_default();
     let mut entries = Vec::new();
 
     for project in projects {
-        if project.project_type != ProjectType::Ssh {
+        if project.connection_type != ConnectionType::Ssh {
             continue;
         }
 
@@ -153,7 +214,7 @@ fn build_ssh_entries(config: &OpsConfig) -> Result<Vec<ProjectEntry>> {
             }
         };
 
-        entries.push(ProjectEntry {
+        entries.push(TargetEntry {
             name: project.name.clone(),
             host,
             port: project.port.unwrap_or(22),

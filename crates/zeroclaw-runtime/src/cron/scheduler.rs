@@ -1159,8 +1159,10 @@ mod tests {
 
     #[tokio::test]
     async fn persist_job_result_delivery_stubbed_succeeds() {
-        // Delivery is stubbed (moved to zeroclaw-channels orchestrator).
-        // This test verifies the stub returns Ok, so persist_job_result succeeds.
+        // Delivery is stubbed (moved to zeroclaw-channels orchestrator) and
+        // `deliver_announcement` errors when no handler is registered. With
+        // `best_effort: true`, the delivery error is logged but does not flip
+        // the run to failure — so persist_job_result still succeeds.
         let tmp = TempDir::new().unwrap();
         let config = test_config(&tmp).await;
         let job = cron::add_agent_job(
@@ -1177,7 +1179,7 @@ mod tests {
                 mode: "announce".into(),
                 channel: Some("telegram".into()),
                 to: Some("123456".into()),
-                best_effort: false,
+                best_effort: true,
             }),
             false,
             None,

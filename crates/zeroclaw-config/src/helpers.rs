@@ -146,6 +146,17 @@ fn parse_prop_value(value_str: &str, kind: PropKind) -> anyhow::Result<toml::Val
         }
         PropKind::String | PropKind::Enum => Ok(toml::Value::String(value_str.to_string())),
         PropKind::StringArray => {
+            // Accept TOML-array form like `["git", "npm"]` (round-trip from
+            // get_prop) or a plain comma-separated list like `git, npm`.
+            let trimmed = value_str.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                let toml_doc = format!("v = {trimmed}");
+                if let Ok(parsed) = toml::from_str::<toml::Table>(&toml_doc) {
+                    if let Some(toml::Value::Array(items)) = parsed.get("v") {
+                        return Ok(toml::Value::Array(items.clone()));
+                    }
+                }
+            }
             let items = value_str
                 .split(',')
                 .map(|s| toml::Value::String(s.trim().to_string()))

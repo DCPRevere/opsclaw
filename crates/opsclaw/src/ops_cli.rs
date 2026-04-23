@@ -1,4 +1,8 @@
-//! OpsClaw CLI command handlers: scan, monitor, watch.
+//! OpsClaw CLI command handlers: scan, probe, runbook, and friends.
+//!
+//! The autonomous monitoring loop lives in the upstream zeroclaw daemon
+//! (heartbeat subsystem). OpsClaw hooks in via the peripheral-tools
+//! factory — see `crate::daemon_ext`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -252,7 +256,7 @@ pub fn handle_dry_run_log(tail: Option<usize>, clear: bool) -> Result<()> {
     }
 
     if !log_path.exists() {
-        println!("No dry-run log yet. Set a project's autonomy to 'dry-run' and run a scan or monitor cycle.");
+        println!("No dry-run log yet. Set a project's autonomy to 'dry-run' and run a scan or start the daemon.");
         return Ok(());
     }
 
@@ -291,99 +295,6 @@ pub async fn handle_scan(config: &OpsConfig, target: Option<String>, all: bool) 
 
         let md = discovery::snapshot_to_markdown(&snapshot);
         println!("{md}");
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// monitor command
-// ---------------------------------------------------------------------------
-
-pub async fn handle_monitor(
-    config: &OpsConfig,
-    target: Option<String>,
-    interval_secs: u64,
-    once: bool,
-    _openshell_ctx: &crate::openshell::OpenShellContext,
-) -> Result<()> {
-    let targets = resolve_targets(config, target.as_deref(), target.is_none())?;
-
-    if targets.is_empty() {
-        bail!("No projects configured. Add [[projects]] to your config.");
-    }
-
-    let project_names: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
-
-    loop {
-        for name in &project_names {
-            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-
-            let prompt = format!(
-                "You are OpsClaw, an autonomous SRE agent.\n\n\
-                 Run a health check on project '{name}' using the monitor tool. \
-                 Examine the snapshot carefully. If anything looks concerning \
-                 (high memory/disk/load, missing containers or services, \
-                 unusual state), investigate further using the ssh tool. \
-                 Store important observations in memory for future reference.\n\n\
-                 If everything looks healthy, say so briefly."
-            );
-
-            let extra_tools = crate::tools::registry::create_opsclaw_tools(config).ok();
-            let allowed = Some(vec![
-                "ssh".to_string(),
-                "monitor".to_string(),
-                "memory_store".to_string(),
-                "memory_recall".to_string(),
-            ]);
-
-            println!("[{ts}] Checking {name}...");
-
-            match Box::pin(zeroclaw::agent::run(
-                config.inner.clone(),
-                Some(prompt),
-                None,
-                config.diagnosis.model.clone(),
-                0.0,
-                vec![],
-                false,
-                None,
-                allowed,
-                extra_tools,
-            ))
-            .await
-            {
-                Ok(response) => {
-                    println!(
-                        "[{ts}] {name}: {}",
-                        response.lines().next().unwrap_or(&response)
-                    );
-                    if response.to_lowercase().contains("concern")
-                        || response.to_lowercase().contains("critical")
-                        || response.to_lowercase().contains("warning")
-                        || response.to_lowercase().contains("issue")
-                        || response.to_lowercase().contains("alert")
-                    {
-                        eprintln!("{response}");
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[{ts}] {name}: agent error — {e}");
-                }
-            }
-        }
-
-        if once {
-            break;
-        }
-
-        tokio::select! {
-            () = tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)) => {}
-            () = shutdown_signal() => {
-                eprintln!("Shutting down OpsClaw...");
-                break;
-            }
-        }
     }
 
     Ok(())
@@ -857,7 +768,7 @@ pub async fn handle_project_add(_config: &OpsConfig) -> Result<()> {
     );
     println!(
         "  {}",
-        style("Run 'opsclaw monitor --all' to start monitoring.").dim()
+        style("Run 'opsclaw daemon' to start the autonomous loop.").dim()
     );
     println!();
 

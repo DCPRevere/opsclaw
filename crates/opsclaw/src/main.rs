@@ -130,6 +130,7 @@ pub use zeroclaw::{
 };
 
 // OpsClaw-specific modules
+mod daemon_ext;
 mod onboard;
 mod openshell;
 mod ops;
@@ -660,31 +661,6 @@ Examples:
         /// Scan all configured projects
         #[arg(long)]
         all: bool,
-    },
-
-    /// Run the monitoring loop comparing live state against baselines
-    #[command(long_about = "\
-Run the monitoring loop for configured projects.
-
-For each target, runs a discovery scan and compares the result against
-the saved baseline snapshot. If no baseline exists, the first scan
-establishes one. Alerts are logged to ~/.opsclaw/monitor.log.
-
-Examples:
-  opsclaw monitor                        # all projects, 5min interval
-  opsclaw monitor --target sacra         # single target
-  opsclaw monitor --interval 60          # check every 60 seconds
-  opsclaw monitor --once                 # single check, then exit")]
-    Monitor {
-        /// Monitor a specific target only
-        #[arg(long)]
-        target: Option<String>,
-        /// Check interval in seconds (default: 300)
-        #[arg(long, default_value = "300")]
-        interval: u64,
-        /// Run one cycle and exit
-        #[arg(long)]
-        once: bool,
     },
 
     /// Manage runbooks (remediation procedures)
@@ -1315,6 +1291,19 @@ async fn main() -> Result<()> {
             } else {
                 info!("🧠 Starting OpsClaw Daemon on {host}:{port}");
             }
+
+            // Make opsclaw's SRE tools available to every agent run the
+            // runtime launches — heartbeat, gateway, channels.
+            daemon_ext::register_sre_tools(ops_config.clone());
+
+            // Seed HEARTBEAT.md with one scan task per configured project
+            // so the heartbeat worker has something to do out of the box.
+            if let Err(e) =
+                daemon_ext::seed_heartbeat_file(&config.workspace_dir, &ops_config).await
+            {
+                warn!("Failed to seed HEARTBEAT.md: {e}");
+            }
+
             let subsystems = daemon::DaemonSubsystems {
                 gateway_start: Some(Box::new(|host, port, config, tx| {
                     Box::pin(async move {
@@ -1778,15 +1767,6 @@ async fn main() -> Result<()> {
         },
 
         Commands::Scan { target, all } => ops_cli::handle_scan(&ops_config, target, all).await,
-
-        Commands::Monitor {
-            target,
-            interval,
-            once,
-        } => {
-            let openshell = openshell::OpenShellContext::detect();
-            ops_cli::handle_monitor(&ops_config, target, interval, once, &openshell).await
-        }
 
         Commands::Runbook { action } => ops_cli::handle_runbook(&ops_config, action).await,
 

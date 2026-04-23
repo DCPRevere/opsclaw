@@ -61,6 +61,16 @@ generate_config() {
 [secrets]
 encrypt = false
 
+[heartbeat]
+enabled = true
+interval_minutes = 1
+two_phase = false
+task_timeout_secs = 180
+
+[gateway]
+port = 0
+host = "127.0.0.1"
+
 [[projects]]
 name = "sim-target"
 type = "ssh"
@@ -141,19 +151,16 @@ cmd_up() {
     # Clear old webhooks
     > "$STATEDIR/requests.jsonl" 2>/dev/null || true
 
-    # Run a single baseline scan to establish snapshots
-    log "Establishing baseline..."
+    # Start the autonomous daemon in the background. The daemon's heartbeat
+    # worker picks up per-project scan tasks from HEARTBEAT.md (seeded on
+    # first run from the [[projects]] config). No explicit "monitor" command
+    # is needed: the daemon is the product.
+    log "Starting OpsClaw daemon..."
     HOME="$STATEDIR" OPSCLAW_CONFIG_DIR="$STATEDIR/.opsclaw" \
-        "$OPSCLAW_BIN" monitor --target sim-target --once 2>&1 | tee "$STATEDIR/baseline.log"
-    ok "Baseline established"
-
-    # Start the monitoring daemon in the background
-    log "Starting OpsClaw monitor daemon (interval: 30s)..."
-    HOME="$STATEDIR" OPSCLAW_CONFIG_DIR="$STATEDIR/.opsclaw" \
-        "$OPSCLAW_BIN" monitor --target sim-target --interval 30 \
+        "$OPSCLAW_BIN" daemon --host 127.0.0.1 --port 0 \
         > "$STATEDIR/opsclaw.log" 2>&1 &
     echo $! > "$STATEDIR/opsclaw.pid"
-    ok "OpsClaw monitor running (PID $(cat "$STATEDIR/opsclaw.pid"))"
+    ok "OpsClaw daemon running (PID $(cat "$STATEDIR/opsclaw.pid"))"
 
     echo ""
     echo -e "${BOLD}Simulation environment is ready.${NC}"
@@ -177,7 +184,7 @@ cmd_down() {
         pid=$(cat "$STATEDIR/opsclaw.pid")
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid"
-            ok "OpsClaw monitor stopped (PID $pid)"
+            ok "OpsClaw daemon stopped (PID $pid)"
         fi
         rm -f "$STATEDIR/opsclaw.pid"
     fi
@@ -204,7 +211,7 @@ cmd_fault() {
 
     inject_scenario "$name"
     echo ""
-    echo -e "  ${YELLOW}Fault '${name}' injected.${NC} OpsClaw will detect it on the next scan cycle (~30s)."
+    echo -e "  ${YELLOW}Fault '${name}' injected.${NC} OpsClaw will detect it on the next heartbeat tick (~60s)."
     echo "  Watch with: $0 logs"
 }
 
@@ -229,9 +236,9 @@ cmd_status() {
 
     # OpsClaw process
     if [ -f "$STATEDIR/opsclaw.pid" ] && kill -0 "$(cat "$STATEDIR/opsclaw.pid")" 2>/dev/null; then
-        echo -e "OpsClaw monitor:  ${GREEN}running${NC} (PID $(cat "$STATEDIR/opsclaw.pid"))"
+        echo -e "OpsClaw daemon:  ${GREEN}running${NC} (PID $(cat "$STATEDIR/opsclaw.pid"))"
     else
-        echo -e "OpsClaw monitor:  ${RED}not running${NC}"
+        echo -e "OpsClaw daemon:  ${RED}not running${NC}"
     fi
 
     # Recent log output
@@ -293,10 +300,11 @@ cmd_test() {
         # Inject fault
         inject_scenario "$fault"
 
-        # Wait for OpsClaw to detect it (next scan cycle)
-        log "Waiting for detection (up to 45s)..."
+        # Heartbeat interval is 1 minute; allow up to 90s for the daemon
+        # to tick, decide, and emit a webhook.
+        log "Waiting for detection (up to 90s)..."
         local detected=false
-        for i in $(seq 1 45); do
+        for i in $(seq 1 90); do
             if [ -s "$STATEDIR/requests.jsonl" ]; then
                 detected=true
                 break
@@ -309,18 +317,17 @@ cmd_test() {
             tail -1 "$STATEDIR/requests.jsonl"
             passed=$((passed + 1))
         else
-            err "FAIL: $fault — no notification received within 45s"
+            err "FAIL: $fault — no notification received within 90s"
             echo "OpsClaw log tail:"
             tail -5 "$STATEDIR/opsclaw.log" 2>/dev/null || true
             failed=$((failed + 1))
         fi
 
-        # Reset to baseline for next test
+        # Reset to baseline for the next test and give the daemon a tick
+        # to re-establish the healthy snapshot.
         inject_scenario baseline
         rm -f "$STATEDIR/.opsclaw/snapshots/sim-target.json" 2>/dev/null || true
-
-        # Wait for baseline to re-establish
-        sleep 35
+        sleep 65
     done
 
     echo ""
@@ -355,7 +362,7 @@ case "${1:-}" in
         echo "  fault <name>    Inject a fault scenario"
         echo "  clear           Clear faults, return to healthy"
         echo "  status          Show current state and recent alerts"
-        echo "  logs            Tail OpsClaw monitor output"
+        echo "  logs            Tail OpsClaw daemon output"
         echo "  webhooks        Show captured webhook notifications"
         echo "  test            Run all scenarios automatically"
         echo ""

@@ -3,6 +3,7 @@ pub mod a2a_tool;
 pub mod a2a_types;
 pub mod db_diagnostic;
 pub mod discovery;
+pub mod dns_tool;
 pub mod kube_tool;
 pub mod monitor_tool;
 pub mod monitoring;

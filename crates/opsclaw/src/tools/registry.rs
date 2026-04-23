@@ -5,6 +5,7 @@ use anyhow::Result;
 use zeroclaw::tools::Tool;
 
 use crate::ops_config::{OpsConfig, ProjectType};
+use crate::tools::dns_tool::DnsTool;
 use crate::tools::monitor_tool::MonitorTool;
 use crate::tools::ssh_tool::{ProjectEntry, SshTool, SshToolConfig};
 
@@ -25,6 +26,9 @@ pub fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool>>> {
 
     // Monitor tool — wraps discovery scan + health check.
     tools.push(Box::new(MonitorTool::new(config.clone())));
+
+    // DNS tool — ad-hoc lookups, no config required.
+    tools.push(Box::new(DnsTool::new()));
 
     Ok(tools)
 }

@@ -1,0 +1,43 @@
+workspace_dir = "/tmp/opsclaw-test"
+
+[[projects]]
+name = "shopfront"
+description = "Customer-facing web app"
+context_file = "~/.opsclaw/context/shopfront.md"
+
+  [[projects.environments]]
+  name = "prod"
+  autonomy = "approve"
+
+    [[projects.environments.targets]]
+    name = "web-1"
+    type = "ssh"
+    host = "10.0.0.1"
+    user = "opsclaw"
+
+    [[projects.environments.targets]]
+    name = "db-primary"
+    type = "ssh"
+    host = "10.0.0.10"
+    user = "opsclaw"
+
+  [[projects.environments]]
+  name = "dev"
+  autonomy = "auto"
+
+    [[projects.environments.targets]]
+    name = "dev-box"
+    type = "local"
+
+[[projects]]
+name = "data-platform"
+
+  [[projects.environments]]
+  name = "prod"
+  autonomy = "approve"
+
+    [[projects.environments.targets]]
+    name = "eks-main"
+    type = "kubernetes"
+    kubeconfig = "~/.kube/prod-eks"
+    namespace = "default"

@@ -16,9 +16,15 @@ pub struct OpsConfig {
     #[serde(flatten)]
     pub inner: zeroclaw::Config,
 
-    /// SRE targets (monitored endpoints).
+    /// SRE targets (monitored endpoints). Flat form — used when the
+    /// hierarchy is not yet adopted. Mutually exclusive with `projects`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<TargetConfig>>,
+
+    /// Hierarchical form: products wrapping environments wrapping targets.
+    /// Mutually exclusive with flat `targets` — see ADR-005.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<ProjectConfig>,
 
     /// Notification delivery settings for alerts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -594,6 +600,238 @@ pub struct A2aPeerConfig {
     pub token: String,
 }
 
+// ---------------------------------------------------------------------------
+// Project / Environment hierarchy (Phases 5 & 6 of ADR-005)
+// ---------------------------------------------------------------------------
+
+/// Top-level product or service line. Groups environments under a single
+/// operational identity. See [`docs/projects.md`] for the full model.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectConfig {
+    /// Unique identifier used in addresses (`shopfront::prod::web-1`).
+    pub name: String,
+    /// Short human-readable summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Markdown file prepended to the agent's prompt for every operation
+    /// inside this project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_file: Option<String>,
+    /// Optional list of teams or individuals responsible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owners: Option<Vec<String>>,
+    /// Environments within this project (dev, staging, prod, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<EnvironmentConfig>,
+}
+
+/// Policy boundary within a project: autonomy default, escalation,
+/// notification routing, and shared endpoint pools. See
+/// [`docs/environments.md`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentConfig {
+    /// Unique within the parent project (`dev`, `prod`, …).
+    pub name: String,
+    /// Default autonomy for every target. Overridable per target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<OpsClawAutonomy>,
+    /// Markdown prepended to the agent's prompt for operations in this
+    /// environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_file: Option<String>,
+    /// Tiered on-call policy for alerts originating here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<EscalationPolicy>,
+    /// Routing for this environment's alerts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<OpsClawNotificationConfig>,
+    /// Scoped endpoint pools. Targets in this environment reference these
+    /// by name.
+    #[serde(default)]
+    pub endpoints: EndpointsConfig,
+    /// Targets (connection endpoints) in this environment.
+    #[serde(default)]
+    pub targets: Vec<TargetConfig>,
+}
+
+/// Shared endpoint pools for a single environment. Each Vec holds
+/// endpoints referenced by name from tools scoped to this environment.
+///
+/// Same shape as the root-level pools on `OpsConfig`; root-level pools
+/// apply when the flat `targets` list is in use.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct EndpointsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prometheus: Option<Vec<PrometheusEndpointConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loki: Option<Vec<LokiEndpointConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elk: Option<Vec<ElkEndpointConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jaeger: Option<Vec<JaegerEndpointConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pagerduty: Option<PagerDutyConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GithubConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflare: Option<CloudflareConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rabbitmq: Option<RabbitMqConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure_service_bus: Option<AzureServiceBusConfig>,
+}
+
+/// Result of resolving a `project::environment::target` address. Autonomy
+/// is already cascaded (target override > environment default > Approve).
+#[derive(Debug, Clone)]
+pub struct ResolvedTarget<'a> {
+    pub project: Option<&'a ProjectConfig>,
+    pub environment: Option<&'a EnvironmentConfig>,
+    pub target: &'a TargetConfig,
+    pub autonomy: OpsClawAutonomy,
+}
+
+impl OpsConfig {
+    /// Resolve an address (`project::environment::target`, or short forms
+    /// when unambiguous) to a `ResolvedTarget`. Works for both the flat
+    /// `targets` list and the hierarchical `projects` form.
+    ///
+    /// Short addresses:
+    /// - `target` — permitted when there is only one project and one
+    ///   environment, or the flat form is in use.
+    /// - `environment::target` — permitted when there is only one project.
+    pub fn resolve_target(&self, address: &str) -> Result<ResolvedTarget<'_>> {
+        let parts: Vec<&str> = address.split("::").collect();
+
+        if !self.projects.is_empty() {
+            match parts.as_slice() {
+                [p, e, t] => self.lookup_hier(Some(p), Some(e), t),
+                [e, t] => self.lookup_hier(None, Some(e), t),
+                [t] => self.lookup_hier(None, None, t),
+                _ => anyhow::bail!("invalid address: {address}"),
+            }
+        } else {
+            match parts.as_slice() {
+                [t] => self.lookup_flat(t),
+                _ => anyhow::bail!(
+                    "flat `targets` config accepts bare target names only; got {address}"
+                ),
+            }
+        }
+    }
+
+    fn lookup_flat(&self, name: &str) -> Result<ResolvedTarget<'_>> {
+        let targets = self
+            .targets
+            .as_deref()
+            .unwrap_or_default();
+        let target = targets
+            .iter()
+            .find(|t| t.name == name)
+            .ok_or_else(|| anyhow::anyhow!("target '{name}' not found"))?;
+        Ok(ResolvedTarget {
+            project: None,
+            environment: None,
+            target,
+            autonomy: target.autonomy,
+        })
+    }
+
+    fn lookup_hier(
+        &self,
+        project_name: Option<&str>,
+        env_name: Option<&str>,
+        target_name: &str,
+    ) -> Result<ResolvedTarget<'_>> {
+        let mut matches: Vec<(&ProjectConfig, &EnvironmentConfig, &TargetConfig)> = Vec::new();
+        for project in &self.projects {
+            if let Some(pn) = project_name {
+                if project.name != pn {
+                    continue;
+                }
+            }
+            for env in &project.environments {
+                if let Some(en) = env_name {
+                    if env.name != en {
+                        continue;
+                    }
+                }
+                for target in &env.targets {
+                    if target.name == target_name {
+                        matches.push((project, env, target));
+                    }
+                }
+            }
+        }
+        match matches.as_slice() {
+            [] => anyhow::bail!("no target matches '{target_name}'"),
+            [one] => {
+                let (project, environment, target) = *one;
+                let autonomy = resolve_autonomy(environment.autonomy, target.autonomy)?;
+                Ok(ResolvedTarget {
+                    project: Some(project),
+                    environment: Some(environment),
+                    target,
+                    autonomy,
+                })
+            }
+            many => {
+                let listing: Vec<String> = many
+                    .iter()
+                    .map(|(p, e, t)| format!("{}::{}::{}", p.name, e.name, t.name))
+                    .collect();
+                anyhow::bail!(
+                    "ambiguous address — {} candidates: {}",
+                    listing.len(),
+                    listing.join(", ")
+                )
+            }
+        }
+    }
+
+    /// Validate that flat and hierarchical forms are not both populated.
+    pub fn validate_hierarchy(&self) -> Result<()> {
+        let has_flat = self
+            .targets
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false);
+        let has_hier = !self.projects.is_empty();
+        if has_flat && has_hier {
+            anyhow::bail!(
+                "config has both flat `[[targets]]` and hierarchical `[[projects]]` — \
+                 they are mutually exclusive (see ADR-005)"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Resolve autonomy for a target: target override must be equal to or more
+/// restrictive than the environment default. Rank: DryRun < Approve < Auto.
+fn resolve_autonomy(
+    env: Option<OpsClawAutonomy>,
+    target: OpsClawAutonomy,
+) -> Result<OpsClawAutonomy> {
+    let env_level = env.unwrap_or(OpsClawAutonomy::Approve);
+    if autonomy_rank(target) <= autonomy_rank(env_level) {
+        Ok(target)
+    } else {
+        anyhow::bail!(
+            "target autonomy '{target:?}' loosens the environment default '{env_level:?}'; \
+             overrides must be restrictive-only"
+        )
+    }
+}
+
+fn autonomy_rank(a: OpsClawAutonomy) -> u8 {
+    match a {
+        OpsClawAutonomy::DryRun => 0,
+        OpsClawAutonomy::Approve => 1,
+        OpsClawAutonomy::Auto => 2,
+    }
+}
+
 #[cfg(test)]
 mod golden_tests {
     //! Golden-file tests for `OpsConfig` TOML parsing.
@@ -703,6 +941,107 @@ min_severity = "bogus"
         assert!(
             result.is_err(),
             "invalid severity string must fail to deserialise"
+        );
+    }
+
+    #[test]
+    fn hierarchical_parses() {
+        let cfg = load("hierarchical.toml");
+        assert_eq!(cfg.projects.len(), 2);
+
+        let sf = &cfg.projects[0];
+        assert_eq!(sf.name, "shopfront");
+        assert_eq!(sf.environments.len(), 2);
+
+        let prod = &sf.environments[0];
+        assert_eq!(prod.name, "prod");
+        assert!(matches!(prod.autonomy, Some(OpsClawAutonomy::Approve)));
+        assert_eq!(prod.targets.len(), 2);
+
+        let dp = &cfg.projects[1];
+        assert_eq!(dp.name, "data-platform");
+        assert_eq!(dp.environments[0].targets[0].name, "eks-main");
+    }
+
+    #[test]
+    fn resolve_target_full_address() {
+        let cfg = load("hierarchical.toml");
+        let resolved = cfg
+            .resolve_target("shopfront::prod::web-1")
+            .expect("must resolve");
+        assert_eq!(resolved.target.name, "web-1");
+        assert_eq!(resolved.project.unwrap().name, "shopfront");
+        assert_eq!(resolved.environment.unwrap().name, "prod");
+        assert!(matches!(resolved.autonomy, OpsClawAutonomy::Approve));
+    }
+
+    #[test]
+    fn resolve_target_ambiguous_short_address_errors() {
+        let cfg = load("hierarchical.toml");
+        // Both shopfront and data-platform have a "prod" environment;
+        // without the project qualifier this is ambiguous only if the
+        // target name collides. Here it doesn't — only shopfront has
+        // `web-1` — so a short address resolves uniquely.
+        let ok = cfg.resolve_target("web-1").expect("unique target");
+        assert_eq!(ok.target.name, "web-1");
+
+        // But "prod::web-1" is also unique (only shopfront/prod has it).
+        let ok2 = cfg.resolve_target("prod::web-1").expect("unique env::target");
+        assert_eq!(ok2.target.name, "web-1");
+    }
+
+    #[test]
+    fn resolve_target_flat_mode() {
+        let cfg = load("full.toml");
+        let resolved = cfg.resolve_target("prod-web-1").expect("must resolve");
+        assert_eq!(resolved.target.name, "prod-web-1");
+        assert!(resolved.project.is_none());
+        assert!(resolved.environment.is_none());
+    }
+
+    #[test]
+    fn validate_rejects_mixed_flat_and_hierarchical() {
+        let mixed = r#"
+workspace_dir = "/tmp/x"
+
+[[targets]]
+name = "flat"
+type = "local"
+
+[[projects]]
+name = "hier"
+"#;
+        let cfg: OpsConfig = toml::from_str(mixed).expect("parses");
+        assert!(
+            cfg.validate_hierarchy().is_err(),
+            "mixed flat + hierarchical config must fail validation"
+        );
+    }
+
+    #[test]
+    fn target_autonomy_override_must_be_restrictive() {
+        let cfg: OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "p"
+
+  [[projects.environments]]
+  name = "prod"
+  autonomy = "approve"
+
+    [[projects.environments.targets]]
+    name = "t"
+    type = "local"
+    autonomy = "auto"
+"#,
+        )
+        .expect("parses");
+        let err = cfg.resolve_target("p::prod::t").unwrap_err();
+        assert!(
+            err.to_string().contains("restrictive-only"),
+            "unexpected error: {err}"
         );
     }
 }

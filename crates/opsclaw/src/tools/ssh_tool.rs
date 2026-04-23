@@ -406,8 +406,32 @@ fn audit_dir() -> PathBuf {
 }
 
 /// Append one line to the daily audit log.
+///
+/// `target_name` is the canonical identifier for the addressable endpoint
+/// the command ran against; `project_name` and `env_name` are populated
+/// when the config is hierarchical (Phases 5+6 of ADR-005).
+///
+/// The `PROJECT=` field is preserved alongside `TARGET=` as a stable alias
+/// so log-tailing scripts keep working: in flat-config mode it always
+/// equals `TARGET=`, and in hierarchical mode it holds the project name.
 pub fn write_audit_entry(
-    project_name: &str,
+    target_name: &str,
+    command: &str,
+    exit_code: i32,
+    duration_ms: u128,
+    audit_base: Option<&PathBuf>,
+) -> std::io::Result<()> {
+    write_audit_entry_qualified(None, None, target_name, command, exit_code, duration_ms, audit_base)
+}
+
+/// Full audit-entry writer. Prefer `write_audit_entry` for flat-list
+/// callers; this is the entry point once the caller knows its project
+/// and environment names.
+#[allow(clippy::too_many_arguments)]
+pub fn write_audit_entry_qualified(
+    project_name: Option<&str>,
+    env_name: Option<&str>,
+    target_name: &str,
     command: &str,
     exit_code: i32,
     duration_ms: u128,
@@ -425,9 +449,14 @@ pub fn write_audit_entry(
         .create(true)
         .append(true)
         .open(path)?;
+    // `PROJECT=` is kept as an alias: in flat mode it mirrors TARGET=,
+    // in hierarchical mode it holds the project name. Log readers may
+    // match on either PROJECT= or TARGET= safely.
+    let project_field = project_name.unwrap_or(target_name);
+    let env_field = env_name.unwrap_or("-");
     writeln!(
         f,
-        "[{timestamp}] PROJECT={project_name} CMD={command} EXIT={exit_code} DURATION={duration_ms}ms"
+        "[{timestamp}] PROJECT={project_field} ENV={env_field} TARGET={target_name} CMD={command} EXIT={exit_code} DURATION={duration_ms}ms"
     )?;
     Ok(())
 }

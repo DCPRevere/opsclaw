@@ -5,6 +5,7 @@ pub mod azure_service_bus_tool;
 pub mod cert_tool;
 pub mod cloudflare_tool;
 pub mod db_diagnostic;
+pub mod docker_tool;
 pub mod discovery;
 pub mod dns_tool;
 pub mod elk_tool;

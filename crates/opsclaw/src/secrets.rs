@@ -128,9 +128,8 @@ pub trait KubeSecretFetcher: Send + Sync {
     async fn fetch(&self, namespace: &str, name: &str, key: &str) -> Result<Option<Vec<u8>>>;
 }
 
-/// Default fetcher backed by the real kube API. Returns a "not configured"
-/// error until a kube client is wired in — keeping the dependency optional
-/// at startup time so laptops without a kubeconfig still start cleanly.
+/// Null fetcher for test and laptop contexts — always errors. Used as an
+/// explicit opt-out when the caller knows there's no cluster.
 #[derive(Default)]
 pub struct NullKubeFetcher;
 
@@ -144,6 +143,64 @@ impl KubeSecretFetcher for NullKubeFetcher {
     }
 }
 
+/// Live fetcher backed by `kube::Api::<Secret>::namespaced`. The kube
+/// client is built lazily on first use via `kube::Config::infer()`, so
+/// startup on a laptop without a cluster is free and the first missing
+/// mount-file is still cheap.
+#[derive(Default)]
+pub struct LiveKubeFetcher {
+    client: tokio::sync::OnceCell<kube::Client>,
+}
+
+impl LiveKubeFetcher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn client(&self) -> Result<&kube::Client> {
+        self.client
+            .get_or_try_init(|| async {
+                let config = kube::Config::infer()
+                    .await
+                    .context("failed to infer kube config (no in-cluster creds or ~/.kube/config)")?;
+                kube::Client::try_from(config).context("failed to build kube client")
+            })
+            .await
+    }
+}
+
+#[async_trait]
+impl KubeSecretFetcher for LiveKubeFetcher {
+    async fn fetch(&self, namespace: &str, name: &str, key: &str) -> Result<Option<Vec<u8>>> {
+        use k8s_openapi::api::core::v1::Secret;
+        use kube::api::Api;
+
+        let client = self.client().await?;
+        let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
+        let secret = api
+            .get(name)
+            .await
+            .with_context(|| format!("kube API: get Secret {namespace}/{name}"))?;
+
+        // `ByteString` in k8s_openapi is base64-decoded on deserialize, so
+        // `byte_string.0` is the raw plaintext. `stringData` is write-only
+        // in the API but present here for symmetry if a caller ever injects
+        // a Secret object directly.
+        if let Some(data) = secret.data.as_ref() {
+            if let Some(byte_string) = data.get(key) {
+                return Ok(Some(byte_string.0.clone()));
+            }
+        }
+        if let Some(string_data) = secret.string_data.as_ref() {
+            if let Some(value) = string_data.get(key) {
+                return Ok(Some(value.as_bytes().to_vec()));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
 impl K8sSecretResolver {
     pub fn new(mount_root: impl Into<PathBuf>, fetcher: Arc<dyn KubeSecretFetcher>) -> Self {
         Self {
@@ -153,12 +210,15 @@ impl K8sSecretResolver {
     }
 
     /// Convenience constructor: mount root from `OPSCLAW_K8S_SECRETS_ROOT`
-    /// env var or [`DEFAULT_K8S_MOUNT_ROOT`], API fallback disabled.
+    /// env var or [`DEFAULT_K8S_MOUNT_ROOT`], with the live kube API
+    /// fetcher as the fallback. The kube client is built lazily — no
+    /// startup penalty if no `k8s:` references are ever resolved and the
+    /// mount files exist when they are.
     pub fn from_env_default() -> Self {
         let root = std::env::var(K8S_MOUNT_ROOT_ENV)
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(DEFAULT_K8S_MOUNT_ROOT));
-        Self::new(root, Arc::new(NullKubeFetcher))
+        Self::new(root, Arc::new(LiveKubeFetcher::new()))
     }
 }
 
@@ -281,6 +341,125 @@ impl CompositeResolver {
             value.len()
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive prompt helper
+// ---------------------------------------------------------------------------
+
+/// How the user wants to supply a secret value during the setup wizard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretSourceChoice {
+    /// Type the plaintext value — it will be encrypted by `OpsConfig::save`.
+    EncryptedStore,
+    /// Reference an environment variable by name.
+    EnvVar,
+    /// Reference a key inside a Kubernetes Secret.
+    K8sSecret,
+    /// User declined to provide a value.
+    Skip,
+}
+
+/// Interactively prompt for a secret and return the string to store in
+/// config. Offers three sources (encrypted store / env / k8s) plus a
+/// skip option.
+///
+/// - `EncryptedStore` returns the plaintext value; `OpsConfig::save`
+///   will encrypt it to `enc2:<hex>`.
+/// - `EnvVar` returns `env:<NAME>`.
+/// - `K8sSecret` returns `k8s:<namespace>/<name>/<key>`.
+/// - `Skip` returns `Ok(None)`.
+///
+/// `label` describes the secret (e.g. `"Seq API key"`). `optional`
+/// controls whether the Skip option is offered and whether plaintext
+/// input is allowed to be empty.
+pub fn prompt_secret_source(label: &str, optional: bool) -> Result<Option<String>> {
+    let mut items: Vec<&str> = vec![
+        "Enter value now (encrypted at rest)",
+        "Read from environment variable",
+        "Read from Kubernetes Secret",
+    ];
+    if optional {
+        items.push("Skip");
+    }
+
+    let choice_index = dialoguer::Select::new()
+        .with_prompt(format!("How should OpsClaw read {label}?"))
+        .items(&items)
+        .default(0)
+        .interact()
+        .context("failed to read secret-source choice")?;
+
+    let choice = match choice_index {
+        0 => SecretSourceChoice::EncryptedStore,
+        1 => SecretSourceChoice::EnvVar,
+        2 => SecretSourceChoice::K8sSecret,
+        _ => SecretSourceChoice::Skip,
+    };
+
+    match choice {
+        SecretSourceChoice::Skip => Ok(None),
+        SecretSourceChoice::EncryptedStore => {
+            let mut p = dialoguer::Password::new();
+            p = p.with_prompt(format!("{label} (hidden input)"));
+            if optional {
+                p = p.allow_empty_password(true);
+            }
+            let value = p.interact().context("failed to read secret value")?;
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(value))
+        }
+        SecretSourceChoice::EnvVar => {
+            let name: String = dialoguer::Input::new()
+                .with_prompt(format!("Environment variable name holding {label}"))
+                .interact_text()
+                .context("failed to read env var name")?;
+            Ok(Some(build_env_reference(&name)?))
+        }
+        SecretSourceChoice::K8sSecret => {
+            let namespace: String = dialoguer::Input::new()
+                .with_prompt("Namespace")
+                .interact_text()
+                .context("failed to read namespace")?;
+            let name: String = dialoguer::Input::new()
+                .with_prompt("Secret name")
+                .interact_text()
+                .context("failed to read secret name")?;
+            let key: String = dialoguer::Input::new()
+                .with_prompt(format!("Key holding {label}"))
+                .interact_text()
+                .context("failed to read secret key")?;
+            Ok(Some(build_k8s_reference(&namespace, &name, &key)?))
+        }
+    }
+}
+
+/// Build an `env:NAME` reference string, validating the name.
+pub fn build_env_reference(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("environment variable name cannot be empty");
+    }
+    Ok(format!("env:{name}"))
+}
+
+/// Build a `k8s:<ns>/<name>/<key>` reference string, validating each part.
+pub fn build_k8s_reference(namespace: &str, name: &str, key: &str) -> Result<String> {
+    let ns = namespace.trim();
+    let n = name.trim();
+    let k = key.trim();
+    if ns.is_empty() || n.is_empty() || k.is_empty() {
+        anyhow::bail!("namespace, name, and key must all be non-empty");
+    }
+    for (label, part) in [("namespace", ns), ("secret name", n), ("key", k)] {
+        if part.contains('/') || part == "." || part == ".." {
+            anyhow::bail!("invalid {label} segment: `{part}`");
+        }
+    }
+    Ok(format!("k8s:{ns}/{n}/{k}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -602,5 +781,107 @@ mod tests {
             .decode("c3VwZXItc2VjcmV0")
             .unwrap();
         assert_eq!(decoded, b"super-secret");
+    }
+
+    // ── Reference builders (used by the setup wizard) ──────────
+
+    #[test]
+    fn build_env_reference_happy_path() {
+        assert_eq!(
+            build_env_reference("PAGERDUTY_TOKEN").unwrap(),
+            "env:PAGERDUTY_TOKEN"
+        );
+    }
+
+    #[test]
+    fn build_env_reference_trims_whitespace() {
+        assert_eq!(
+            build_env_reference("  PAGERDUTY_TOKEN \n").unwrap(),
+            "env:PAGERDUTY_TOKEN"
+        );
+    }
+
+    #[test]
+    fn build_env_reference_rejects_empty() {
+        assert!(build_env_reference("").is_err());
+        assert!(build_env_reference("  \t ").is_err());
+    }
+
+    #[test]
+    fn build_k8s_reference_happy_path() {
+        assert_eq!(
+            build_k8s_reference("ops", "creds", "pd_token").unwrap(),
+            "k8s:ops/creds/pd_token"
+        );
+    }
+
+    #[test]
+    fn build_k8s_reference_trims_whitespace() {
+        assert_eq!(
+            build_k8s_reference(" ops ", " creds ", " pd_token ").unwrap(),
+            "k8s:ops/creds/pd_token"
+        );
+    }
+
+    #[test]
+    fn build_k8s_reference_rejects_empty_parts() {
+        assert!(build_k8s_reference("", "creds", "tok").is_err());
+        assert!(build_k8s_reference("ops", "", "tok").is_err());
+        assert!(build_k8s_reference("ops", "creds", "").is_err());
+    }
+
+    #[test]
+    fn build_k8s_reference_rejects_path_separators() {
+        assert!(build_k8s_reference("ops/other", "creds", "tok").is_err());
+        assert!(build_k8s_reference("ops", "creds/more", "tok").is_err());
+        assert!(build_k8s_reference("ops", "creds", "sub/key").is_err());
+    }
+
+    #[test]
+    fn build_k8s_reference_rejects_traversal() {
+        assert!(build_k8s_reference("..", "creds", "tok").is_err());
+        assert!(build_k8s_reference("ops", "..", "tok").is_err());
+        assert!(build_k8s_reference("ops", "creds", ".").is_err());
+    }
+
+    #[test]
+    fn built_references_roundtrip_through_parser() {
+        // What the wizard produces must parse cleanly in the resolver.
+        let r = build_k8s_reference("ops", "creds", "tok").unwrap();
+        let (ns, n, k) = parse_k8s_ref(&r).unwrap();
+        assert_eq!((ns, n, k), ("ops", "creds", "tok"));
+    }
+
+    // ── LiveKubeFetcher ────────────────────────────────────────
+
+    #[test]
+    fn live_fetcher_new_does_not_connect() {
+        // Constructor must be free — no cluster / kubeconfig needed. The
+        // kube client is built lazily on first fetch.
+        let _ = LiveKubeFetcher::new();
+    }
+
+    #[tokio::test]
+    async fn default_composite_still_reads_mounted_k8s_file() {
+        // Regression: switching the default k8s fetcher from
+        // NullKubeFetcher to LiveKubeFetcher must not break the
+        // mount-file path, which runs before the API fallback.
+        let config_dir = TempDir::new().unwrap();
+        let mount = TempDir::new().unwrap();
+        write_mounted(mount.path(), "ops", "creds", "tok", b"mounted-token");
+
+        // Point the resolver's mount root at our tempdir via the env var.
+        let prev = std::env::var(K8S_MOUNT_ROOT_ENV).ok();
+        std::env::set_var(K8S_MOUNT_ROOT_ENV, mount.path());
+
+        let composite = CompositeResolver::default_for(config_dir.path(), true);
+        let got = composite.resolve("k8s:ops/creds/tok").await.unwrap();
+
+        match prev {
+            Some(v) => std::env::set_var(K8S_MOUNT_ROOT_ENV, v),
+            None => std::env::remove_var(K8S_MOUNT_ROOT_ENV),
+        }
+
+        assert_eq!(got, "mounted-token");
     }
 }

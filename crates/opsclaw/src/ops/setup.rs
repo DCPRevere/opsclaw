@@ -482,17 +482,10 @@ pub fn step_data_sources() -> Result<Option<crate::ops::data_sources::DataSource
             .with_prompt("Seq URL")
             .default("http://localhost:5341".into())
             .interact_text()?;
-        let api_key: String = Input::new()
-            .with_prompt("Seq API key (leave blank for none)")
-            .allow_empty(true)
-            .interact_text()?;
+        let api_key = crate::secrets::prompt_secret_source("the Seq API key", true)?;
         config.seq = Some(SeqConfig {
             url,
-            api_key: if api_key.is_empty() {
-                None
-            } else {
-                Some(api_key)
-            },
+            api_key,
         });
         any = true;
     }

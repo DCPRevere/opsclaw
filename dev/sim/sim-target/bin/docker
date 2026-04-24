@@ -1,8 +1,0 @@
-#!/bin/bash
-if [ -f /sim/active-scenario.sh ]; then
-    source /sim/active-scenario.sh
-    if type sim_docker &>/dev/null; then sim_docker "$@"; exit; fi
-fi
-# Docker is not installed in the sim container — return empty
-echo ""
-exit 1

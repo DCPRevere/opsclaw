@@ -1,6 +1,11 @@
 # OpsClaw Simulation Environment
 #
-# Usage: managed via sim.sh (don't run docker compose directly)
+# Usage: managed via sim.sh (don't run docker compose directly).
+#
+# The sim-target is a real Ubuntu container with cgroup memory + CPU
+# limits. Faults are induced by running real tools (stress-ng, dd, tc)
+# inside the container, not by lying via shell wrappers. The agent's
+# `cat /proc/meminfo` reads the kernel's accounting and sees the truth.
 name: opsclaw-sim
 services:
   sim-target:
@@ -9,15 +14,41 @@ services:
     environment:
       - AUTHORIZED_KEY=${SIM_SSH_PUBKEY}
       - SSH_PORT=2222
-    volumes:
-      - ./scenarios:/sim/scenarios:ro
-    network_mode: host
+    ports:
+      - "127.0.0.1:2222:2222"
+    # Hard cgroup limits — the simulated machine is an 8 GB / 4 vCPU box.
+    # stress-ng allocating 7 GB hits 87% of an 8 GB cap; the agent reading
+    # /proc/meminfo (cgroup-aware on cgroup-v2 hosts) sees real pressure.
+    mem_limit: 8g
+    memswap_limit: 8g
+    cpus: 4
+    # NET_ADMIN lets us tc-netem the loopback / eth0 for latency/loss
+    # scenarios. The bridge network confines that effect to the container's
+    # veth pair — your host's networking is untouched.
+    cap_add:
+      - NET_ADMIN
+    # Disk-pressure scenarios fill /data, which is a tmpfs of fixed size.
+    # dd-fills evaporate on `docker compose down` and never reach your
+    # real disk.
+    tmpfs:
+      - /data:size=200m
+    # Default bridge network — explicitly NOT host networking, so the
+    # agent's view of the world is bounded to this container.
+    networks:
+      - simnet
 
   webhook-sink:
     build: ./webhook-sink
     container_name: opsclaw-webhook-sink
     volumes:
       - ./.state:/data
-    network_mode: host
+    ports:
+      - "127.0.0.1:9999:9999"
     environment:
       - PORT=9999
+    networks:
+      - simnet
+
+networks:
+  simnet:
+    driver: bridge

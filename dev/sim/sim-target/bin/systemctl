@@ -1,9 +1,0 @@
-#!/bin/bash
-if [ -f /sim/active-scenario.sh ]; then
-    source /sim/active-scenario.sh
-    if type sim_systemctl &>/dev/null; then sim_systemctl "$@"; exit; fi
-fi
-# systemd is not running in the sim container — return empty
-echo "UNIT                     LOAD   ACTIVE SUB     DESCRIPTION"
-echo ""
-echo "0 loaded units listed."

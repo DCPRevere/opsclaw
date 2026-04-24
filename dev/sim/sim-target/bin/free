@@ -1,6 +1,0 @@
-#!/bin/bash
-if [ -f /sim/active-scenario.sh ]; then
-    source /sim/active-scenario.sh
-    if type sim_free &>/dev/null; then sim_free "$@"; exit; fi
-fi
-exec /usr/bin/free "$@"

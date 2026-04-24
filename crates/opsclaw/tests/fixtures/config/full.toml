@@ -16,12 +16,6 @@ url = "https://example.com/health"
 expected_status = 200
 timeout_secs = 5
 
-[[targets.databases]]
-name = "primary"
-type = "postgres"
-host = "10.0.0.10"
-port = 5432
-
 [targets.escalation]
 primary = "oncall-primary"
 secondary = "oncall-secondary"

@@ -38,55 +38,9 @@ pub struct OpsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2a: Option<A2aConfig>,
 
-    // ----------------------------------------------------------------
-    // Shared endpoint pools.
-    //
-    // These are Environment-scoped at the model level (see ADR-005 and
-    // docs/environments.md), but live at the root today because the
-    // implicit Environment IS the root. Phase 5 of the hierarchy
-    // migration moves them under `[[projects.environments.endpoints]]`.
-    //
-    // When adding a new shared endpoint pool, put it here rather than on
-    // TargetConfig — it reduces migration churn and matches the final
-    // resting place.
-    // ----------------------------------------------------------------
-    /// Prometheus query endpoints. Environment-scoped after Phase 5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prometheus: Option<Vec<PrometheusEndpointConfig>>,
-
-    /// Loki log-query endpoints. Environment-scoped after Phase 5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub loki: Option<Vec<LokiEndpointConfig>>,
-
-    /// Elasticsearch / OpenSearch endpoints. Environment-scoped after Phase 5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elk: Option<Vec<ElkEndpointConfig>>,
-
-    /// PagerDuty configuration. Environment-scoped after Phase 5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pagerduty: Option<PagerDutyConfig>,
-
-    /// GitHub configuration. Environment-scoped after Phase 5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github: Option<GithubConfig>,
-
-    /// Cloudflare configuration. Environment-scoped after Phase 5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cloudflare: Option<CloudflareConfig>,
-
-    /// RabbitMQ management API. Environment-scoped after Phase 5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rabbitmq: Option<RabbitMqConfig>,
-
-    /// Azure Service Bus. Environment-scoped after Phase 5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub azure_service_bus: Option<AzureServiceBusConfig>,
-
-    /// Jaeger query endpoints. Environment-scoped after Phase 5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jaeger: Option<Vec<JaegerEndpointConfig>>,
-
     /// Postgres instances for the `postgres` tool (driver-based).
+    /// Kept at the root because the driver-based pool doesn't yet have
+    /// an equivalent slot in `EndpointsConfig`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub postgres: Option<Vec<PostgresInstanceConfig>>,
 }
@@ -420,9 +374,6 @@ pub struct TargetConfig {
     /// Optional escalation policy for tiered on-call notification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalation: Option<EscalationPolicy>,
-    /// Optional database instances for diagnostic health queries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub databases: Option<Vec<crate::tools::db_diagnostic::DatabaseConfig>>,
     /// Path to a kubeconfig file (Kubernetes targets only; defaults to ~/.kube/config).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kubeconfig: Option<String>,
@@ -894,10 +845,6 @@ mod golden_tests {
         assert_eq!(probes.len(), 1);
         assert_eq!(probes[0].name, "healthcheck");
         assert!(matches!(probes[0].probe_type, ProbeType::Http { .. }));
-
-        let databases = web.databases.as_ref().expect("databases present");
-        assert_eq!(databases.len(), 1);
-        assert_eq!(databases[0].name, "primary");
 
         let esc = web.escalation.as_ref().expect("escalation present");
         assert_eq!(esc.primary.as_deref(), Some("oncall-primary"));

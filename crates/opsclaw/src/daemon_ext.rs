@@ -21,16 +21,13 @@ pub fn register_sre_tools(ops_config: OpsConfig) {
     zeroclaw_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(move |_peripherals_cfg| {
         let ops = ops_config.clone();
         Box::pin(async move {
-            match create_opsclaw_tools(&ops).await {
-                Ok(tools) => Ok(tools),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to build opsclaw SRE tools for agent run; continuing without them",
-                    );
-                    Ok(Vec::new())
-                }
-            }
+            create_opsclaw_tools(&ops).await.map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    "Failed to build opsclaw SRE tools for agent run — aborting so the agent does not run without its SRE toolset",
+                );
+                e
+            })
         })
     }));
 }
@@ -70,11 +67,15 @@ pub async fn seed_heartbeat_file(workspace_dir: &Path, ops_config: &OpsConfig) -
     );
     for name in scan_targets {
         body.push_str(&format!(
-            "- [high] Run a health check on project '{name}' using the monitor tool. \
-             Inspect the snapshot. If anything looks concerning (high memory/disk/load, \
-             missing containers or services, unusual state), investigate further using \
-             the ssh tool and notify via the configured channel. If everything looks \
-             healthy, say so briefly.\n"
+            "- [high] Run a health check on target '{name}' using the monitor tool. \
+             Inspect the snapshot and use the ssh tool to investigate further when \
+             anything looks concerning (high memory/disk/load, missing containers or \
+             services, unusual state). When you confirm a real problem, you MUST call \
+             the escalate_to_human tool with a one-line summary, the relevant context, \
+             and an appropriate urgency (warning → medium, critical → high). Do not \
+             just describe the problem in your final reply: an unsent escalation is a \
+             missed alert. If everything looks healthy, say so briefly and do not \
+             escalate.\n"
         ));
     }
 

@@ -26,7 +26,6 @@ Priority: **P0** critical, **P1** high, **P2** medium, **P3** low
 ## Tests
 
 - [ ] **P1** [`ops_cli.rs` has zero test coverage](test-ops-cli.md) — 13 untested handlers, highest regression risk
-- [x] **P2** [`ops/notifier.rs` has no tests](test-notifier.md) — merged cef9cf5a
 - [x] **P2** [`ops/context.rs` has no tests](test-context.md) — merged cef9cf5a
 - [ ] **P2** [`ops/daemon.rs` has no tests](test-daemon.md) — long-running process, hard to debug without tests
 

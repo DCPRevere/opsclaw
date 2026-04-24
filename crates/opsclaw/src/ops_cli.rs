@@ -775,7 +775,7 @@ pub fn handle_target_list(config: &OpsConfig) -> Result<()> {
 }
 
 /// Remove a project from the config by name.
-pub async fn handle_target_remove(config: &OpsConfig, name: &str) -> Result<()> {
+pub async fn handle_target_remove(name: &str) -> Result<()> {
     use crate::ops::setup::{load_existing_config, opsclaw_config_path};
     use console::style;
 
@@ -800,8 +800,528 @@ pub async fn handle_target_remove(config: &OpsConfig, name: &str) -> Result<()> 
         style(config_path.display()).underlined()
     );
 
-    // Suppress unused warning — config is passed for consistency with other handlers
-    let _ = config;
-
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `config project` subcommands
+// ---------------------------------------------------------------------------
+
+/// Interactively add a new empty project to the config. Environments and
+/// targets are populated later via `config env add` and the setup wizard.
+pub async fn handle_project_add() -> Result<()> {
+    use crate::ops::setup::{load_existing_config, opsclaw_config_path};
+    use crate::ops_config::ProjectConfig;
+    use console::style;
+    use dialoguer::Input;
+
+    println!();
+    println!("  {}", style("Add Project").cyan().bold());
+
+    let name: String = Input::new()
+        .with_prompt("Project name")
+        .interact_text()?;
+    let description: String = Input::new()
+        .with_prompt("Description (leave blank to skip)")
+        .allow_empty(true)
+        .interact_text()?;
+
+    let config_path = opsclaw_config_path()?;
+    if let Some(parent) = config_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut cfg = load_existing_config(&config_path);
+    cfg.config_path = config_path.clone();
+
+    if cfg.projects.iter().any(|p| p.name == name) {
+        bail!("A project named '{name}' already exists.");
+    }
+
+    cfg.projects.push(ProjectConfig {
+        name: name.clone(),
+        description: if description.is_empty() { None } else { Some(description) },
+        context_file: None,
+        owners: None,
+        environments: Vec::new(),
+    });
+
+    cfg.save().await?;
+
+    println!(
+        "  {} Project '{}' added to {}",
+        style("✓").green().bold(),
+        name,
+        style(config_path.display()).underlined()
+    );
+    println!(
+        "  {}",
+        style("Run 'opsclaw config env add' to add an environment.").dim()
+    );
+    Ok(())
+}
+
+pub fn handle_project_list(config: &OpsConfig) -> Result<()> {
+    use console::style;
+
+    if config.projects.is_empty() {
+        println!("No projects configured. Run 'opsclaw config project add' to add one.");
+        return Ok(());
+    }
+
+    println!();
+    println!("  {}", style("Configured projects:").white().bold());
+    println!();
+    for p in &config.projects {
+        let env_count = p.environments.len();
+        let target_count: usize = p.environments.iter().map(|e| e.targets.len()).sum();
+        println!(
+            "  {} {}  envs: {}  targets: {}",
+            style("›").cyan(),
+            style(&p.name).white().bold(),
+            env_count,
+            target_count,
+        );
+        if let Some(desc) = &p.description {
+            println!("      {}", style(desc).dim());
+        }
+    }
+    println!();
+    Ok(())
+}
+
+pub async fn handle_project_remove(name: &str) -> Result<()> {
+    use crate::ops::setup::opsclaw_config_path;
+    use console::style;
+
+    let config_path = opsclaw_config_path()?;
+    remove_project_at(&config_path, name).await?;
+    println!(
+        "  {} Project '{}' removed from {}",
+        style("✓").green().bold(),
+        name,
+        style(config_path.display()).underlined()
+    );
+    Ok(())
+}
+
+/// Testable core: remove a project from the config at `path`, persisting
+/// the result. Returns an error when the project does not exist.
+async fn remove_project_at(path: &std::path::Path, name: &str) -> Result<()> {
+    use crate::ops::setup::load_existing_config;
+
+    let mut cfg = load_existing_config(path);
+    cfg.config_path = path.to_path_buf();
+
+    let before = cfg.projects.len();
+    cfg.projects.retain(|p| p.name != name);
+    if cfg.projects.len() == before {
+        bail!("No project named '{name}' found in config.");
+    }
+    cfg.save().await
+}
+
+pub fn handle_project_show(config: &OpsConfig, name: &str) -> Result<()> {
+    use console::style;
+
+    let project = config
+        .projects
+        .iter()
+        .find(|p| p.name == name)
+        .with_context(|| format!("Project '{name}' not found"))?;
+
+    println!();
+    println!("  {}", style(&project.name).white().bold());
+    if let Some(desc) = &project.description {
+        println!("  {} description: {}", style("›").cyan(), desc);
+    }
+    if let Some(ctx) = &project.context_file {
+        println!("  {} context file: {}", style("›").cyan(), ctx);
+    }
+    if let Some(owners) = &project.owners {
+        println!("  {} owners: {}", style("›").cyan(), owners.join(", "));
+    }
+    println!(
+        "  {} environments: {}",
+        style("›").cyan(),
+        project.environments.len()
+    );
+    for env in &project.environments {
+        println!("      {} ({} targets)", env.name, env.targets.len());
+    }
+    println!();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `config env` subcommands
+// ---------------------------------------------------------------------------
+
+/// Parse a `project::env` address. Returns `(project, env)` slices borrowed
+/// from the input.
+fn parse_env_address(address: &str) -> Result<(&str, &str)> {
+    let mut parts = address.splitn(2, "::");
+    let project = parts.next().filter(|s| !s.is_empty())
+        .with_context(|| format!("invalid address '{address}': expected 'project::env'"))?;
+    let env = parts.next().filter(|s| !s.is_empty())
+        .with_context(|| format!("invalid address '{address}': expected 'project::env'"))?;
+    Ok((project, env))
+}
+
+/// Interactively add a new environment to an existing project.
+pub async fn handle_env_add() -> Result<()> {
+    use crate::ops::setup::{load_existing_config, opsclaw_config_path};
+    use crate::ops_config::EnvironmentConfig;
+    use console::style;
+    use dialoguer::{Input, Select};
+
+    println!();
+    println!("  {}", style("Add Environment").cyan().bold());
+
+    let config_path = opsclaw_config_path()?;
+    let mut cfg = load_existing_config(&config_path);
+    cfg.config_path = config_path.clone();
+
+    if cfg.projects.is_empty() {
+        bail!("No projects configured. Run 'opsclaw config project add' first.");
+    }
+
+    let project_names: Vec<&str> = cfg.projects.iter().map(|p| p.name.as_str()).collect();
+    let project_name = if project_names.len() == 1 {
+        println!("  Project: {}", project_names[0]);
+        project_names[0].to_string()
+    } else {
+        let idx = Select::new()
+            .with_prompt("Project")
+            .items(&project_names)
+            .default(0)
+            .interact()?;
+        project_names[idx].to_string()
+    };
+
+    let env_name: String = Input::new()
+        .with_prompt("Environment name (e.g. dev, staging, prod)")
+        .interact_text()?;
+
+    let project = cfg.projects.iter_mut().find(|p| p.name == project_name)
+        .expect("project selected from existing list");
+
+    if project.environments.iter().any(|e| e.name == env_name) {
+        bail!("Environment '{env_name}' already exists in project '{project_name}'.");
+    }
+
+    project.environments.push(EnvironmentConfig {
+        name: env_name.clone(),
+        ..EnvironmentConfig::default()
+    });
+
+    cfg.save().await?;
+    println!(
+        "  {} Environment '{}::{}' added to {}",
+        style("✓").green().bold(),
+        project_name,
+        env_name,
+        style(config_path.display()).underlined()
+    );
+    Ok(())
+}
+
+pub fn handle_env_list(config: &OpsConfig) -> Result<()> {
+    use console::style;
+
+    let total: usize = config.projects.iter().map(|p| p.environments.len()).sum();
+    if total == 0 {
+        println!("No environments configured. Run 'opsclaw config env add' to add one.");
+        return Ok(());
+    }
+
+    println!();
+    println!("  {}", style("Configured environments:").white().bold());
+    println!();
+    for project in &config.projects {
+        for env in &project.environments {
+            println!(
+                "  {} {}::{}  targets: {}",
+                style("›").cyan(),
+                style(&project.name).white().bold(),
+                style(&env.name).white().bold(),
+                env.targets.len()
+            );
+        }
+    }
+    println!();
+    Ok(())
+}
+
+pub async fn handle_env_remove(address: &str) -> Result<()> {
+    use crate::ops::setup::opsclaw_config_path;
+    use console::style;
+
+    let (project_name, env_name) = parse_env_address(address)?;
+    let config_path = opsclaw_config_path()?;
+    remove_env_at(&config_path, project_name, env_name).await?;
+    println!(
+        "  {} Environment '{}::{}' removed from {}",
+        style("✓").green().bold(),
+        project_name,
+        env_name,
+        style(config_path.display()).underlined()
+    );
+    Ok(())
+}
+
+/// Testable core: remove the environment `project_name::env_name` from the
+/// config at `path`. Errors if the project or environment does not exist.
+async fn remove_env_at(
+    path: &std::path::Path,
+    project_name: &str,
+    env_name: &str,
+) -> Result<()> {
+    use crate::ops::setup::load_existing_config;
+
+    let mut cfg = load_existing_config(path);
+    cfg.config_path = path.to_path_buf();
+
+    let project = cfg.projects.iter_mut().find(|p| p.name == project_name)
+        .with_context(|| format!("Project '{project_name}' not found."))?;
+    let before = project.environments.len();
+    project.environments.retain(|e| e.name != env_name);
+    if project.environments.len() == before {
+        bail!("No environment named '{env_name}' in project '{project_name}'.");
+    }
+    cfg.save().await
+}
+
+pub fn handle_env_show(config: &OpsConfig, address: &str) -> Result<()> {
+    use console::style;
+
+    let (project_name, env_name) = parse_env_address(address)?;
+
+    let project = config.projects.iter().find(|p| p.name == project_name)
+        .with_context(|| format!("Project '{project_name}' not found"))?;
+    let env = project.environments.iter().find(|e| e.name == env_name)
+        .with_context(|| format!("Environment '{env_name}' not found in project '{project_name}'"))?;
+
+    println!();
+    println!("  {}::{}", style(&project.name).white().bold(), style(&env.name).white().bold());
+    if let Some(autonomy) = env.autonomy {
+        println!(
+            "  {} default autonomy: {}",
+            style("›").cyan(),
+            format!("{autonomy:?}").to_lowercase()
+        );
+    }
+    if let Some(ctx) = &env.context_file {
+        println!("  {} context file: {}", style("›").cyan(), ctx);
+    }
+    if let Some(esc) = &env.escalation {
+        if let Some(primary) = &esc.primary {
+            println!("  {} escalation primary: {}", style("›").cyan(), primary);
+        }
+    }
+    println!("  {} targets: {}", style("›").cyan(), env.targets.len());
+    for t in &env.targets {
+        println!("      {} [{:?}]", t.name, t.connection_type);
+    }
+    println!();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops_config::{EnvironmentConfig, ProjectConfig};
+
+    // ── parse_env_address ─────────────────────────────────────────
+    #[test]
+    fn parse_env_address_accepts_valid() {
+        let (p, e) = parse_env_address("shopfront::dev").expect("parse");
+        assert_eq!(p, "shopfront");
+        assert_eq!(e, "dev");
+    }
+
+    #[test]
+    fn parse_env_address_rejects_missing_separator() {
+        assert!(parse_env_address("shopfront").is_err());
+    }
+
+    #[test]
+    fn parse_env_address_rejects_empty_sides() {
+        assert!(parse_env_address("::dev").is_err());
+        assert!(parse_env_address("shopfront::").is_err());
+    }
+
+    // ── remove_project_at ─────────────────────────────────────────
+    async fn write_config(dir: &std::path::Path, cfg: &OpsConfig) -> std::path::PathBuf {
+        let path = dir.join("config.toml");
+        let toml_str = toml::to_string_pretty(cfg).expect("serialize");
+        tokio::fs::write(&path, toml_str).await.expect("write");
+        path
+    }
+
+    fn two_project_config(path: std::path::PathBuf) -> OpsConfig {
+        let mut cfg = OpsConfig::default();
+        cfg.config_path = path;
+        cfg.projects.push(ProjectConfig {
+            name: "shopfront".into(),
+            description: None,
+            context_file: None,
+            owners: None,
+            environments: vec![EnvironmentConfig {
+                name: "dev".into(),
+                ..EnvironmentConfig::default()
+            }],
+        });
+        cfg.projects.push(ProjectConfig {
+            name: "data-platform".into(),
+            description: None,
+            context_file: None,
+            owners: None,
+            environments: Vec::new(),
+        });
+        cfg
+    }
+
+    #[tokio::test]
+    async fn remove_project_drops_named_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = two_project_config(tmp.path().join("config.toml"));
+        let path = write_config(tmp.path(), &cfg).await;
+
+        remove_project_at(&path, "shopfront").await.expect("remove");
+
+        let reloaded = crate::ops::setup::load_existing_config(&path);
+        assert_eq!(reloaded.projects.len(), 1);
+        assert_eq!(reloaded.projects[0].name, "data-platform");
+    }
+
+    #[tokio::test]
+    async fn remove_project_errors_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = two_project_config(tmp.path().join("config.toml"));
+        let path = write_config(tmp.path(), &cfg).await;
+
+        let err = remove_project_at(&path, "ghost").await.unwrap_err();
+        assert!(err.to_string().contains("No project named 'ghost'"));
+    }
+
+    // ── remove_env_at ─────────────────────────────────────────────
+    #[tokio::test]
+    async fn remove_env_drops_named_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = two_project_config(tmp.path().join("config.toml"));
+        cfg.projects[0].environments.push(EnvironmentConfig {
+            name: "prod".into(),
+            ..EnvironmentConfig::default()
+        });
+        let path = write_config(tmp.path(), &cfg).await;
+
+        remove_env_at(&path, "shopfront", "dev").await.expect("remove");
+
+        let reloaded = crate::ops::setup::load_existing_config(&path);
+        let shopfront = reloaded.projects.iter().find(|p| p.name == "shopfront").unwrap();
+        assert_eq!(shopfront.environments.len(), 1);
+        assert_eq!(shopfront.environments[0].name, "prod");
+    }
+
+    #[tokio::test]
+    async fn remove_env_errors_on_unknown_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = two_project_config(tmp.path().join("config.toml"));
+        let path = write_config(tmp.path(), &cfg).await;
+
+        let err = remove_env_at(&path, "ghost", "dev").await.unwrap_err();
+        assert!(err.to_string().contains("Project 'ghost'"));
+    }
+
+    #[tokio::test]
+    async fn remove_env_errors_on_unknown_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = two_project_config(tmp.path().join("config.toml"));
+        let path = write_config(tmp.path(), &cfg).await;
+
+        let err = remove_env_at(&path, "shopfront", "ghost").await.unwrap_err();
+        assert!(err.to_string().contains("No environment named 'ghost'"));
+    }
+
+    // ── handle_project_list / handle_project_show / handle_env_list / handle_env_show ──
+    #[test]
+    fn project_list_handles_empty_config() {
+        let cfg = OpsConfig::default();
+        handle_project_list(&cfg).expect("list on empty config");
+    }
+
+    #[test]
+    fn project_list_with_projects() {
+        let mut cfg = OpsConfig::default();
+        cfg.projects.push(ProjectConfig {
+            name: "shopfront".into(),
+            description: Some("retail".into()),
+            context_file: None,
+            owners: None,
+            environments: vec![EnvironmentConfig::default()],
+        });
+        handle_project_list(&cfg).expect("list");
+    }
+
+    #[test]
+    fn project_show_finds_by_name() {
+        let mut cfg = OpsConfig::default();
+        cfg.projects.push(ProjectConfig {
+            name: "shopfront".into(),
+            description: None,
+            context_file: None,
+            owners: None,
+            environments: Vec::new(),
+        });
+        handle_project_show(&cfg, "shopfront").expect("show");
+    }
+
+    #[test]
+    fn project_show_errors_when_missing() {
+        let cfg = OpsConfig::default();
+        let err = handle_project_show(&cfg, "ghost").unwrap_err();
+        assert!(err.to_string().contains("Project 'ghost' not found"));
+    }
+
+    #[test]
+    fn env_list_empty_config() {
+        let cfg = OpsConfig::default();
+        handle_env_list(&cfg).expect("list on empty config");
+    }
+
+    #[test]
+    fn env_show_requires_address_form() {
+        let cfg = OpsConfig::default();
+        assert!(handle_env_show(&cfg, "no-separator").is_err());
+    }
+
+    #[test]
+    fn env_show_finds_by_address() {
+        let mut cfg = OpsConfig::default();
+        cfg.projects.push(ProjectConfig {
+            name: "shopfront".into(),
+            description: None,
+            context_file: None,
+            owners: None,
+            environments: vec![EnvironmentConfig {
+                name: "dev".into(),
+                ..EnvironmentConfig::default()
+            }],
+        });
+        handle_env_show(&cfg, "shopfront::dev").expect("show");
+    }
+
+    #[test]
+    fn env_show_errors_when_env_missing() {
+        let mut cfg = OpsConfig::default();
+        cfg.projects.push(ProjectConfig {
+            name: "shopfront".into(),
+            description: None,
+            context_file: None,
+            owners: None,
+            environments: Vec::new(),
+        });
+        let err = handle_env_show(&cfg, "shopfront::ghost").unwrap_err();
+        assert!(err.to_string().contains("Environment 'ghost'"));
+    }
 }

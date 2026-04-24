@@ -44,7 +44,16 @@ These commands come from the upstream zeroclaw runtime. They are not SRE-specifi
 
 **`memory`** — lists, inspects, and clears agent memory entries. Useful for debugging what the agent remembers between sessions.
 
-**`config`** — inspects configuration. Currently exposes `config schema` to dump the full JSON Schema for `config.toml`.
+**`config`** — inspects and edits configuration. Subcommands:
+
+- `config schema` — dumps the full JSON Schema for `config.toml`.
+- `config target {add|list|remove|context|context-edit|show}` — manages flat targets (the legacy non-hierarchical form). A target is a monitored endpoint: a remote server, a local machine, or a Kubernetes cluster. `config target add` walks you through an interactive wizard.
+- `config project {add|list|remove|show}` — manages top-level projects in the hierarchical layout (see [`hierarchy.md`](hierarchy.md) and [`projects.md`](projects.md)). A project wraps one or more environments.
+- `config env {add|list|remove|show}` — manages environments within a project. Address form is `project::env` (e.g. `config env remove shopfront::dev`). `config env add` prompts for the parent project; when only one project is configured it is auto-selected.
+- `config get <path>` / `config set <path> <value>` — read or write individual properties inherited from the upstream zeroclaw config schema.
+- `config schema` — see above.
+
+Flat targets (`config target`) and hierarchical projects (`config project` + `config env`) are mutually exclusive — pick one shape per config file.
 
 **`update`** — checks for and installs a new opsclaw release.
 
@@ -58,14 +67,9 @@ These commands come from the upstream zeroclaw runtime. They are not SRE-specifi
 
 ## OpsClaw SRE commands
 
-These commands are specific to OpsClaw's SRE role. They all operate on projects (monitored environments defined in `config.toml`).
+These commands are specific to OpsClaw's SRE role. They operate on targets (monitored endpoints in `config.toml`) and, in the hierarchical layout, on projects and environments.
 
-**`project`** — manages projects. A project is a monitored environment: a remote server, a local machine, or a Kubernetes cluster. Subcommands:
-- `project add` — interactive wizard to add a new project (name, connection type, SSH details, autonomy level)
-- `project list` — lists all configured projects
-- `project remove <name>` — removes a project from config
-- `project context <name>` — prints the project's context file
-- `project context-edit <name>` — opens the project's context file in `$EDITOR`. The context file is Markdown that describes the project to the agent: what runs on it, what normal looks like, who owns it.
+Target / project / environment management lives under `config` — see the **`config`** entry above. In short: `config target` for the flat layout, `config project` + `config env` for the hierarchical layout.
 
 **`scan`** — connects to a project (via SSH or locally) and takes an inventory snapshot: OS, running containers, systemd units, open ports, disk, memory, load. Saves the result to `~/.opsclaw/snapshots/<project>.json`. The first scan establishes the baseline that `monitor` compares future scans against.
 

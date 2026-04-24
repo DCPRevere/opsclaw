@@ -785,7 +785,6 @@ mod tests {
                 probes: None,
                 data_sources: Some(ds),
                 escalation: None,
-                databases: None,
                 kubeconfig: None,
                 context: None,
                 namespace: None,

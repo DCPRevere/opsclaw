@@ -1,10 +1,20 @@
 //! OpsClaw tool registry — creates SRE-specific tools from [`OpsConfig`]
 //! for injection into the ZeroClaw agent loop.
+//!
+//! Shared endpoint pools (prometheus, loki, elk, jaeger, pagerduty, github,
+//! cloudflare, rabbitmq, azure_service_bus) are gathered from every
+//! `projects[*].environments[*].endpoints` entry. `Vec<T>` pools are merged
+//! with a uniqueness check on `name`; singleton pools error if more than one
+//! environment declares them.
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use zeroclaw::tools::Tool;
 
-use crate::ops_config::{OpsConfig, ConnectionType};
+use crate::ops_config::{
+    AzureServiceBusConfig, CloudflareConfig, ElkEndpointConfig, EnvironmentConfig, GithubConfig,
+    JaegerEndpointConfig, LokiEndpointConfig, OpsConfig, PagerDutyConfig, PrometheusEndpointConfig,
+    RabbitMqConfig, ConnectionType,
+};
 use crate::tools::azure_service_bus_tool::{AzureServiceBusTool, AzureServiceBusToolConfig};
 use crate::tools::cert_tool::CertTool;
 use crate::tools::cloudflare_tool::{CloudflareTool, CloudflareToolConfig};
@@ -72,125 +82,89 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
         })));
     }
 
-    // Prometheus — one tool with all configured endpoints.
-    if let Some(eps) = config.prometheus.as_ref() {
-        let mut endpoints: Vec<PrometheusEndpoint> = Vec::with_capacity(eps.len());
-        for e in eps {
-            let bearer_token = match e.bearer_token.as_ref() {
-                Some(t) => config.decrypt_secret(t).await.ok(),
-                None => None,
-            };
+    // Gather endpoint pools from every environment.
+    let pools = gather_endpoints(config)?;
+
+    // Prometheus.
+    if !pools.prometheus.is_empty() {
+        let mut endpoints: Vec<PrometheusEndpoint> = Vec::with_capacity(pools.prometheus.len());
+        for e in &pools.prometheus {
             endpoints.push(PrometheusEndpoint {
                 name: e.name.clone(),
                 url: e.url.clone(),
-                bearer_token,
+                bearer_token: decrypt_optional(config, e.bearer_token.as_deref(), "prometheus bearer_token").await?,
             });
         }
-        if !endpoints.is_empty() {
-            tools.push(Box::new(PrometheusTool::new(endpoints)));
-        }
+        tools.push(Box::new(PrometheusTool::new(endpoints)));
     }
 
     // Loki.
-    if let Some(eps) = config.loki.as_ref() {
-        let mut endpoints: Vec<LokiEndpoint> = Vec::with_capacity(eps.len());
-        for e in eps {
-            let bearer_token = match e.bearer_token.as_ref() {
-                Some(t) => config.decrypt_secret(t).await.ok(),
-                None => None,
-            };
+    if !pools.loki.is_empty() {
+        let mut endpoints: Vec<LokiEndpoint> = Vec::with_capacity(pools.loki.len());
+        for e in &pools.loki {
             endpoints.push(LokiEndpoint {
                 name: e.name.clone(),
                 url: e.url.clone(),
-                bearer_token,
+                bearer_token: decrypt_optional(config, e.bearer_token.as_deref(), "loki bearer_token").await?,
                 org_id: e.org_id.clone(),
             });
         }
-        if !endpoints.is_empty() {
-            tools.push(Box::new(LokiTool::new(endpoints)));
-        }
+        tools.push(Box::new(LokiTool::new(endpoints)));
     }
 
     // Elk.
-    if let Some(eps) = config.elk.as_ref() {
-        let mut endpoints: Vec<ElkEndpoint> = Vec::with_capacity(eps.len());
-        for e in eps {
-            let password = match e.password.as_ref() {
-                Some(p) => config.decrypt_secret(p).await.ok(),
-                None => None,
-            };
-            let api_key = match e.api_key.as_ref() {
-                Some(k) => config.decrypt_secret(k).await.ok(),
-                None => None,
-            };
+    if !pools.elk.is_empty() {
+        let mut endpoints: Vec<ElkEndpoint> = Vec::with_capacity(pools.elk.len());
+        for e in &pools.elk {
             endpoints.push(ElkEndpoint {
                 name: e.name.clone(),
                 url: e.url.clone(),
                 username: e.username.clone(),
-                password,
-                api_key,
+                password: decrypt_optional(config, e.password.as_deref(), "elk password").await?,
+                api_key: decrypt_optional(config, e.api_key.as_deref(), "elk api_key").await?,
                 default_index: e.default_index.clone(),
             });
         }
-        if !endpoints.is_empty() {
-            tools.push(Box::new(ElkTool::new(endpoints)));
-        }
+        tools.push(Box::new(ElkTool::new(endpoints)));
     }
 
     // PagerDuty.
-    if let Some(pd) = config.pagerduty.as_ref() {
-        match config.decrypt_secret(&pd.api_key).await {
-            Ok(api_key) => {
-                let mut cfg = PagerDutyToolConfig::new(api_key);
-                cfg.default_service_id = pd.default_service_id.clone();
-                cfg.default_from = pd.default_from.clone();
-                cfg.autonomy = pd.autonomy;
-                tools.push(Box::new(PagerDutyTool::new(cfg)));
-            }
-            Err(e) => {
-                tracing::warn!("Skipping PagerDuty tool — failed to resolve api_key: {e}");
-            }
-        }
+    if let Some(pd) = pools.pagerduty.as_ref() {
+        let api_key = config.decrypt_secret(&pd.api_key).await
+            .context("Failed to resolve PagerDuty api_key")?;
+        let mut cfg = PagerDutyToolConfig::new(api_key);
+        cfg.default_service_id = pd.default_service_id.clone();
+        cfg.default_from = pd.default_from.clone();
+        cfg.autonomy = pd.autonomy;
+        tools.push(Box::new(PagerDutyTool::new(cfg)));
     }
 
     // GitHub.
-    if let Some(gh) = config.github.as_ref() {
-        match config.decrypt_secret(&gh.token).await {
-            Ok(token) => {
-                let mut cfg = GithubToolConfig::new(token);
-                cfg.default_owner = gh.default_owner.clone();
-                cfg.default_repo = gh.default_repo.clone();
-                cfg.autonomy = gh.autonomy;
-                tools.push(Box::new(GithubTool::new(cfg)));
-            }
-            Err(e) => {
-                tracing::warn!("Skipping GitHub tool — failed to resolve token: {e}");
-            }
-        }
+    if let Some(gh) = pools.github.as_ref() {
+        let token = config.decrypt_secret(&gh.token).await
+            .context("Failed to resolve GitHub token")?;
+        let mut cfg = GithubToolConfig::new(token);
+        cfg.default_owner = gh.default_owner.clone();
+        cfg.default_repo = gh.default_repo.clone();
+        cfg.autonomy = gh.autonomy;
+        tools.push(Box::new(GithubTool::new(cfg)));
     }
 
     // Cloudflare.
-    if let Some(cf) = config.cloudflare.as_ref() {
-        match config.decrypt_secret(&cf.api_token).await {
-            Ok(tok) => {
-                let mut cfg = CloudflareToolConfig::new(tok);
-                cfg.default_zone_id = cf.default_zone_id.clone();
-                cfg.default_account_id = cf.default_account_id.clone();
-                cfg.autonomy = cf.autonomy;
-                tools.push(Box::new(CloudflareTool::new(cfg)));
-            }
-            Err(e) => {
-                tracing::warn!("Skipping Cloudflare tool — failed to resolve api_token: {e}");
-            }
-        }
+    if let Some(cf) = pools.cloudflare.as_ref() {
+        let tok = config.decrypt_secret(&cf.api_token).await
+            .context("Failed to resolve Cloudflare api_token")?;
+        let mut cfg = CloudflareToolConfig::new(tok);
+        cfg.default_zone_id = cf.default_zone_id.clone();
+        cfg.default_account_id = cf.default_account_id.clone();
+        cfg.autonomy = cf.autonomy;
+        tools.push(Box::new(CloudflareTool::new(cfg)));
     }
 
     // RabbitMQ.
-    if let Some(rmq) = config.rabbitmq.as_ref() {
-        let password = config
-            .decrypt_secret(&rmq.password)
-            .await
-            .unwrap_or_else(|_| rmq.password.clone());
+    if let Some(rmq) = pools.rabbitmq.as_ref() {
+        let password = config.decrypt_secret(&rmq.password).await
+            .context("Failed to resolve RabbitMQ password")?;
         let mut cfg =
             RabbitMqToolConfig::new(rmq.api_base.clone(), rmq.username.clone(), password);
         cfg.default_vhost = rmq.default_vhost.clone();
@@ -199,32 +173,24 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
     }
 
     // Jaeger.
-    if let Some(eps) = config.jaeger.as_ref() {
-        let mut endpoints: Vec<JaegerEndpoint> = Vec::with_capacity(eps.len());
-        for e in eps {
-            let bearer_token = match e.bearer_token.as_ref() {
-                Some(t) => config.decrypt_secret(t).await.ok(),
-                None => None,
-            };
+    if !pools.jaeger.is_empty() {
+        let mut endpoints: Vec<JaegerEndpoint> = Vec::with_capacity(pools.jaeger.len());
+        for e in &pools.jaeger {
             endpoints.push(JaegerEndpoint {
                 name: e.name.clone(),
                 url: e.url.clone(),
-                bearer_token,
+                bearer_token: decrypt_optional(config, e.bearer_token.as_deref(), "jaeger bearer_token").await?,
             });
         }
-        if !endpoints.is_empty() {
-            tools.push(Box::new(JaegerTool::new(endpoints)));
-        }
+        tools.push(Box::new(JaegerTool::new(endpoints)));
     }
 
-    // Postgres (driver-based).
+    // Postgres (driver-based). Still at the root — no environment slot yet.
     if let Some(pgs) = config.postgres.as_ref() {
         let mut instances: Vec<PostgresInstance> = Vec::with_capacity(pgs.len());
         for p in pgs {
-            let dsn = config
-                .decrypt_secret(&p.dsn)
-                .await
-                .unwrap_or_else(|_| p.dsn.clone());
+            let dsn = config.decrypt_secret(&p.dsn).await
+                .with_context(|| format!("Failed to resolve DSN for postgres instance '{}'", p.name))?;
             instances.push(PostgresInstance {
                 name: p.name.clone(),
                 dsn,
@@ -239,32 +205,154 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
     }
 
     // Azure Service Bus.
-    if let Some(sb) = config.azure_service_bus.as_ref() {
-        match config.decrypt_secret(&sb.sas_key).await {
-            Ok(key) => {
-                let mut cfg = AzureServiceBusToolConfig::new(
-                    sb.namespace.clone(),
-                    sb.sas_key_name.clone(),
-                    key,
-                );
-                cfg.autonomy = sb.autonomy;
-                tools.push(Box::new(AzureServiceBusTool::new(cfg)));
-            }
-            Err(e) => {
-                tracing::warn!("Skipping Azure Service Bus tool — failed to resolve sas_key: {e}");
-            }
-        }
+    if let Some(sb) = pools.azure_service_bus.as_ref() {
+        let key = config.decrypt_secret(&sb.sas_key).await
+            .context("Failed to resolve Azure Service Bus sas_key")?;
+        let mut cfg = AzureServiceBusToolConfig::new(
+            sb.namespace.clone(),
+            sb.sas_key_name.clone(),
+            key,
+        );
+        cfg.autonomy = sb.autonomy;
+        tools.push(Box::new(AzureServiceBusTool::new(cfg)));
     }
 
     Ok(tools)
 }
 
+/// Resolve an optional secret reference. Returns `Ok(None)` when the input is
+/// `None`; returns an error when decryption fails so the caller can surface it.
+async fn decrypt_optional(
+    config: &OpsConfig,
+    value: Option<&str>,
+    field: &str,
+) -> Result<Option<String>> {
+    match value {
+        None => Ok(None),
+        Some(v) => {
+            let plain = config.decrypt_secret(v).await
+                .with_context(|| format!("Failed to resolve {field}"))?;
+            Ok(Some(plain))
+        }
+    }
+}
+
+/// Flattened endpoint pools gathered across every environment in the config.
+#[derive(Default)]
+struct GatheredEndpoints<'a> {
+    prometheus: Vec<&'a PrometheusEndpointConfig>,
+    loki: Vec<&'a LokiEndpointConfig>,
+    elk: Vec<&'a ElkEndpointConfig>,
+    jaeger: Vec<&'a JaegerEndpointConfig>,
+    pagerduty: Option<&'a PagerDutyConfig>,
+    github: Option<&'a GithubConfig>,
+    cloudflare: Option<&'a CloudflareConfig>,
+    rabbitmq: Option<&'a RabbitMqConfig>,
+    azure_service_bus: Option<&'a AzureServiceBusConfig>,
+}
+
+/// Walk every environment and collect endpoint pools. `Vec<T>` pools merge
+/// with a uniqueness check on `name`; singleton pools error if more than one
+/// environment declares them.
+fn gather_endpoints(config: &OpsConfig) -> Result<GatheredEndpoints<'_>> {
+    let mut out = GatheredEndpoints::default();
+    let mut seen_prom = std::collections::HashSet::new();
+    let mut seen_loki = std::collections::HashSet::new();
+    let mut seen_elk = std::collections::HashSet::new();
+    let mut seen_jaeger = std::collections::HashSet::new();
+    let mut pagerduty_origin: Option<String> = None;
+    let mut github_origin: Option<String> = None;
+    let mut cloudflare_origin: Option<String> = None;
+    let mut rabbitmq_origin: Option<String> = None;
+    let mut asb_origin: Option<String> = None;
+
+    for project in &config.projects {
+        for env in &project.environments {
+            let origin = format!("{}::{}", project.name, env.name);
+            let eps = &env.endpoints;
+
+            if let Some(list) = eps.prometheus.as_ref() {
+                for e in list {
+                    if !seen_prom.insert(e.name.clone()) {
+                        bail!(
+                            "Duplicate prometheus endpoint '{}' in environment {origin}",
+                            e.name
+                        );
+                    }
+                    out.prometheus.push(e);
+                }
+            }
+            if let Some(list) = eps.loki.as_ref() {
+                for e in list {
+                    if !seen_loki.insert(e.name.clone()) {
+                        bail!("Duplicate loki endpoint '{}' in environment {origin}", e.name);
+                    }
+                    out.loki.push(e);
+                }
+            }
+            if let Some(list) = eps.elk.as_ref() {
+                for e in list {
+                    if !seen_elk.insert(e.name.clone()) {
+                        bail!("Duplicate elk endpoint '{}' in environment {origin}", e.name);
+                    }
+                    out.elk.push(e);
+                }
+            }
+            if let Some(list) = eps.jaeger.as_ref() {
+                for e in list {
+                    if !seen_jaeger.insert(e.name.clone()) {
+                        bail!("Duplicate jaeger endpoint '{}' in environment {origin}", e.name);
+                    }
+                    out.jaeger.push(e);
+                }
+            }
+
+            set_singleton(&mut out.pagerduty, eps.pagerduty.as_ref(), &mut pagerduty_origin, &origin, "pagerduty")?;
+            set_singleton(&mut out.github, eps.github.as_ref(), &mut github_origin, &origin, "github")?;
+            set_singleton(&mut out.cloudflare, eps.cloudflare.as_ref(), &mut cloudflare_origin, &origin, "cloudflare")?;
+            set_singleton(&mut out.rabbitmq, eps.rabbitmq.as_ref(), &mut rabbitmq_origin, &origin, "rabbitmq")?;
+            set_singleton(&mut out.azure_service_bus, eps.azure_service_bus.as_ref(), &mut asb_origin, &origin, "azure_service_bus")?;
+        }
+    }
+
+    Ok(out)
+}
+
+fn set_singleton<'a, T>(
+    slot: &mut Option<&'a T>,
+    incoming: Option<&'a T>,
+    origin_slot: &mut Option<String>,
+    origin: &str,
+    name: &str,
+) -> Result<()> {
+    let Some(cfg) = incoming else { return Ok(()); };
+    if let Some(prev) = origin_slot.as_deref() {
+        bail!(
+            "Duplicate {name} config: declared in environment {prev} and {origin}. \
+             Only one environment may declare a singleton pool."
+        );
+    }
+    *slot = Some(cfg);
+    *origin_slot = Some(origin.to_string());
+    Ok(())
+}
+
 /// Extract SSH project entries from config, resolving key secrets as needed.
+///
+/// Reads both the flat `targets` list and every
+/// `projects[*].environments[*].targets` list.
 async fn build_ssh_entries(config: &OpsConfig) -> Result<Vec<TargetEntry>> {
-    let projects = config.targets.as_deref().unwrap_or_default();
     let mut entries = Vec::new();
 
-    for project in projects {
+    let mut all_targets: Vec<&crate::ops_config::TargetConfig> = Vec::new();
+    all_targets.extend(config.targets.as_deref().unwrap_or_default().iter());
+    for project in &config.projects {
+        for env in &project.environments {
+            all_targets.extend(env.targets.iter());
+        }
+    }
+
+    for project in all_targets {
         if project.connection_type != ConnectionType::Ssh {
             continue;
         }
@@ -282,16 +370,8 @@ async fn build_ssh_entries(config: &OpsConfig) -> Result<Vec<TargetEntry>> {
             None => continue,
         };
 
-        let key_pem = match config.decrypt_secret(raw_key).await {
-            Ok(k) => k,
-            Err(e) => {
-                tracing::warn!(
-                    project = project.name,
-                    "Skipping SSH project — failed to resolve key: {e}"
-                );
-                continue;
-            }
-        };
+        let key_pem = config.decrypt_secret(raw_key).await
+            .with_context(|| format!("Failed to resolve SSH key for target '{}'", project.name))?;
 
         entries.push(TargetEntry {
             name: project.name.clone(),

@@ -29,8 +29,7 @@
     clippy::unnecessary_lazy_evaluations,
     clippy::unnecessary_literal_bound,
     clippy::unnecessary_map_or,
-    clippy::unnecessary_wraps,
-    dead_code
+    clippy::unnecessary_wraps
 )]
 
 use anyhow::{bail, Context, Result};
@@ -695,12 +694,12 @@ enum ConfigCommands {
         #[command(subcommand)]
         target_command: TargetCommands,
     },
-    /// Manage projects (top-level product wrappers — not yet implemented)
+    /// Manage projects (top-level product wrappers)
     Project {
         #[command(subcommand)]
         project_command: ProjectCommands,
     },
-    /// Manage environments (policy boundaries — not yet implemented)
+    /// Manage environments (policy boundaries)
     Env {
         #[command(subcommand)]
         env_command: EnvCommands,
@@ -737,16 +736,16 @@ enum TargetCommands {
 
 #[derive(Subcommand, Debug)]
 enum ProjectCommands {
-    /// Interactively add a new project (not yet implemented)
+    /// Interactively add a new project
     Add,
-    /// List all configured projects (not yet implemented)
+    /// List all configured projects
     List,
-    /// Remove a project from the config (not yet implemented)
+    /// Remove a project from the config
     Remove {
         /// Project name to remove
         name: String,
     },
-    /// Show all configuration for a project (not yet implemented)
+    /// Show all configuration for a project
     Show {
         /// Project name
         name: String,
@@ -755,16 +754,16 @@ enum ProjectCommands {
 
 #[derive(Subcommand, Debug)]
 enum EnvCommands {
-    /// Interactively add a new environment (not yet implemented)
+    /// Interactively add a new environment
     Add,
-    /// List all configured environments (not yet implemented)
+    /// List all configured environments
     List,
-    /// Remove an environment from the config (not yet implemented)
+    /// Remove an environment from the config
     Remove {
         /// Environment address (project::env)
         name: String,
     },
-    /// Show all configuration for an environment (not yet implemented)
+    /// Show all configuration for an environment
     Show {
         /// Environment address (project::env)
         name: String,
@@ -981,7 +980,8 @@ async fn main() -> Result<()> {
         )
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber)
+        .context("failed to initialize logging (tracing subscriber already set)")?;
 
     // Onboard auto-detects the environment: if stdin/stdout are a TTY and no
     // provider flags were given, it runs the full interactive wizard; otherwise
@@ -1301,6 +1301,27 @@ async fn main() -> Result<()> {
                 daemon_ext::seed_heartbeat_file(&config.workspace_dir, &ops_config).await
             {
                 warn!("Failed to seed HEARTBEAT.md: {e}");
+            }
+
+            // Optional inbound A2A (Agent-to-Agent) server. Off by default.
+            if let Some(a2a) = ops_config.a2a.as_ref() {
+                if a2a.server.enabled {
+                    let mut server_cfg = a2a.server.clone();
+                    if !server_cfg.token.is_empty() {
+                        match ops_config.decrypt_secret(&server_cfg.token).await {
+                            Ok(plain) => server_cfg.token = plain,
+                            Err(e) => {
+                                bail!("Failed to decrypt A2A server token: {e}");
+                            }
+                        }
+                    }
+                    info!("Starting A2A server on {}:{}", server_cfg.bind, server_cfg.port);
+                    tokio::spawn(async move {
+                        if let Err(e) = tools::a2a_server::run_a2a_server(server_cfg).await {
+                            tracing::error!(error = %e, "A2A server exited with error");
+                        }
+                    });
+                }
             }
 
             let subsystems = daemon::DaemonSubsystems {
@@ -1885,7 +1906,7 @@ async fn main() -> Result<()> {
                 TargetCommands::Add => Box::pin(ops_cli::handle_target_add(&ops_config)).await,
                 TargetCommands::List => ops_cli::handle_target_list(&ops_config),
                 TargetCommands::Remove { name } => {
-                    Box::pin(ops_cli::handle_target_remove(&ops_config, &name)).await
+                    Box::pin(ops_cli::handle_target_remove(&name)).await
                 }
                 TargetCommands::Context { name } => {
                     ops_cli::handle_context_print(&ops_config, &name)
@@ -1895,32 +1916,24 @@ async fn main() -> Result<()> {
                 }
                 TargetCommands::Show { name } => ops_cli::handle_target_show(&ops_config, &name),
             },
-            ConfigCommands::Project { project_command } => {
-                let action = match project_command {
-                    ProjectCommands::Add => "add",
-                    ProjectCommands::List => "list",
-                    ProjectCommands::Remove { .. } => "remove",
-                    ProjectCommands::Show { .. } => "show",
-                };
-                eprintln!(
-                    "opsclaw config project {action}: not yet implemented \
-                     (hierarchy work is tracked under ADR-005)"
-                );
-                Ok(())
-            }
-            ConfigCommands::Env { env_command } => {
-                let action = match env_command {
-                    EnvCommands::Add => "add",
-                    EnvCommands::List => "list",
-                    EnvCommands::Remove { .. } => "remove",
-                    EnvCommands::Show { .. } => "show",
-                };
-                eprintln!(
-                    "opsclaw config env {action}: not yet implemented \
-                     (hierarchy work is tracked under ADR-005)"
-                );
-                Ok(())
-            }
+            ConfigCommands::Project { project_command } => match project_command {
+                ProjectCommands::Add => Box::pin(ops_cli::handle_project_add()).await,
+                ProjectCommands::List => ops_cli::handle_project_list(&ops_config),
+                ProjectCommands::Remove { name } => {
+                    Box::pin(ops_cli::handle_project_remove(&name)).await
+                }
+                ProjectCommands::Show { name } => {
+                    ops_cli::handle_project_show(&ops_config, &name)
+                }
+            },
+            ConfigCommands::Env { env_command } => match env_command {
+                EnvCommands::Add => Box::pin(ops_cli::handle_env_add()).await,
+                EnvCommands::List => ops_cli::handle_env_list(&ops_config),
+                EnvCommands::Remove { name } => {
+                    Box::pin(ops_cli::handle_env_remove(&name)).await
+                }
+                EnvCommands::Show { name } => ops_cli::handle_env_show(&ops_config, &name),
+            },
         },
 
         Commands::Scan { target, all } => ops_cli::handle_scan(&ops_config, target, all).await,

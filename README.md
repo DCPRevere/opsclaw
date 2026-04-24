@@ -8,7 +8,7 @@
 <p align="center">
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-edition%202021-orange?logo=rust" alt="Rust Edition 2021" /></a>
 
-  <a href="https://github.com/dcprevere/opsclaw/releases/latest"><img src="https://img.shields.io/badge/version-v0.6.2-blue" alt="Version v0.6.2" /></a>
+  <a href="https://github.com/dcprevere/opsclaw/releases/latest"><img src="https://img.shields.io/badge/opsclaw-v0.6.2-blue" alt="opsclaw v0.6.2" /></a>
 </p>
 
 OpsClaw is an autonomous SRE agent that SSHes into your servers, inspects Kubernetes clusters, runs diagnostics, remembers past incidents, and follows your runbooks — all without waking you up. It uses the [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) runtime for LLM providers, channels, scheduling, and memory, and adds SRE-specific tooling on top.
@@ -50,13 +50,15 @@ opsclaw daemon
 
 ## Architecture
 
-OpsClaw is a workspace of three crates:
+OpsClaw is a Cargo workspace. The SRE agent lives in `crates/opsclaw`; the rest is upstream ZeroClaw plus a few independent toolkits.
 
-| Crate | Purpose |
-|-------|---------|
-| `crates/zeroclawlabs` | Core agent runtime (LLM providers, channels, scheduler, memory, gateway). Upstream ZeroClaw. |
-| `crates/opsclaw` | Autonomous SRE agent (SSH tools, k8s, incident memory, runbooks, setup wizard). |
-| `crates/robot-kit` | Robotics/embedded toolkit. Independent of the other two. |
+| Area | Crates |
+|------|--------|
+| OpsClaw SRE agent | `crates/opsclaw` — SSH tools, k8s, incident memory, runbooks, setup wizard. |
+| ZeroClaw runtime (upstream) | `crates/zeroclaw-*` — runtime, providers, channels, config, memory, gateway, tools, TUI, and supporting crates. |
+| Independent | `crates/robot-kit`, `crates/aardvark-sys` — robotics/embedded toolkits, unrelated to the SRE agent. |
+
+The `zeroclawlabs` root package is an umbrella facade that re-exports the upstream crates so opsclaw can depend on them by a single name.
 
 ## Configuration
 

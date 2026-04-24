@@ -12,7 +12,7 @@ use kube::api::{Api, ListParams, LogParams, Patch, PatchParams};
 use kube::config::KubeConfigOptions;
 use kube::Client;
 use serde::Serialize;
-use tracing::{debug, warn};
+use tracing::{debug, error};
 
 use super::discovery::{
     K8sDeployment, K8sNode, K8sPod, K8sService, KubernetesInfo, TargetSnapshot,
@@ -87,30 +87,20 @@ impl KubeClient {
     /// [`KubernetesInfo`] snapshot.
     pub async fn discover_k8s(&self) -> Result<KubernetesInfo> {
         debug!("Starting Kubernetes discovery");
-        let cluster_info = self.cluster_version().await.unwrap_or_else(|e| {
-            warn!(error = %e, "Failed to retrieve cluster version");
-            String::new()
-        });
-        let namespaces = self.list_namespaces().await.unwrap_or_else(|e| {
-            warn!(error = %e, "Failed to list namespaces");
-            Vec::new()
-        });
-        let pods = self.list_pods(None).await.unwrap_or_else(|e| {
-            warn!(error = %e, "Failed to list pods");
-            Vec::new()
-        });
-        let deployments = self.list_deployments(None).await.unwrap_or_else(|e| {
-            warn!(error = %e, "Failed to list deployments");
-            Vec::new()
-        });
-        let services = self.list_services(None).await.unwrap_or_else(|e| {
-            warn!(error = %e, "Failed to list services");
-            Vec::new()
-        });
-        let nodes = self.list_nodes().await.unwrap_or_else(|e| {
-            warn!(error = %e, "Failed to list nodes");
-            Vec::new()
-        });
+        // cluster_version is informational (may require privileges old RBAC
+        // rejects); the rest of the snapshot is meaningful without it.
+        let cluster_info = match self.cluster_version().await {
+            Ok(v) => v,
+            Err(e) => {
+                error!(error = %e, "Failed to retrieve cluster version — continuing without it");
+                String::new()
+            }
+        };
+        let namespaces = self.list_namespaces().await.context("list namespaces")?;
+        let pods = self.list_pods(None).await.context("list pods")?;
+        let deployments = self.list_deployments(None).await.context("list deployments")?;
+        let services = self.list_services(None).await.context("list services")?;
+        let nodes = self.list_nodes().await.context("list nodes")?;
         debug!(
             pods = pods.len(),
             deployments = deployments.len(),
@@ -706,10 +696,15 @@ impl KubeTool {
 
     /// Build Kubernetes target entries from the OpsConfig.
     pub fn targets_from_config(config: &OpsConfig) -> Vec<KubeTarget> {
-        let targets = config.targets.as_deref().unwrap_or_default();
-        targets
-            .iter()
-            .filter(|t: &&TargetConfig| t.connection_type == ConnectionType::Kubernetes)
+        let mut all: Vec<&TargetConfig> = Vec::new();
+        all.extend(config.targets.as_deref().unwrap_or_default().iter());
+        for project in &config.projects {
+            for env in &project.environments {
+                all.extend(env.targets.iter());
+            }
+        }
+        all.into_iter()
+            .filter(|t| t.connection_type == ConnectionType::Kubernetes)
             .map(|t| KubeTarget {
                 name: t.name.clone(),
                 kubeconfig: t.kubeconfig.clone(),

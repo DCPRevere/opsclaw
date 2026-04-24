@@ -234,7 +234,6 @@ pub async fn step_ssh_target() -> Result<TargetResult> {
         probes: None,
         data_sources: None,
         escalation: None,
-        databases: None,
         kubeconfig: None,
         context: None,
         namespace: None,
@@ -269,7 +268,6 @@ pub fn step_local_target() -> Result<TargetResult> {
         probes: None,
         data_sources: None,
         escalation: None,
-        databases: None,
         kubeconfig: None,
         context: None,
         namespace: None,
@@ -309,7 +307,6 @@ pub fn step_kubernetes_target() -> Result<TargetResult> {
         probes: None,
         data_sources: None,
         escalation: None,
-        databases: None,
         kubeconfig: if kubeconfig.is_empty() {
             None
         } else {

@@ -1,0 +1,9 @@
+{
+  "description": "No fault. Agent must not fire alerts on a healthy host.",
+  "phase_arm": {
+    "within_seconds": 210,
+    "assert": {
+      "alert_present": false
+    }
+  }
+}

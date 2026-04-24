@@ -133,6 +133,12 @@ port = 0
 send_url = "http://127.0.0.1:$WEBHOOK_PORT/alerts"
 send_method = "POST"
 
+# opsclaw_notify reads from here directly (separate from the zeroclaw
+# channel system above, which is for inbound/session chat).
+[notifications]
+webhook_url = "http://127.0.0.1:$WEBHOOK_PORT/alerts"
+min_severity = "warning"
+
 [[targets]]
 name = "sim-target"
 type = "ssh"

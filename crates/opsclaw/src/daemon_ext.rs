@@ -70,12 +70,15 @@ pub async fn seed_heartbeat_file(workspace_dir: &Path, ops_config: &OpsConfig) -
             "- [high] Run a health check on target '{name}' using the monitor tool. \
              Inspect the snapshot and use the ssh tool to investigate further when \
              anything looks concerning (high memory/disk/load, missing containers or \
-             services, unusual state). When you confirm a real problem, you MUST call \
-             the escalate_to_human tool with a one-line summary, the relevant context, \
-             and an appropriate urgency (warning → medium, critical → high). Do not \
-             just describe the problem in your final reply: an unsent escalation is a \
+             services, unusual state). If the target is unreachable, say so — do NOT \
+             fabricate a healthy snapshot. When you confirm a real problem, you MUST \
+             call the opsclaw_notify tool with: summary (one line), severity \
+             (warning or critical), category (e.g. HighMemory, DiskFull, \
+             ServiceStopped, PortClosed, Unreachable), details (what you observed \
+             and which commands confirmed it), and target '{name}'. Do NOT describe \
+             the problem only in your final reply: an unsent notification is a \
              missed alert. If everything looks healthy, say so briefly and do not \
-             escalate.\n"
+             call opsclaw_notify.\n"
         ));
     }
 

@@ -16,6 +16,7 @@ pub mod postgres_tool;
 pub mod loki_tool;
 pub mod monitor_tool;
 pub mod monitoring;
+pub mod opsclaw_notify;
 pub mod pagerduty_tool;
 pub mod prometheus_tool;
 pub mod rabbitmq_tool;

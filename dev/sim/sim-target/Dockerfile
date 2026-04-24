@@ -15,6 +15,10 @@ RUN apt-get update && apt-get install -y \
     stress-ng \
     coreutils \
     util-linux \
+    iptables \
+    python3 \
+    ncat \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /run/sshd
 
@@ -28,6 +32,13 @@ RUN useradd -m -s /bin/bash opsclaw \
 # disk-pressure scenarios goes under /data — backed by a tmpfs in compose
 # so dd-fills disappear on container restart and never touch the host.
 RUN mkdir -p /data && chmod 755 /data
+
+# "myapp" sentinel service. Minimal HTTP server that binds 8080 and
+# logs to /var/log/myapp.log, started at boot by entrypoint. Scenarios
+# kill/stop/DROP this to simulate a service fault.
+RUN mkdir -p /opt/myapp /var/log && chmod 755 /var/log
+COPY myapp.py /opt/myapp/myapp.py
+RUN chmod +x /opt/myapp/myapp.py
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

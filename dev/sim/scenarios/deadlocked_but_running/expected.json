@@ -1,0 +1,22 @@
+{
+  "description": "myapp SIGSTOPped: ps looks OK but probe hangs",
+  "phase_arm": {
+    "within_seconds": 240,
+    "assert": {
+      "alert_present": true,
+      "notify_payload": {
+        "severity_at_least": "warning",
+        "category_matches": "(?i)(stuck|deadlock|hang|unresponsive|stalled|frozen|timeout|hung)",
+        "content_must_mention": ["myapp"]
+      }
+    }
+  },
+  "phase_dedup": {
+    "wait_seconds": 75,
+    "assert": { "extra_alerts_max": 1 }
+  },
+  "phase_disarm": {
+    "within_seconds": 120,
+    "assert": { "resolution_present_or_silent": true }
+  }
+}

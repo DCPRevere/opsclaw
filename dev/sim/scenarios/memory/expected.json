@@ -1,0 +1,27 @@
+{
+  "description": "sim-target memory at ~87% (7 GB of 8 GB cgroup cap)",
+  "phase_arm": {
+    "within_seconds": 150,
+    "assert": {
+      "alert_present": true,
+      "notify_payload": {
+        "severity_at_least": "warning",
+        "category_matches": "(?i)(high.?memory|memory|oom)",
+        "content_must_mention": ["memory"],
+        "content_must_not_mention": ["dns error"]
+      }
+    }
+  },
+  "phase_dedup": {
+    "wait_seconds": 75,
+    "assert": {
+      "extra_alerts_max": 1
+    }
+  },
+  "phase_disarm": {
+    "within_seconds": 150,
+    "assert": {
+      "resolution_present_or_silent": true
+    }
+  }
+}

@@ -73,6 +73,25 @@ cargo test --workspace               # run all tests
 
 Feature flags gate optional capabilities (Prometheus, Matrix, WhatsApp, OpenTelemetry). Check `Cargo.toml` before assuming a dependency is available.
 
+### Production-readiness testing
+
+Unit tests verify correctness at the function boundary; they do not prove that OpsClaw runs correctly as a whole. Three harnesses exist above that, driven by a single top-level script:
+
+```sh
+dev/test.sh tier1      # component-level tool tests (cargo integration tests)
+dev/test.sh tier2      # sim harness: real faults, real agent, asserted responses
+dev/test.sh tier3      # flow harness: onboarding, daemon, doctor, estop, etc.
+dev/test.sh ready      # runs all three, emits target/ready-verdict.json
+```
+
+Tier 2 is the one that answers "does OpsClaw actually respond to incidents correctly?" It runs the opsclaw daemon against a gVisor-sandboxed target, injects real cgroup-bounded pressure (stress-ng, fallocate, SIGSTOP, log-flood), and asserts the agent detects the fault, calls `opsclaw_notify` with a payload matching the scenario's `expected.json` manifest, and does not spam. See `TIER2_STATUS.md` for the covered scenarios and known gaps (iptables-based scenarios are blocked by gVisor's netstack).
+
+Scenario layout: each lives at `dev/sim/scenarios/<name>/` with `arm.sh`, `disarm.sh`, `expected.json`, and `README.md`. To add one, copy an existing directory and adjust; run just your new scenario with `dev/test.sh tier2 --only <name>`.
+
+Tier 2 is parallelisable. `dev/test.sh tier2 --parallel 3 --bring-up` runs three scenarios concurrently across three isolated "slots" — each slot is its own sim-target + webhook-sink + OpsClaw daemon on its own bridge network, with per-slot SSH/webhook ports and state directories. `dev/sim/harness/slot.sh` owns slot lifecycle; the orchestrator in `run.sh` maintains a job pool. Each slot costs ~1 GB RAM + 1 CPU + concurrent LLM API usage. Serial and parallel runs produce identical assertions because every slot has its own `requests.jsonl` alert stream.
+
+Tier 2 requires `dev/sim/.env` with `OPENAI_API_KEY=…` (gitignored). It runs under gVisor (`runsc`); install once with `sudo runsc install && sudo systemctl restart docker`.
+
 ## What not to change
 
 - `docs/` — user-facing documentation, not auto-generated. Edit deliberately.

@@ -1,8 +1,0 @@
-{
-  "alert": {
-    "content_keywords_any": ["memory", "RAM"],
-    "min_urgency": "medium",
-    "description": "Container memory at ~87% (7 GB of 8 GB cgroup cap)"
-  },
-  "max_detection_seconds": 150
-}

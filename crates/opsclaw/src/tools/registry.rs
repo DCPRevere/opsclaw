@@ -65,6 +65,12 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
     // Monitor tool — wraps discovery scan + health check.
     tools.push(Box::new(MonitorTool::new(config.clone())));
 
+    // OpsClaw notify — opsclaw-owned outbound alert over a webhook.
+    // Sibling to zeroclaw's escalate_to_human; see opsclaw_notify.rs.
+    tools.push(Box::new(
+        crate::tools::opsclaw_notify::OpsClawNotifyTool::new(config),
+    ));
+
     // DNS tool — ad-hoc lookups, no config required.
     tools.push(Box::new(DnsTool::new()));
 

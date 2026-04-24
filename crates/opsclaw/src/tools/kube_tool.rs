@@ -205,6 +205,31 @@ impl KubeClient {
         Ok(())
     }
 
+    /// Scale a deployment to `replicas` by patching its `spec.replicas`.
+    pub async fn scale_deployment(
+        &self,
+        namespace: &str,
+        name: &str,
+        replicas: i32,
+    ) -> Result<()> {
+        let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
+        let patch = serde_json::json!({ "spec": { "replicas": replicas } });
+        deployments
+            .patch(name, &PatchParams::default(), &Patch::Merge(patch))
+            .await
+            .with_context(|| format!("failed to scale {namespace}/{name} to {replicas}"))?;
+        Ok(())
+    }
+
+    /// Delete a pod (the controller will recreate if it's managed).
+    pub async fn delete_pod(&self, namespace: &str, name: &str) -> Result<()> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+        pods.delete(name, &kube::api::DeleteParams::default())
+            .await
+            .with_context(|| format!("failed to delete pod {namespace}/{name}"))?;
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Events (for watch command)
     // ------------------------------------------------------------------
@@ -248,12 +273,12 @@ impl KubeClient {
     // Private helpers
     // ------------------------------------------------------------------
 
-    async fn cluster_version(&self) -> Result<String> {
+    pub(crate) async fn cluster_version(&self) -> Result<String> {
         let version = self.client.apiserver_version().await?;
         Ok(format!("v{}.{}", version.major, version.minor))
     }
 
-    async fn list_namespaces(&self) -> Result<Vec<String>> {
+    pub(crate) async fn list_namespaces(&self) -> Result<Vec<String>> {
         let ns_api: Api<Namespace> = Api::all(self.client.clone());
         let list = ns_api.list(&ListParams::default()).await?;
         Ok(list
@@ -263,7 +288,7 @@ impl KubeClient {
             .collect())
     }
 
-    async fn list_pods(&self, namespace: Option<&str>) -> Result<Vec<K8sPod>> {
+    pub(crate) async fn list_pods(&self, namespace: Option<&str>) -> Result<Vec<K8sPod>> {
         let pods: Api<Pod> = match namespace {
             Some(ns) => Api::namespaced(self.client.clone(), ns),
             None => Api::all(self.client.clone()),
@@ -272,7 +297,7 @@ impl KubeClient {
         Ok(list.items.into_iter().map(pod_to_snapshot).collect())
     }
 
-    async fn list_deployments(&self, namespace: Option<&str>) -> Result<Vec<K8sDeployment>> {
+    pub(crate) async fn list_deployments(&self, namespace: Option<&str>) -> Result<Vec<K8sDeployment>> {
         let deps: Api<Deployment> = match namespace {
             Some(ns) => Api::namespaced(self.client.clone(), ns),
             None => Api::all(self.client.clone()),
@@ -281,7 +306,7 @@ impl KubeClient {
         Ok(list.items.into_iter().map(deployment_to_snapshot).collect())
     }
 
-    async fn list_services(&self, namespace: Option<&str>) -> Result<Vec<K8sService>> {
+    pub(crate) async fn list_services(&self, namespace: Option<&str>) -> Result<Vec<K8sService>> {
         let svcs: Api<Service> = match namespace {
             Some(ns) => Api::namespaced(self.client.clone(), ns),
             None => Api::all(self.client.clone()),
@@ -290,7 +315,7 @@ impl KubeClient {
         Ok(list.items.into_iter().map(service_to_snapshot).collect())
     }
 
-    async fn list_nodes(&self) -> Result<Vec<K8sNode>> {
+    pub(crate) async fn list_nodes(&self) -> Result<Vec<K8sNode>> {
         let nodes: Api<Node> = Api::all(self.client.clone());
         let list = nodes.list(&ListParams::default()).await?;
         Ok(list.items.into_iter().map(node_to_snapshot).collect())
@@ -617,5 +642,488 @@ mod tests {
         assert_eq!(snap.status, "Ready");
         assert_eq!(snap.roles, "control-plane");
         assert_eq!(snap.version, "v1.31.0");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KubeTool — LLM-callable Tool wrapping KubeClient.
+//
+// Typed actions over the cluster. Writes (restart_deployment, scale,
+// delete_pod) are gated by the target's autonomy level and audit-logged.
+// ---------------------------------------------------------------------------
+
+use crate::ops_config::{ConnectionType, OpsClawAutonomy, OpsConfig, TargetConfig};
+use crate::tools::ssh_tool::write_audit_entry;
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use std::fmt::Write as _;
+use std::path::PathBuf;
+use zeroclaw::tools::traits::{Tool, ToolResult};
+
+const KUBE_MAX_OUTPUT_BYTES: usize = 32 * 1024;
+
+/// One configured Kubernetes target, resolved at registry build.
+#[derive(Debug, Clone)]
+pub struct KubeTarget {
+    pub name: String,
+    pub kubeconfig: Option<String>,
+    pub context: Option<String>,
+    pub default_namespace: Option<String>,
+    pub autonomy: OpsClawAutonomy,
+}
+
+pub struct KubeToolConfig {
+    pub targets: Vec<KubeTarget>,
+}
+
+pub struct KubeTool {
+    config: KubeToolConfig,
+    factory: Box<dyn KubeClientFactory>,
+    audit_dir: Option<PathBuf>,
+}
+
+impl KubeTool {
+    pub fn new(config: KubeToolConfig) -> Self {
+        Self {
+            config,
+            factory: Box::new(DefaultKubeClientFactory),
+            audit_dir: None,
+        }
+    }
+
+    pub fn with_factory(config: KubeToolConfig, factory: Box<dyn KubeClientFactory>) -> Self {
+        Self {
+            config,
+            factory,
+            audit_dir: None,
+        }
+    }
+
+    pub fn with_audit_dir(mut self, dir: PathBuf) -> Self {
+        self.audit_dir = Some(dir);
+        self
+    }
+
+    /// Build Kubernetes target entries from the OpsConfig.
+    pub fn targets_from_config(config: &OpsConfig) -> Vec<KubeTarget> {
+        let targets = config.targets.as_deref().unwrap_or_default();
+        targets
+            .iter()
+            .filter(|t: &&TargetConfig| t.connection_type == ConnectionType::Kubernetes)
+            .map(|t| KubeTarget {
+                name: t.name.clone(),
+                kubeconfig: t.kubeconfig.clone(),
+                context: t.context.clone(),
+                default_namespace: t.namespace.clone(),
+                autonomy: t.autonomy,
+            })
+            .collect()
+    }
+
+    fn resolve<'a>(&'a self, name: &str) -> Option<&'a KubeTarget> {
+        self.config.targets.iter().find(|t| t.name == name)
+    }
+
+    fn audit(&self, target: &str, action: &str, detail: &str, duration_ms: u128, exit: i32) {
+        let _ = write_audit_entry(
+            target,
+            &format!("kube {action} {detail}"),
+            exit,
+            duration_ms,
+            self.audit_dir.as_ref(),
+        );
+    }
+}
+
+/// Valid Kubernetes DNS-1123 name check — reject shell metacharacters even
+/// though we aren't shelling, to keep output predictable if we ever do.
+fn is_valid_k8s_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 253
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+}
+
+#[async_trait]
+impl Tool for KubeTool {
+    fn name(&self) -> &str {
+        "kubernetes"
+    }
+
+    fn description(&self) -> &str {
+        "Kubernetes cluster operations via the kube-rs client. Reads: \
+         cluster_info, list_namespaces, list_pods, list_deployments, \
+         list_services, list_nodes, logs (pod), events. Writes: \
+         restart_deployment, scale_deployment, delete_pod. Writes respect \
+         the target's autonomy level — DryRun rejects them. Every action \
+         is audit-logged."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "configured k8s target name"},
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "cluster_info", "list_namespaces", "list_pods",
+                        "list_deployments", "list_services", "list_nodes",
+                        "logs", "events",
+                        "restart_deployment", "scale_deployment", "delete_pod"
+                    ]
+                },
+                "namespace": {"type": "string"},
+                "name": {"type": "string", "description": "resource name"},
+                "lines": {"type": "integer", "default": 200, "description": "logs tail"},
+                "replicas": {"type": "integer", "description": "scale_deployment target"}
+            },
+            "required": ["target", "action"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let target_name = match args.get("target").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Ok(kube_err("missing 'target'")),
+        };
+        let target = match self.resolve(target_name) {
+            Some(t) => t,
+            None => return Ok(kube_err(format!("unknown target '{target_name}'"))),
+        };
+
+        let action = match args.get("action").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Ok(kube_err("missing 'action'")),
+        };
+
+        let is_write = matches!(
+            action,
+            "restart_deployment" | "scale_deployment" | "delete_pod"
+        );
+        if is_write && target.autonomy == OpsClawAutonomy::DryRun {
+            let detail = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            self.audit(target_name, &format!("[blocked dry-run] {action}"), &detail, 0, -1);
+            return Ok(kube_err(format!(
+                "dry-run mode: write action '{action}' rejected"
+            )));
+        }
+
+        let client = match self
+            .factory
+            .build(target.kubeconfig.as_deref(), target.context.as_deref())
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => return Ok(kube_err(format!("kube client build failed: {e}"))),
+        };
+
+        let ns_default = target.default_namespace.as_deref();
+        let namespace = args
+            .get("namespace")
+            .and_then(|v| v.as_str())
+            .or(ns_default);
+
+        let start = std::time::Instant::now();
+        let result = self
+            .dispatch(&client, action, namespace, &args)
+            .await;
+        let elapsed = start.elapsed().as_millis();
+        let exit = match &result {
+            Ok(r) if r.success => 0,
+            _ => 1,
+        };
+        let detail = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        self.audit(target_name, action, &detail, elapsed, exit);
+        result
+    }
+}
+
+impl KubeTool {
+    async fn dispatch(
+        &self,
+        client: &KubeClient,
+        action: &str,
+        namespace: Option<&str>,
+        args: &Value,
+    ) -> anyhow::Result<ToolResult> {
+        match action {
+            "cluster_info" => match client.cluster_version().await {
+                Ok(v) => Ok(kube_ok(format!("version: {v}\n"))),
+                Err(e) => Ok(kube_err(format!("{e}"))),
+            },
+            "list_namespaces" => match client.list_namespaces().await {
+                Ok(nss) => {
+                    let mut out = String::new();
+                    writeln!(out, "count: {}", nss.len()).ok();
+                    for n in nss {
+                        writeln!(out, "  {n}").ok();
+                    }
+                    Ok(kube_ok(out))
+                }
+                Err(e) => Ok(kube_err(format!("{e}"))),
+            },
+            "list_pods" => match client.list_pods(namespace).await {
+                Ok(pods) => {
+                    let mut out = String::new();
+                    writeln!(out, "count: {}", pods.len()).ok();
+                    writeln!(out, "NS\tNAME\tREADY\tSTATUS\tRESTARTS\tNODE").ok();
+                    for p in pods {
+                        writeln!(
+                            out,
+                            "{}\t{}\t{}\t{}\t{}\t{}",
+                            p.namespace, p.name, p.ready, p.status, p.restarts, p.node
+                        )
+                        .ok();
+                    }
+                    Ok(kube_ok(out))
+                }
+                Err(e) => Ok(kube_err(format!("{e}"))),
+            },
+            "list_deployments" => match client.list_deployments(namespace).await {
+                Ok(deps) => {
+                    let mut out = String::new();
+                    writeln!(out, "count: {}", deps.len()).ok();
+                    writeln!(out, "NS\tNAME\tREADY\tUP-TO-DATE\tAVAILABLE").ok();
+                    for d in deps {
+                        writeln!(
+                            out,
+                            "{}\t{}\t{}\t{}\t{}",
+                            d.namespace, d.name, d.ready, d.up_to_date, d.available
+                        )
+                        .ok();
+                    }
+                    Ok(kube_ok(out))
+                }
+                Err(e) => Ok(kube_err(format!("{e}"))),
+            },
+            "list_services" => match client.list_services(namespace).await {
+                Ok(svcs) => {
+                    let mut out = String::new();
+                    writeln!(out, "count: {}", svcs.len()).ok();
+                    writeln!(out, "NS\tNAME\tTYPE\tCLUSTER-IP\tEXTERNAL-IP\tPORTS").ok();
+                    for s in svcs {
+                        writeln!(
+                            out,
+                            "{}\t{}\t{}\t{}\t{}\t{}",
+                            s.namespace, s.name, s.svc_type, s.cluster_ip, s.external_ip, s.ports
+                        )
+                        .ok();
+                    }
+                    Ok(kube_ok(out))
+                }
+                Err(e) => Ok(kube_err(format!("{e}"))),
+            },
+            "list_nodes" => match client.list_nodes().await {
+                Ok(nodes) => {
+                    let mut out = String::new();
+                    writeln!(out, "count: {}", nodes.len()).ok();
+                    writeln!(out, "NAME\tSTATUS\tROLES\tVERSION").ok();
+                    for n in nodes {
+                        writeln!(out, "{}\t{}\t{}\t{}", n.name, n.status, n.roles, n.version).ok();
+                    }
+                    Ok(kube_ok(out))
+                }
+                Err(e) => Ok(kube_err(format!("{e}"))),
+            },
+            "logs" => {
+                let name = match args.get("name").and_then(|v| v.as_str()) {
+                    Some(n) if is_valid_k8s_name(n) => n,
+                    Some(bad) => return Ok(kube_err(format!("invalid pod name '{bad}'"))),
+                    None => return Ok(kube_err("logs requires 'name'")),
+                };
+                let ns = match namespace {
+                    Some(n) => n,
+                    None => return Ok(kube_err("logs requires 'namespace' (or a default)")),
+                };
+                let lines = args.get("lines").and_then(|v| v.as_i64()).unwrap_or(200);
+                match client.get_pod_logs(ns, name, lines).await {
+                    Ok(logs) => Ok(kube_ok(logs)),
+                    Err(e) => Ok(kube_err(format!("{e}"))),
+                }
+            }
+            "events" => match client.get_events(namespace).await {
+                Ok(evts) => {
+                    let mut out = String::new();
+                    writeln!(out, "count: {}", evts.len()).ok();
+                    for e in evts {
+                        writeln!(
+                            out,
+                            "  {}  {}  {} — {}",
+                            e.timestamp, e.reason, e.involved_object, e.message
+                        )
+                        .ok();
+                    }
+                    Ok(kube_ok(out))
+                }
+                Err(e) => Ok(kube_err(format!("{e}"))),
+            },
+            "restart_deployment" => {
+                let name = match args.get("name").and_then(|v| v.as_str()) {
+                    Some(n) if is_valid_k8s_name(n) => n,
+                    Some(bad) => return Ok(kube_err(format!("invalid deployment name '{bad}'"))),
+                    None => return Ok(kube_err("restart_deployment requires 'name'")),
+                };
+                let ns = match namespace {
+                    Some(n) => n,
+                    None => return Ok(kube_err("restart_deployment requires 'namespace'")),
+                };
+                match client.restart_deployment(ns, name).await {
+                    Ok(()) => Ok(kube_ok(format!("restarted {ns}/{name}"))),
+                    Err(e) => Ok(kube_err(format!("{e}"))),
+                }
+            }
+            "scale_deployment" => {
+                let name = match args.get("name").and_then(|v| v.as_str()) {
+                    Some(n) if is_valid_k8s_name(n) => n,
+                    Some(bad) => return Ok(kube_err(format!("invalid deployment name '{bad}'"))),
+                    None => return Ok(kube_err("scale_deployment requires 'name'")),
+                };
+                let ns = match namespace {
+                    Some(n) => n,
+                    None => return Ok(kube_err("scale_deployment requires 'namespace'")),
+                };
+                let replicas = match args.get("replicas").and_then(|v| v.as_i64()) {
+                    Some(r) if (0..=10_000).contains(&r) => r as i32,
+                    _ => return Ok(kube_err("scale_deployment requires 'replicas' (0..=10000)")),
+                };
+                match client.scale_deployment(ns, name, replicas).await {
+                    Ok(()) => Ok(kube_ok(format!("scaled {ns}/{name} to {replicas}"))),
+                    Err(e) => Ok(kube_err(format!("{e}"))),
+                }
+            }
+            "delete_pod" => {
+                let name = match args.get("name").and_then(|v| v.as_str()) {
+                    Some(n) if is_valid_k8s_name(n) => n,
+                    Some(bad) => return Ok(kube_err(format!("invalid pod name '{bad}'"))),
+                    None => return Ok(kube_err("delete_pod requires 'name'")),
+                };
+                let ns = match namespace {
+                    Some(n) => n,
+                    None => return Ok(kube_err("delete_pod requires 'namespace'")),
+                };
+                match client.delete_pod(ns, name).await {
+                    Ok(()) => Ok(kube_ok(format!("deleted pod {ns}/{name}"))),
+                    Err(e) => Ok(kube_err(format!("{e}"))),
+                }
+            }
+            other => Ok(kube_err(format!("unknown action '{other}'"))),
+        }
+    }
+}
+
+fn kube_ok(mut s: String) -> ToolResult {
+    if s.len() > KUBE_MAX_OUTPUT_BYTES {
+        let mut cut = KUBE_MAX_OUTPUT_BYTES;
+        while cut > 0 && !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.truncate(cut);
+        s.push_str("\n... [truncated]");
+    }
+    ToolResult {
+        success: true,
+        output: s,
+        error: None,
+    }
+}
+
+fn kube_err<S: Into<String>>(msg: S) -> ToolResult {
+    ToolResult {
+        success: false,
+        output: String::new(),
+        error: Some(msg.into()),
+    }
+}
+
+#[cfg(test)]
+mod kube_tool_tests {
+    use super::*;
+
+    #[test]
+    fn valid_names() {
+        assert!(is_valid_k8s_name("web-frontend"));
+        assert!(is_valid_k8s_name("api.v1"));
+        assert!(is_valid_k8s_name("nginx"));
+    }
+
+    #[test]
+    fn invalid_names() {
+        assert!(!is_valid_k8s_name(""));
+        assert!(!is_valid_k8s_name("foo; rm"));
+        assert!(!is_valid_k8s_name("foo|bar"));
+        assert!(!is_valid_k8s_name("a b"));
+    }
+
+    #[test]
+    fn tool_metadata() {
+        let tool = KubeTool::new(KubeToolConfig { targets: vec![] });
+        assert_eq!(tool.name(), "kubernetes");
+        assert!(!tool.description().is_empty());
+        let schema = tool.parameters_schema();
+        assert!(schema["properties"]["action"].is_object());
+    }
+
+    #[tokio::test]
+    async fn unknown_target_rejected() {
+        let tool = KubeTool::new(KubeToolConfig { targets: vec![] });
+        let r = tool
+            .execute(json!({"target": "nope", "action": "list_pods"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("unknown target"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_rejects_writes() {
+        // We never build a real client in this test — the DryRun check
+        // runs before the factory is invoked.
+        let tool = KubeTool::new(KubeToolConfig {
+            targets: vec![KubeTarget {
+                name: "prod".into(),
+                kubeconfig: None,
+                context: None,
+                default_namespace: Some("default".into()),
+                autonomy: OpsClawAutonomy::DryRun,
+            }],
+        });
+        let r = tool
+            .execute(json!({
+                "target": "prod", "action": "delete_pod",
+                "namespace": "default", "name": "web-0"
+            }))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("dry-run"));
+    }
+
+    #[tokio::test]
+    async fn invalid_action() {
+        // No factory needed — invalid action resolves after target/write gates
+        // but requires a client build, which will fail; accept either error.
+        let tool = KubeTool::new(KubeToolConfig {
+            targets: vec![KubeTarget {
+                name: "prod".into(),
+                kubeconfig: Some("/nonexistent/kubeconfig".into()),
+                context: None,
+                default_namespace: None,
+                autonomy: OpsClawAutonomy::Auto,
+            }],
+        });
+        let r = tool
+            .execute(json!({"target": "prod", "action": "nuke"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
     }
 }

@@ -325,4 +325,30 @@ mod tests {
         assert!(!result.success);
         assert!(result.error.unwrap().contains("task_id"));
     }
+
+    #[tokio::test]
+    async fn a2a_tool_send_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/a2a"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": "1",
+                "result": {"id": "t-123", "status": "submitted"}
+            })))
+            .mount(&server)
+            .await;
+        let tool = A2aTool::new();
+        let r = tool
+            .execute(json!({
+                "action": "send", "url": server.uri(),
+                "token": "tok", "message": "hi"
+            }))
+            .await
+            .unwrap();
+        assert!(r.success, "error: {:?}", r.error);
+        assert!(r.output.contains("t-123"));
+    }
 }

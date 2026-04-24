@@ -13,8 +13,11 @@ use crate::tools::docker_tool::{DockerTool, DockerToolConfig};
 use crate::tools::elk_tool::{ElkEndpoint, ElkTool};
 use crate::tools::firewall_tool::{FirewallTool, FirewallToolConfig};
 use crate::tools::github_tool::{GithubTool, GithubToolConfig};
+use crate::tools::a2a_tool::A2aTool;
 use crate::tools::jaeger_tool::{JaegerEndpoint, JaegerTool};
+use crate::tools::kube_tool::{KubeTool, KubeToolConfig};
 use crate::tools::loki_tool::{LokiEndpoint, LokiTool};
+use crate::tools::postgres_tool::{PostgresInstance, PostgresTool, PostgresToolConfig};
 use crate::tools::monitor_tool::MonitorTool;
 use crate::tools::pagerduty_tool::{PagerDutyTool, PagerDutyToolConfig};
 use crate::tools::prometheus_tool::{PrometheusEndpoint, PrometheusTool};
@@ -57,6 +60,17 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
 
     // Cert tool — TLS cert inspection, no config required.
     tools.push(Box::new(CertTool::new()));
+
+    // A2A client — send tasks to remote A2A-compliant agents.
+    tools.push(Box::new(A2aTool::new()));
+
+    // Kubernetes — typed cluster operations.
+    let kube_targets = KubeTool::targets_from_config(config);
+    if !kube_targets.is_empty() {
+        tools.push(Box::new(KubeTool::new(KubeToolConfig {
+            targets: kube_targets,
+        })));
+    }
 
     // Prometheus — one tool with all configured endpoints.
     if let Some(eps) = config.prometheus.as_ref() {
@@ -200,6 +214,27 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
         }
         if !endpoints.is_empty() {
             tools.push(Box::new(JaegerTool::new(endpoints)));
+        }
+    }
+
+    // Postgres (driver-based).
+    if let Some(pgs) = config.postgres.as_ref() {
+        let mut instances: Vec<PostgresInstance> = Vec::with_capacity(pgs.len());
+        for p in pgs {
+            let dsn = config
+                .decrypt_secret(&p.dsn)
+                .await
+                .unwrap_or_else(|_| p.dsn.clone());
+            instances.push(PostgresInstance {
+                name: p.name.clone(),
+                dsn,
+                autonomy: p.autonomy,
+            });
+        }
+        if !instances.is_empty() {
+            tools.push(Box::new(PostgresTool::new(PostgresToolConfig {
+                instances,
+            })));
         }
     }
 

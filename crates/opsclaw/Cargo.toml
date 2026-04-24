@@ -54,6 +54,7 @@ serde_json = { version = "1.0", default-features = false, features = ["std"] }
 shellexpand = "3.1"
 thiserror = "2.0"
 tokio = { version = "1.50", default-features = false, features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "process", "io-std", "fs", "signal"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 toml = "1.0"
 tracing = { version = "0.1", default-features = false }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter"] }

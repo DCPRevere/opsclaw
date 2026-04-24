@@ -85,6 +85,19 @@ pub struct OpsConfig {
     /// Jaeger query endpoints. Environment-scoped after Phase 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jaeger: Option<Vec<JaegerEndpointConfig>>,
+
+    /// Postgres instances for the `postgres` tool (driver-based).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postgres: Option<Vec<PostgresInstanceConfig>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PostgresInstanceConfig {
+    pub name: String,
+    /// DSN (may be a secret reference resolved via decrypt_secret).
+    pub dsn: String,
+    #[serde(default)]
+    pub autonomy: OpsClawAutonomy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

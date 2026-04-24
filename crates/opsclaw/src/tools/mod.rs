@@ -13,6 +13,7 @@ pub mod firewall_tool;
 pub mod github_tool;
 pub mod jaeger_tool;
 pub mod kube_tool;
+pub mod postgres_tool;
 pub mod loki_tool;
 pub mod monitor_tool;
 pub mod monitoring;

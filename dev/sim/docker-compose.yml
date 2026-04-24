@@ -2,38 +2,39 @@
 #
 # Usage: managed via sim.sh (don't run docker compose directly).
 #
-# The sim-target is a real Ubuntu container with cgroup memory + CPU
-# limits. Faults are induced by running real tools (stress-ng, dd, tc)
-# inside the container, not by lying via shell wrappers. The agent's
-# `cat /proc/meminfo` reads the kernel's accounting and sees the truth.
+# The sim-target runs under gVisor (`runtime: runsc`). gVisor is a
+# user-space Linux kernel that implements /proc, /sys, syscalls, and
+# memory accounting itself — so `cat /proc/meminfo` from inside the
+# container reports the cgroup's 8 GB cap, `top` reports processes
+# scoped to the sandbox, and `stress-ng` causes real pressure that the
+# Sentry accounts for. There is nothing for an agent to "see past":
+# there is no host /proc visible from inside.
+#
+# See https://gvisor.dev/docs/ for the runtime; install with
+# `sudo runsc install && sudo systemctl restart docker` (one-time).
 name: opsclaw-sim
 services:
   sim-target:
     build: ./sim-target
     container_name: opsclaw-sim-target
+    runtime: runsc
     environment:
       - AUTHORIZED_KEY=${SIM_SSH_PUBKEY}
       - SSH_PORT=2222
     ports:
       - "127.0.0.1:2222:2222"
-    # Hard cgroup limits — the simulated machine is an 8 GB / 4 vCPU box.
-    # stress-ng allocating 7 GB hits 87% of an 8 GB cap; the agent reading
-    # /proc/meminfo (cgroup-aware on cgroup-v2 hosts) sees real pressure.
+    # Hard cgroup limits. gVisor's Sentry honours these in its own /proc,
+    # so MemTotal = 8 GB inside the container.
     mem_limit: 8g
     memswap_limit: 8g
     cpus: 4
-    # NET_ADMIN lets us tc-netem the loopback / eth0 for latency/loss
-    # scenarios. The bridge network confines that effect to the container's
-    # veth pair — your host's networking is untouched.
+    # NET_ADMIN: tc-netem for latency/loss scenarios.
     cap_add:
       - NET_ADMIN
-    # Disk-pressure scenarios fill /data, which is a tmpfs of fixed size.
-    # dd-fills evaporate on `docker compose down` and never reach your
-    # real disk.
+    # Disk-pressure scenarios fill /data, a bounded tmpfs that evaporates
+    # on `docker compose down`.
     tmpfs:
       - /data:size=200m
-    # Default bridge network — explicitly NOT host networking, so the
-    # agent's view of the world is bounded to this container.
     networks:
       - simnet
 

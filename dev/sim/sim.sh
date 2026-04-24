@@ -170,15 +170,18 @@ scenario_path() {
 }
 
 # Run a scenario script inside the sim-target container in arm or disarm
-# mode. The script lives on the host (mounted via docker cp); we copy it
-# in fresh each time so edits take effect without a rebuild.
+# mode. We stream the script in via `docker exec` rather than using
+# `docker cp`, because gVisor's sandbox rejects cp's tar-copy path.
+# The script lives on the host so edits take effect without a rebuild.
 run_scenario() {
     local name="$1"
     local action="$2"   # arm | disarm
     local local_path
     local_path=$(scenario_path "$name") || return 1
 
-    docker cp "$local_path" "$CONTAINER_NAME:/sim/scenario.sh" >/dev/null
+    # `cat > file` writes the scenario, then we bash it. Separate exec
+    # calls because piping across exec gets tangled with -i.
+    docker exec -i "$CONTAINER_NAME" bash -c 'cat > /sim/scenario.sh' < "$local_path"
     docker exec "$CONTAINER_NAME" bash /sim/scenario.sh "$action"
 }
 

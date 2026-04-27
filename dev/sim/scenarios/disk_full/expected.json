@@ -7,8 +7,7 @@
       "notify_payload": {
         "severity_at_least": "warning",
         "category_matches": "(?i)(disk|storage|filesystem)",
-        "content_must_mention": ["disk"],
-        "content_must_not_mention": ["memory"]
+        "content_must_mention": ["disk"]
       }
     }
   },

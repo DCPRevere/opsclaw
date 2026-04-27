@@ -69,16 +69,37 @@ pub async fn seed_heartbeat_file(workspace_dir: &Path, ops_config: &OpsConfig) -
         body.push_str(&format!(
             "- [high] Run a health check on target '{name}' using the monitor tool. \
              Inspect the snapshot and use the ssh tool to investigate further when \
-             anything looks concerning (high memory/disk/load, missing containers or \
-             services, unusual state). If the target is unreachable, say so — do NOT \
-             fabricate a healthy snapshot. When you confirm a real problem, you MUST \
-             call the opsclaw_notify tool with: summary (one line), severity \
-             (warning or critical), category (e.g. HighMemory, DiskFull, \
-             ServiceStopped, PortClosed, Unreachable), details (what you observed \
-             and which commands confirmed it), and target '{name}'. Do NOT describe \
+             anything looks concerning. If the target is unreachable, say so — do \
+             NOT fabricate a healthy snapshot.\n\
+             \n\
+             What to check on each scan:\n\
+             - Memory: cgroup memory.current vs memory.max (or /proc/meminfo). Alert \
+               if used > 85%. Category: HighMemory.\n\
+             - CPU: 1- and 5-minute load average vs CPU count, plus top processes. \
+               Sustained load > CPU count, or any single process pinned at >90% \
+               across two consecutive scans, is a warning. Category: HighCpu.\n\
+             - Disk: `df -h` on writable filesystems — typically /, /data, /var, \
+               /tmp. Alert if any writable mount is > 85%. IGNORE host-bind \
+               filesystems mounted at single-file paths under /etc \
+               (resolv.conf, hosts, hostname); they reflect the host's disk, not \
+               the target's. Category: DiskFull.\n\
+             - Logs / filesystem growth: sample sizes under /var/log with `du -sh \
+               /var/log/*` or `ls -laS`. A single log file growing rapidly between \
+               scans (multi-MB in a minute) is a fault. Category: LogFlood.\n\
+             - Services: `ps`/`pgrep` for the expected workload. Compare process \
+               start times across scans — if a tracked service's PID or start \
+               time changes between consecutive ticks, it is restarting. \
+               Category: ProcessFlapping or ServiceStopped.\n\
+             - Reachability: an SSH or kubectl error categorically beats a stale \
+               cached snapshot. Category: Unreachable.\n\
+             \n\
+             When you confirm a real problem, you MUST call the opsclaw_notify \
+             tool with: summary (one line), severity (warning or critical), \
+             category (one of the labels above), details (what you observed and \
+             which commands confirmed it), and target '{name}'. Do NOT describe \
              the problem only in your final reply: an unsent notification is a \
-             missed alert. If everything looks healthy, say so briefly and do not \
-             call opsclaw_notify.\n"
+             missed alert. If everything looks healthy, say so briefly and do \
+             not call opsclaw_notify.\n"
         ));
     }
 

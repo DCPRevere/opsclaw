@@ -39,41 +39,54 @@ When the full suite reports `verdict: PASS`:
 
 ## Findings in three buckets
 
-### Bucket A — Sim environment (needs fix before suite is credible)
+### Bucket A — Sim environment (addressed via prompt guidance)
 
 gVisor's 9p mounts for host-backed files (`/etc/resolv.conf`,
-`/etc/hosts`, `/etc/hostname`) show up in `df` at ~87%. Any agent
-that runs `df -h` gets a legitimate-looking "disk pressure" signal
-and alerts on that, masking the real fault. This poisoned
+`/etc/hosts`, `/etc/hostname`) show up in `df` at ~88%, reflecting
+the host's disk usage rather than the target's. Any agent that runs
+`df -h` gets a legitimate-looking "disk pressure" signal and alerts
+on that, masking the real fault. This poisoned
 `deadlocked_but_running`, `service_stopped`, and `baseline_silent`.
 
-**Fix**: in `sim-target/entrypoint.sh`, bind-mount a tmpfs over
-those paths so `df` reports sane values. Alternatively, keep the
-real mounts but teach the seed prompt to filter them. The former is
-cleaner — the agent shouldn't have to learn sim-specific quirks.
+**Attempted env fix (does not work).** `mount -t tmpfs` over those
+paths from inside the entrypoint, and `--tmpfs /etc/resolv.conf` at
+container start, are both rejected by gVisor — its sandbox refuses
+tmpfs over a regular-file mountpoint. There is no way from inside
+the container to drop the 9p bind.
 
-### Bucket B — Scenario assertions too strict
+**Applied fix.** Updated the heartbeat seed prompt in `daemon_ext.rs`
+to instruct the agent to ignore host-bind filesystems mounted at
+single-file paths under `/etc` (resolv.conf, hosts, hostname) when
+judging disk pressure, and to evaluate writable mounts (`/`, `/data`,
+`/var`, `/tmp`) instead. This guidance is broadly correct in
+production too — config bind-mounts shouldn't drive disk-pressure
+decisions anywhere.
 
-- `disk_full`: drop `content_must_not_mention: ["memory"]`. The agent
-  can legitimately mention memory while discussing disk.
-- `memory` phase_disarm: raise `lagging_alerts_allowed` from 1 to 2.
-  Disarm takes a few ticks to propagate; the agent is correct to
-  re-alert until it observes the clear.
+### Bucket B — Scenario assertions too strict (FIXED)
 
-### Bucket C — Real OpsClaw behaviour gaps (tickets, not harness bugs)
+- `disk_full/expected.json`: dropped `content_must_not_mention:
+  ["memory"]`. The agent can legitimately mention memory while
+  discussing disk.
+- `memory/expected.json` phase_disarm: raised `lagging_alerts_allowed`
+  from 1 to 2. Disarm takes a few ticks to propagate; the agent is
+  correct to re-alert until it observes the clear.
 
-- `cpu`: gpt-5.4 doesn't treat high CPU utilisation as concerning
-  without context. Seed prompt could add "high CPU / load is a
-  warning" or similar.
-- `log_flood`: agent doesn't actively sample filesystem growth.
-  Would benefit from a `du -sh` or `ls -la /var/log/*` in the scan.
-- `process_flapping`: detecting restart-cadence requires comparing
-  process start times across ticks. Current seed prompt doesn't
-  teach this; agent treats each tick as independent.
+### Bucket C — Real OpsClaw behaviour gaps (addressed via seed prompt)
 
-These three are **genuine agent-behaviour defects surfaced by the
-sim** — exactly what Tier 2 is for. Fixes live in prompt/tool work,
-not the harness.
+The seed prompt in `daemon_ext.rs::seed_heartbeat_file` now teaches
+the agent explicit thresholds and check techniques per category:
+
+- **CPU / load**: 1- and 5-minute load average vs CPU count, plus
+  top processes. Sustained load > CPU count, or any single process
+  pinned at >90% across two consecutive scans, is a warning.
+- **Log / filesystem growth**: sample `/var/log/*` sizes via `du -sh`
+  or `ls -laS`; multi-MB growth between scans is a fault.
+- **Process flapping**: compare process start times across ticks.
+  Same name / different start time / different PID = restart.
+
+These three were **genuine agent-behaviour defects surfaced by the
+sim** — exactly what Tier 2 is for. Fixes lived in prompt work, not
+the harness. Effectiveness needs a fresh Tier 2 run to confirm.
 
 ## Scenarios
 

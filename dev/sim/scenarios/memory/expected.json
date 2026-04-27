@@ -21,7 +21,8 @@
   "phase_disarm": {
     "within_seconds": 150,
     "assert": {
-      "resolution_present_or_silent": true
+      "resolution_present_or_silent": true,
+      "lagging_alerts_allowed": 2
     }
   }
 }

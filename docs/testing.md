@@ -1,134 +1,155 @@
 # Testing
 
-OpsClaw inherits ZeroClaw's test suite and adds SRE-specific tests on top.
+OpsClaw has four layers of tests, each answering a different question. Run the layer that matches what you changed.
 
-## Running tests
+| Layer | Question it answers | Speed | Command |
+|---|---|---|---|
+| Unit | Does this function compute the right value? | seconds | `cargo test --lib` |
+| Component / integration / system | Do these modules wire together correctly? | seconds–minutes | `cargo test --workspace` |
+| Tier 1 | Does each tool talk to its real backend correctly? | minutes | `dev/test.sh tier1` |
+| Tier 2 | Does the running agent detect and alert on real faults? | ~15 min | `dev/test.sh tier2` |
+| Tier 3 | Do the user-facing flows (setup, doctor, daemon) work end-to-end? | minutes | `dev/test.sh tier3` |
+
+`dev/test.sh ready` runs Tier 1 + 2 + 3 and writes a single `target/ready-verdict.json`. That's the gate for "is this build production-ready?"
+
+## TL;DR — what to run when
+
+- **Edited a function** → `cargo test --lib`
+- **Edited config / channels / providers / agent loop** → `cargo test --workspace`
+- **Edited a tool that talks to a real service** (Prometheus, kube, Loki, …) → `dev/test.sh tier1`
+- **Edited the daemon, the heartbeat seed, or `opsclaw_notify`** → `dev/test.sh tier2`
+- **Edited setup / doctor / CLI flows** → `dev/test.sh tier3`
+- **Cutting a release** → `dev/test.sh ready`
+
+## Unit tests
+
+Inline `#[test]` functions next to production code. About 3,300 of them, covering config, agent loop, security policy, channels, and providers most heavily.
 
 ```bash
-# All unit tests (inline in src/)
-cargo test --lib
-
-# Component tests (config, gateway, security, providers in isolation)
-cargo test --test component
-
-# Integration tests (agent orchestration, channel routing, memory)
-cargo test --test integration
-
-# System tests (full-stack workflows)
-cargo test --test system
-
-# Live E2E tests (requires API credentials, skipped by default)
-cargo test --test live -- --ignored
-
-# Everything
-cargo test --locked
-
-# Benchmarks (tool dispatch, memory, agent turn cycle)
-cargo bench
+cargo test --lib                     # all unit tests
+cargo test --lib -p opsclaw          # one crate
+cargo test --lib config::schema::    # one module
 ```
 
-CI uses `cargo nextest run --locked` for parallel execution.
+These are fast and have no external dependencies. They run in CI on every commit.
 
-## Test structure
+## Workspace tests (component / integration / system / live)
 
-### Unit tests (in `src/`)
+Larger tests live in `tests/` of each crate, split into four directories:
 
-Inline `#[test]` functions alongside production code. ~3,300 tests covering every major module. Run with `cargo test --lib`.
+- `tests/component/` — one subsystem at a time (config persistence, provider resolution, security, gateway).
+- `tests/integration/` — multiple subsystems wired together (agent + memory + channels).
+- `tests/system/` — full application boot, no external services.
+- `tests/live/` — real third-party APIs. Marked `#[ignore]`; skipped by default.
 
-Heaviest coverage: config/schema, agent loop, security policy, channels, providers.
+```bash
+cargo test --test component
+cargo test --test integration
+cargo test --test system
+cargo test --test live -- --ignored   # needs API credentials
+cargo test --workspace                 # everything except live
+```
 
-### External test harnesses (in `tests/`)
+Shared test fixtures live in `tests/support/`:
 
-Four tiers:
-
-- `tests/component/` — isolated subsystem tests (config persistence, provider resolution, security, gateway)
-- `tests/integration/` — multi-component tests (agent robustness, channel routing, memory restart persistence)
-- `tests/system/` — full application integration
-- `tests/live/` — real API calls, marked `#[ignore]`
-
-### Test support (`tests/support/`)
-
-Shared infrastructure:
-
-- `MockProvider` — scripted FIFO responses. `RecordingProvider` captures requests for assertion.
+- `MockProvider` — scripted FIFO LLM responses; `RecordingProvider` captures requests for assertion.
 - `EchoTool`, `CountingTool`, `FailingTool`, `RecordingTool` — mock tools.
 - `build_agent()` / `build_agent_xml()` — construct test agents with the right dispatcher.
-- `LlmTrace` / `TraceExpects` — declarative trace-based assertions ("expect tool X called", "response contains Y").
-- `make_memory()`, `make_observer()` — in-memory test backends.
+- `LlmTrace` / `TraceExpects` — declarative trace assertions ("expect tool X called", "response contains Y").
+- `make_memory()`, `make_observer()` — in-memory backends.
 
-## OpsClaw Phase 1 tests
+CI runs these via `cargo nextest run --locked` for parallelism.
 
-Test files exist in `tests/component/` but are commented out in `mod.rs` until the corresponding implementation is built. Uncomment each as you go.
+## Production-readiness tiers
 
-### `target_config.rs` (Phase 1a)
+Unit and workspace tests prove the code *compiles to the right shape*. They don't prove OpsClaw responds to a real outage correctly. Three higher-level tiers do.
 
-14 tests. Covers `[[targets]]` config parsing and validation:
+One driver:
 
-- SSH targets require host, user, key
-- Local targets work without SSH fields
-- Multiple targets parse correctly
-- Duplicate names rejected at validation
-- Autonomy defaults to `observe`, rejects invalid levels
-- Unknown target types rejected
-- Context file is optional
-- Config without targets is valid
+```bash
+dev/test.sh tier1     # tools
+dev/test.sh tier2     # agent behaviour under real faults
+dev/test.sh tier3     # user-facing flows
+dev/test.sh ready     # all three; writes target/ready-verdict.json
+```
 
-### `secret_store.rs` (Phase 1b)
+### Tier 1 — tool-level integration
 
-10 tests. Covers encrypted credential storage:
+For each tool that talks to a real backend (Prometheus, kube, Loki, ELK, PagerDuty, RabbitMQ, Postgres, …), spin up that backend in Docker, exercise the tool, and assert the response shape. This is what catches "we updated to the kube 0.95 client and the namespace field moved." Owned by a sibling agent; emits a verdict to `target/tier1-verdict.json`.
 
-- Store/retrieve round-trip
-- Overwrite existing secret
-- Get nonexistent returns `NotFound`
-- Delete, list names
-- Values never stored as plaintext on disk
-- Persists across reopen
-- Rejects empty name/value
+### Tier 2 — sim-based behavioural testing
 
-### `ssh_tool.rs` (Phase 1c)
+Tier 2 answers the central question: **does the running agent actually detect, alert on, and stop spamming about real faults?**
 
-11 tests. Covers the `Tool` trait implementation:
+How it works:
 
-- Name is `ssh`, description mentions remote execution
-- Schema requires `target` and `command`, does not expose key/password parameters
-- Rejects missing target, missing command, unknown target
-- Output never contains SSH key material (even on error)
-- Observe mode blocks write commands (`rm`, `systemctl restart`, `docker stop`, `kill`, `reboot`)
-- Observe mode allows read commands (`uptime`, `ps aux`, `df -h`, `docker ps`)
-- Output includes exit code
-- Schema accepts optional `timeout_secs`
+1. Boot a sim-target container under gVisor (`runsc`), which gives the agent a real, kernel-mediated `/proc` and cgroup view — not a wrapper that lies about resource state.
+2. Boot the OpsClaw daemon pointed at it, with `[notifications].webhook_url` aimed at a webhook-sink container that records every alert to `requests.jsonl`.
+3. Run a scenario: inject a real fault (`stress-ng`, `fallocate`, `kill -STOP`, …), wait, clear it.
+4. Read `requests.jsonl` and assert the agent fired the right alert at the right time, didn't repeat it, and went quiet on resolution.
 
-### `discovery_scan.rs` (Phase 1d)
+What we can simulate (`dev/sim/scenarios/`):
 
-14 tests. Covers snapshot parsing and drift detection:
+| Category | Scenarios | Fault mechanism |
+|---|---|---|
+| Resource pressure | `memory`, `cpu`, `disk_full` | `stress-ng`, `fallocate` against cgroup caps (8 GB / 4 CPU / 200 MB tmpfs) |
+| Service lifecycle | `service_stopped`, `process_flapping`, `deadlocked_but_running` | `kill -TERM`, kill+relaunch loop, `kill -STOP` |
+| Filesystem | `log_flood` | tight loop appending to `/var/log/test.log` |
+| Negative | `baseline_silent` | no fault — agent must stay silent |
+| Composite | `cascade_disk_to_crash` | disk fill + SIGSTOP concurrently |
+| Network (skipped) | `port_closed`, `ssh_blackhole` | iptables — currently blocked by gVisor netstack |
 
-- Snapshot structure has all sections, serializes to JSON
-- Parsers for `ps aux`, `ss -tlnp`, `docker ps`, `df -h`, `/etc/os-release`
-- Database detection from ports and process names (including non-standard ports)
-- Drift detection: new container, stopped container, identical = no diff
-- All scan commands are read-only (checked against write-command prefixes)
+Each fault is kernel-mediated. The agent observes the target the same way it would in production: SSH in, look at `/proc`, run `df`, etc.
 
-### `monitoring_loop.rs` (Phase 1f)
+Each scenario asserts three phases:
 
-12 tests. Covers health check cron job construction:
+- `phase_arm` — fault is live. Expect an alert with matching severity / category / keywords. Negative scenarios expect *silence* instead.
+- `phase_dedup` — fault persists. Expect at most `extra_alerts_max` further alerts.
+- `phase_disarm` — fault cleared. Expect either a resolution alert or silence, with `lagging_alerts_allowed` ticks of grace for in-flight repeats.
 
-- Job type is `agent`, session is `isolated`
-- Tool allowlist restricts to `ssh` + `memory_recall` + `memory_store` (SSH targets) or local exec + memory (local targets)
-- System prompt includes target name, snapshot data, and user context
-- Default interval 5 minutes, minimum 30 seconds enforced
-- Delivery config targets the configured channel
-- One health check created per target from config
+Phase definitions live in each scenario's `expected.json`. The assertion engine is `dev/sim/harness/assert_phase.py`.
 
-## Simulation environment
+**Parallel execution.** `dev/test.sh tier2 --parallel N --bring-up` runs N scenarios concurrently. Each *slot* is fully isolated:
 
-A Docker-based simulation environment lets you run OpsClaw end-to-end against a fake target and inject faults (memory pressure, disk full, container crashes, etc.) to verify detection and alerting. See [simulation.md](simulation.md) for details.
+- Its own sim-target, webhook-sink, OpsClaw daemon
+- Its own bridge network and SSH/webhook ports
+- Its own state directory and `requests.jsonl`
+
+Alerts from slot A cannot contaminate slot B's assertions. `dev/sim/harness/slot.sh` owns slot lifecycle; `dev/sim/harness/run.sh` is a job-pool dispatcher that pops scenarios off a queue. Budget ~1 GB RAM + 1 CPU + concurrent LLM API usage per slot.
+
+**Adding a scenario.** Copy an existing directory under `dev/sim/scenarios/`. You need four files:
+
+- `arm.sh` — induces the fault inside the sim-target. Fork long-running processes; return quickly.
+- `disarm.sh` — restores the baseline.
+- `expected.json` — the three-phase assertion manifest.
+- `README.md` — one paragraph on what's being tested.
+
+Run just yours: `dev/test.sh tier2 --only <name>`.
+
+**Prerequisites.**
+
+- `dev/sim/.env` with `OPENAI_API_KEY=…` (gitignored).
+- gVisor installed once: `sudo runsc install && sudo systemctl restart docker`.
+- Each full Tier 2 run consumes roughly 200k–800k LLM tokens.
+
+Latest run results and the known gaps (env quirks, over-strict assertions, real agent gaps) are tracked in [TIER2_STATUS.md](../TIER2_STATUS.md).
+
+### Tier 3 — user-facing flows
+
+End-to-end checks for `opsclaw setup`, `opsclaw doctor`, daemon boot, emergency-stop, etc. Currently a stub emitting `MISSING`; future work.
+
+## Single-developer simulation playground
+
+The Tier 2 harness is for automated assertions. If you just want to drive the sim by hand — fire a fault, watch what the agent does, tear it down — use `sim.sh`:
 
 ```bash
 ./dev/sim/sim.sh up            # start environment
 ./dev/sim/sim.sh fault memory  # inject a fault
-./dev/sim/sim.sh webhooks      # see the alert
+./dev/sim/sim.sh webhooks      # tail the alert stream
 ./dev/sim/sim.sh down          # tear down
 ```
+
+See [simulation.md](simulation.md) for the full command set.
 
 ## CI
 
@@ -136,6 +157,8 @@ Inherited from ZeroClaw:
 
 - `cargo fmt --all` — formatting
 - `cargo clippy --all-targets` — lints
-- `cargo nextest run --locked` — all tests in parallel
-- `cargo audit` — dependency vulnerability scan
+- `cargo nextest run --locked` — workspace tests, parallel
+- `cargo audit` — dependency CVE scan
 - `cargo deny check licenses sources` — license compliance
+
+The production-readiness tiers (`dev/test.sh ready`) are not yet gated in CI — they're a manual pre-release check.

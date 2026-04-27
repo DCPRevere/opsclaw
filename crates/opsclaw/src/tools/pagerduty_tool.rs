@@ -584,4 +584,43 @@ mod tests {
         assert!(!r.success);
         assert!(r.error.unwrap().contains("401"));
     }
+
+    #[tokio::test]
+    async fn server_500_surfaced() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/incidents"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let t = make_tool(&server, OpsClawAutonomy::Auto);
+        let r = t
+            .execute(json!({"action": "list_incidents"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("500"));
+    }
+
+    #[tokio::test]
+    async fn unknown_action_rejected() {
+        let server = MockServer::start().await;
+        let t = make_tool(&server, OpsClawAutonomy::Auto);
+        let r = t
+            .execute(json!({"action": "rm_rf"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+    }
+
+    #[tokio::test]
+    async fn acknowledge_requires_incident_id() {
+        let server = MockServer::start().await;
+        let t = make_tool(&server, OpsClawAutonomy::Auto);
+        let r = t
+            .execute(json!({"action": "acknowledge"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+    }
 }

@@ -753,7 +753,10 @@ impl OpsConfig {
         }
     }
 
-    /// Validate that flat and hierarchical forms are not both populated.
+    /// Validate hierarchy invariants:
+    /// - Flat `[[targets]]` and hierarchical `[[projects]]` are mutually exclusive.
+    /// - Project names are unique.
+    /// - Environment names are unique within a project.
     pub fn validate_hierarchy(&self) -> Result<()> {
         let has_flat = self
             .targets
@@ -766,6 +769,23 @@ impl OpsConfig {
                 "config has both flat `[[targets]]` and hierarchical `[[projects]]` — \
                  they are mutually exclusive (see ADR-005)"
             );
+        }
+
+        let mut seen_projects = std::collections::HashSet::new();
+        for project in &self.projects {
+            if !seen_projects.insert(project.name.as_str()) {
+                anyhow::bail!("duplicate project name '{}'", project.name);
+            }
+            let mut seen_envs = std::collections::HashSet::new();
+            for env in &project.environments {
+                if !seen_envs.insert(env.name.as_str()) {
+                    anyhow::bail!(
+                        "duplicate environment name '{}' in project '{}'",
+                        env.name,
+                        project.name
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1003,5 +1023,129 @@ name = "p"
             err.to_string().contains("restrictive-only"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn target_autonomy_can_tighten_below_environment_default() {
+        // Environment defaults to Auto; target restricts to Approve. This is
+        // tightening — must succeed. Equivalent (Auto+Auto) must also pass.
+        let cfg: OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "p"
+
+  [[projects.environments]]
+  name = "prod"
+  autonomy = "auto"
+
+    [[projects.environments.targets]]
+    name = "tightened"
+    type = "local"
+    autonomy = "approve"
+
+    [[projects.environments.targets]]
+    name = "matches"
+    type = "local"
+    autonomy = "auto"
+"#,
+        )
+        .expect("parses");
+        let tight = cfg.resolve_target("p::prod::tightened").expect("ok");
+        assert!(matches!(tight.autonomy, OpsClawAutonomy::Approve));
+        let same = cfg.resolve_target("p::prod::matches").expect("ok");
+        assert!(matches!(same.autonomy, OpsClawAutonomy::Auto));
+    }
+
+    #[test]
+    fn target_autonomy_dry_run_environment_rejects_loosening() {
+        // DryRun is the most restrictive; any target override loosens it.
+        let cfg: OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "p"
+
+  [[projects.environments]]
+  name = "staging"
+  autonomy = "dry-run"
+
+    [[projects.environments.targets]]
+    name = "t"
+    type = "local"
+    autonomy = "approve"
+"#,
+        )
+        .expect("parses");
+        let err = cfg.resolve_target("p::staging::t").unwrap_err();
+        assert!(err.to_string().contains("restrictive-only"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_project_names() {
+        let cfg: OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "shopfront"
+
+[[projects]]
+name = "shopfront"
+"#,
+        )
+        .expect("parses");
+        let err = cfg.validate_hierarchy().unwrap_err().to_string();
+        assert!(err.contains("duplicate project name 'shopfront'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_environment_names_within_project() {
+        let cfg: OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "shopfront"
+
+  [[projects.environments]]
+  name = "prod"
+
+  [[projects.environments]]
+  name = "prod"
+"#,
+        )
+        .expect("parses");
+        let err = cfg.validate_hierarchy().unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate environment name 'prod'") && err.contains("shopfront"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_allows_same_environment_name_in_different_projects() {
+        // Both projects declaring "prod" is normal and must validate cleanly.
+        let cfg: OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "shopfront"
+
+  [[projects.environments]]
+  name = "prod"
+
+[[projects]]
+name = "data-platform"
+
+  [[projects.environments]]
+  name = "prod"
+"#,
+        )
+        .expect("parses");
+        cfg.validate_hierarchy().expect("must pass");
     }
 }

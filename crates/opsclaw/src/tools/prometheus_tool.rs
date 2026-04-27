@@ -423,4 +423,69 @@ mod tests {
         assert!(r.output.contains("max=3.0000"));
         assert!(r.output.contains("mean=2.0000"));
     }
+
+    #[tokio::test]
+    async fn server_500_surfaces_structured_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/query"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("oops"))
+            .mount(&server)
+            .await;
+        let t = tool_for(&server);
+        let r = t
+            .execute(json!({"endpoint": "test", "query": "up"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn malformed_json_is_handled_gracefully() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json at all"))
+            .mount(&server)
+            .await;
+        let t = tool_for(&server);
+        let r = t
+            .execute(json!({"endpoint": "test", "query": "up"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn empty_vector_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": {"resultType": "vector", "result": []}
+            })))
+            .mount(&server)
+            .await;
+        let t = tool_for(&server);
+        let r = t
+            .execute(json!({"endpoint": "test", "query": "nothing_matches"}))
+            .await
+            .unwrap();
+        assert!(r.success, "error: {:?}", r.error);
+    }
+
+    #[tokio::test]
+    async fn missing_query_arg() {
+        let server = MockServer::start().await;
+        let t = tool_for(&server);
+        let r = t
+            .execute(json!({"endpoint": "test"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
 }

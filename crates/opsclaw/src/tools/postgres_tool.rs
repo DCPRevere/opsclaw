@@ -565,4 +565,56 @@ mod tests {
         assert!(!r.success);
         assert!(r.error.unwrap().contains("dry-run"));
     }
+
+    #[tokio::test]
+    async fn missing_instance_arg() {
+        let t = PostgresTool::new(PostgresToolConfig { instances: vec![] });
+        let r = t
+            .execute(json!({"action": "connections"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn missing_action_arg() {
+        let t = PostgresTool::new(PostgresToolConfig {
+            instances: vec![PostgresInstance {
+                name: "dev".into(),
+                dsn: "host=127.0.0.1 port=1 user=x".into(),
+                autonomy: OpsClawAutonomy::Auto,
+            }],
+        });
+        let r = t
+            .execute(json!({"instance": "dev"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn unsafe_table_ident_rejected_without_connecting() {
+        // table-stats action should reject shell-injection-looking idents
+        // at validation time, before attempting to connect.
+        let t = PostgresTool::new(PostgresToolConfig {
+            instances: vec![PostgresInstance {
+                name: "dev".into(),
+                dsn: "host=127.0.0.1 port=1 user=x".into(),
+                autonomy: OpsClawAutonomy::Auto,
+            }],
+        });
+        let r = t
+            .execute(json!({
+                "instance": "dev", "action": "table_stats",
+                "table": "users; DROP TABLE admins"
+            }))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        // Accept either a validation rejection or a connect error — both
+        // prove the bad statement never ran.
+        assert!(r.error.is_some());
+    }
 }

@@ -91,6 +91,33 @@ impl Tool for MonitorTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops_config::{ConnectionType, OpsClawAutonomy, TargetConfig};
+
+    fn project(name: &str, connection_type: ConnectionType) -> TargetConfig {
+        TargetConfig {
+            name: name.to_string(),
+            connection_type,
+            host: Some("127.0.0.1".into()),
+            port: Some(22),
+            user: Some("nobody".into()),
+            key_secret: None,
+            autonomy: OpsClawAutonomy::DryRun,
+            context_file: None,
+            probes: None,
+            data_sources: None,
+            escalation: None,
+            kubeconfig: None,
+            context: None,
+            namespace: None,
+        }
+    }
+
+    fn config_with(targets: Vec<TargetConfig>) -> OpsConfig {
+        OpsConfig {
+            targets: Some(targets),
+            ..OpsConfig::default()
+        }
+    }
 
     #[test]
     fn tool_spec_is_valid() {
@@ -99,5 +126,62 @@ mod tests {
         assert_eq!(tool.name(), "monitor");
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["project"].is_object());
+        assert_eq!(schema["required"][0], "project");
+    }
+
+    #[tokio::test]
+    async fn missing_project_arg_is_anyhow_error() {
+        let tool = MonitorTool::new(OpsConfig::default());
+        let err = tool.execute(json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("Missing 'project'"));
+    }
+
+    #[tokio::test]
+    async fn unknown_project_returns_structured_error_with_available_list() {
+        let config = config_with(vec![
+            project("web", ConnectionType::Ssh),
+            project("db", ConnectionType::Ssh),
+        ]);
+        let tool = MonitorTool::new(config);
+        let r = tool.execute(json!({"project": "nope"})).await.unwrap();
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("nope"));
+        assert!(err.contains("web"));
+        assert!(err.contains("db"));
+    }
+
+    #[tokio::test]
+    async fn unknown_project_when_no_projects_configured() {
+        let tool = MonitorTool::new(OpsConfig::default());
+        let r = tool.execute(json!({"project": "web"})).await.unwrap();
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("web"));
+        assert!(err.contains("Available:"));
+    }
+
+    #[tokio::test]
+    async fn scan_failure_surfaces_structured_error() {
+        // A Kubernetes project with an intentionally bad kubeconfig path —
+        // scan_target will fail to build the client, and the tool must wrap
+        // that as success=false with a "Scan failed" message.
+        let mut p = project("k8s", ConnectionType::Kubernetes);
+        p.kubeconfig = Some("/nonexistent/kubeconfig/path".into());
+        let tool = MonitorTool::new(config_with(vec![p]));
+        let r = tool.execute(json!({"project": "k8s"})).await.unwrap();
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("Scan failed"));
+        assert!(err.contains("k8s"));
+    }
+
+    #[tokio::test]
+    async fn empty_project_name_is_treated_as_unknown() {
+        let config = config_with(vec![project("web", ConnectionType::Ssh)]);
+        let tool = MonitorTool::new(config);
+        let r = tool.execute(json!({"project": ""})).await.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("Unknown project"));
     }
 }

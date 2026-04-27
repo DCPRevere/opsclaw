@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use zeroclaw::tools::Tool;
 
 use crate::ops_config::{
-    AzureServiceBusConfig, CloudflareConfig, ElkEndpointConfig, EnvironmentConfig, GithubConfig,
+    AzureServiceBusConfig, CloudflareConfig, ElkEndpointConfig, GithubConfig,
     JaegerEndpointConfig, LokiEndpointConfig, OpsConfig, PagerDutyConfig, PrometheusEndpointConfig,
     RabbitMqConfig, ConnectionType,
 };
@@ -341,6 +341,228 @@ fn set_singleton<'a, T>(
     *slot = Some(cfg);
     *origin_slot = Some(origin.to_string());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(toml_str: &str) -> OpsConfig {
+        toml::from_str(toml_str).expect("valid TOML")
+    }
+
+    /// Construct a config rooted at a real temporary directory so
+    /// `decrypt_secret` (which reads `config_path.parent()`) succeeds. The
+    /// returned `_tmp` keeps the directory alive for the duration of the test.
+    fn parse_with_tmp(toml_str: &str) -> (OpsConfig, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut cfg: OpsConfig = toml::from_str(toml_str).expect("valid TOML");
+        cfg.config_path = tmp.path().join("config.toml");
+        (cfg, tmp)
+    }
+
+    // ── gather_endpoints ──────────────────────────────────────────
+
+    #[test]
+    fn gather_endpoints_empty_config_returns_empty_pools() {
+        let cfg = OpsConfig::default();
+        let pools = gather_endpoints(&cfg).expect("gather");
+        assert!(pools.prometheus.is_empty());
+        assert!(pools.loki.is_empty());
+        assert!(pools.elk.is_empty());
+        assert!(pools.jaeger.is_empty());
+        assert!(pools.pagerduty.is_none());
+        assert!(pools.github.is_none());
+        assert!(pools.cloudflare.is_none());
+        assert!(pools.rabbitmq.is_none());
+        assert!(pools.azure_service_bus.is_none());
+    }
+
+    #[test]
+    fn gather_endpoints_merges_vec_pools_across_environments() {
+        let cfg = parse(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "shopfront"
+
+  [[projects.environments]]
+  name = "dev"
+  [[projects.environments.endpoints.prometheus]]
+  name = "dev-prom"
+  url = "http://prom-dev:9090"
+
+  [[projects.environments]]
+  name = "prod"
+  [[projects.environments.endpoints.prometheus]]
+  name = "prod-prom"
+  url = "http://prom-prod:9090"
+"#,
+        );
+        let pools = gather_endpoints(&cfg).expect("gather");
+        assert_eq!(pools.prometheus.len(), 2);
+        let names: Vec<&str> = pools.prometheus.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"dev-prom"));
+        assert!(names.contains(&"prod-prom"));
+    }
+
+    #[test]
+    fn gather_endpoints_errors_on_duplicate_vec_pool_name() {
+        let cfg = parse(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "shopfront"
+
+  [[projects.environments]]
+  name = "dev"
+  [[projects.environments.endpoints.prometheus]]
+  name = "shared"
+  url = "http://a:9090"
+
+  [[projects.environments]]
+  name = "prod"
+  [[projects.environments.endpoints.prometheus]]
+  name = "shared"
+  url = "http://b:9090"
+"#,
+        );
+        let err = match gather_endpoints(&cfg) {
+            Ok(_) => panic!("expected duplicate-name error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("Duplicate prometheus endpoint 'shared'"), "got: {err}");
+    }
+
+    #[test]
+    fn gather_endpoints_errors_on_duplicate_singleton_across_environments() {
+        let cfg = parse(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "shopfront"
+
+  [[projects.environments]]
+  name = "dev"
+  [projects.environments.endpoints.pagerduty]
+  api_key = "k1"
+
+  [[projects.environments]]
+  name = "prod"
+  [projects.environments.endpoints.pagerduty]
+  api_key = "k2"
+"#,
+        );
+        let err = match gather_endpoints(&cfg) {
+            Ok(_) => panic!("expected singleton-collision error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("Duplicate pagerduty config"), "got: {err}");
+        assert!(err.contains("shopfront::dev"));
+        assert!(err.contains("shopfront::prod"));
+    }
+
+    #[test]
+    fn gather_endpoints_singleton_set_once_resolves() {
+        let cfg = parse(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "shopfront"
+
+  [[projects.environments]]
+  name = "dev"
+
+  [[projects.environments]]
+  name = "prod"
+  [projects.environments.endpoints.pagerduty]
+  api_key = "only-here"
+  default_service_id = "PSVC1"
+"#,
+        );
+        let pools = gather_endpoints(&cfg).expect("gather");
+        let pd = pools.pagerduty.expect("pagerduty present");
+        assert_eq!(pd.api_key, "only-here");
+        assert_eq!(pd.default_service_id.as_deref(), Some("PSVC1"));
+    }
+
+    // ── build_ssh_entries ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn build_ssh_entries_walks_flat_and_hierarchical() {
+        let (cfg, _tmp) = parse_with_tmp(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "shopfront"
+
+  [[projects.environments]]
+  name = "prod"
+
+    [[projects.environments.targets]]
+    name = "hier-host"
+    type = "ssh"
+    host = "10.0.0.2"
+    user = "ops"
+    key_secret = "fake-pem-bytes"
+"#,
+        );
+        let entries = build_ssh_entries(&cfg).await.expect("build");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "hier-host");
+        assert_eq!(entries[0].host, "10.0.0.2");
+        assert_eq!(entries[0].port, 22);
+    }
+
+    #[tokio::test]
+    async fn build_ssh_entries_skips_non_ssh_and_incomplete_targets() {
+        let (cfg, _tmp) = parse_with_tmp(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[targets]]
+name = "local-only"
+type = "local"
+
+[[targets]]
+name = "k8s-thing"
+type = "kubernetes"
+
+[[targets]]
+name = "ssh-no-host"
+type = "ssh"
+user = "ops"
+key_secret = "k"
+
+[[targets]]
+name = "ssh-no-user"
+type = "ssh"
+host = "10.0.0.3"
+key_secret = "k"
+
+[[targets]]
+name = "ssh-no-key"
+type = "ssh"
+host = "10.0.0.4"
+user = "ops"
+
+[[targets]]
+name = "ssh-good"
+type = "ssh"
+host = "10.0.0.5"
+user = "ops"
+key_secret = "fake-pem"
+"#,
+        );
+        let entries = build_ssh_entries(&cfg).await.expect("build");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "ssh-good");
+    }
 }
 
 /// Extract SSH project entries from config, resolving key secrets as needed.

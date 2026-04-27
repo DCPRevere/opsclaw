@@ -592,4 +592,40 @@ mod tests {
         let r = t.execute(json!({"action": "nuke"})).await.unwrap();
         assert!(!r.success);
     }
+
+    #[tokio::test]
+    async fn server_500_surfaced() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/$Resources/queues"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let t = tool(&server, OpsClawAutonomy::Auto);
+        let r = t.execute(json!({"action": "list_queues"})).await.unwrap();
+        assert!(!r.success);
+    }
+
+    #[tokio::test]
+    async fn missing_action_rejected() {
+        let server = MockServer::start().await;
+        let t = tool(&server, OpsClawAutonomy::Auto);
+        let r = t.execute(json!({})).await.unwrap();
+        assert!(!r.success);
+    }
+
+    #[tokio::test]
+    async fn receive_destructive_dry_run_marker() {
+        // No mock installed — DryRun must intercept before any HTTP call,
+        // so the mock server's default 404 should never be hit.
+        let server = MockServer::start().await;
+        let t = tool(&server, OpsClawAutonomy::DryRun);
+        let r = t
+            .execute(json!({"action": "receive_and_delete", "queue": "orders"}))
+            .await
+            .unwrap();
+        assert!(r.success, "{:?}", r.error);
+        assert!(r.output.starts_with("[dry-run]"));
+        assert!(r.output.contains("DELETE"));
+    }
 }

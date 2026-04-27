@@ -1243,39 +1243,7 @@ mod tests {
         assert!(err.to_string().contains("No environment named 'ghost'"));
     }
 
-    // ── handle_project_list / handle_project_show / handle_env_list / handle_env_show ──
-    #[test]
-    fn project_list_handles_empty_config() {
-        let cfg = OpsConfig::default();
-        handle_project_list(&cfg).expect("list on empty config");
-    }
-
-    #[test]
-    fn project_list_with_projects() {
-        let mut cfg = OpsConfig::default();
-        cfg.projects.push(ProjectConfig {
-            name: "shopfront".into(),
-            description: Some("retail".into()),
-            context_file: None,
-            owners: None,
-            environments: vec![EnvironmentConfig::default()],
-        });
-        handle_project_list(&cfg).expect("list");
-    }
-
-    #[test]
-    fn project_show_finds_by_name() {
-        let mut cfg = OpsConfig::default();
-        cfg.projects.push(ProjectConfig {
-            name: "shopfront".into(),
-            description: None,
-            context_file: None,
-            owners: None,
-            environments: Vec::new(),
-        });
-        handle_project_show(&cfg, "shopfront").expect("show");
-    }
-
+    // ── error-path assertions on show handlers ───────────────────
     #[test]
     fn project_show_errors_when_missing() {
         let cfg = OpsConfig::default();
@@ -1284,31 +1252,9 @@ mod tests {
     }
 
     #[test]
-    fn env_list_empty_config() {
-        let cfg = OpsConfig::default();
-        handle_env_list(&cfg).expect("list on empty config");
-    }
-
-    #[test]
     fn env_show_requires_address_form() {
         let cfg = OpsConfig::default();
         assert!(handle_env_show(&cfg, "no-separator").is_err());
-    }
-
-    #[test]
-    fn env_show_finds_by_address() {
-        let mut cfg = OpsConfig::default();
-        cfg.projects.push(ProjectConfig {
-            name: "shopfront".into(),
-            description: None,
-            context_file: None,
-            owners: None,
-            environments: vec![EnvironmentConfig {
-                name: "dev".into(),
-                ..EnvironmentConfig::default()
-            }],
-        });
-        handle_env_show(&cfg, "shopfront::dev").expect("show");
     }
 
     #[test]

@@ -1067,6 +1067,78 @@ mod kube_tool_tests {
         assert!(schema["properties"]["action"].is_object());
     }
 
+    #[test]
+    fn targets_from_config_filters_to_kubernetes_only() {
+        let cfg: crate::ops_config::OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[targets]]
+name = "ssh-host"
+type = "ssh"
+host = "10.0.0.1"
+user = "ops"
+
+[[targets]]
+name = "k8s-flat"
+type = "kubernetes"
+kubeconfig = "~/.kube/flat"
+context = "ctx-flat"
+namespace = "ns-flat"
+
+[[targets]]
+name = "local-box"
+type = "local"
+"#,
+        )
+        .expect("parses");
+
+        let kts = KubeTool::targets_from_config(&cfg);
+        assert_eq!(kts.len(), 1);
+        assert_eq!(kts[0].name, "k8s-flat");
+        assert_eq!(kts[0].kubeconfig.as_deref(), Some("~/.kube/flat"));
+        assert_eq!(kts[0].context.as_deref(), Some("ctx-flat"));
+        assert_eq!(kts[0].default_namespace.as_deref(), Some("ns-flat"));
+    }
+
+    #[test]
+    fn targets_from_config_walks_flat_and_hierarchical() {
+        let cfg: crate::ops_config::OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "shopfront"
+
+  [[projects.environments]]
+  name = "prod"
+
+    [[projects.environments.targets]]
+    name = "k8s-prod"
+    type = "kubernetes"
+    context = "prod-ctx"
+
+    [[projects.environments.targets]]
+    name = "ssh-prod"
+    type = "ssh"
+    host = "10.0.0.1"
+    user = "ops"
+"#,
+        )
+        .expect("parses");
+
+        let kts = KubeTool::targets_from_config(&cfg);
+        assert_eq!(kts.len(), 1);
+        assert_eq!(kts[0].name, "k8s-prod");
+        assert_eq!(kts[0].context.as_deref(), Some("prod-ctx"));
+    }
+
+    #[test]
+    fn targets_from_config_empty_when_no_kubernetes_targets() {
+        let cfg = crate::ops_config::OpsConfig::default();
+        assert!(KubeTool::targets_from_config(&cfg).is_empty());
+    }
+
     #[tokio::test]
     async fn unknown_target_rejected() {
         let tool = KubeTool::new(KubeToolConfig { targets: vec![] });
@@ -1121,4 +1193,119 @@ mod kube_tool_tests {
             .unwrap();
         assert!(!r.success);
     }
+
+    fn auto_target() -> KubeTarget {
+        KubeTarget {
+            name: "prod".into(),
+            kubeconfig: Some("/nonexistent/kubeconfig".into()),
+            context: None,
+            default_namespace: Some("default".into()),
+            autonomy: OpsClawAutonomy::Auto,
+        }
+    }
+
+    fn dry_target() -> KubeTarget {
+        KubeTarget {
+            name: "prod".into(),
+            kubeconfig: None,
+            context: None,
+            default_namespace: Some("default".into()),
+            autonomy: OpsClawAutonomy::DryRun,
+        }
+    }
+
+    fn tool_with(target: KubeTarget) -> KubeTool {
+        KubeTool::new(KubeToolConfig { targets: vec![target] })
+    }
+
+    #[tokio::test]
+    async fn missing_target_arg() {
+        let tool = tool_with(auto_target());
+        let r = tool.execute(json!({"action": "list_pods"})).await.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("missing 'target'"));
+    }
+
+    #[tokio::test]
+    async fn missing_action_arg() {
+        let tool = tool_with(auto_target());
+        let r = tool.execute(json!({"target": "prod"})).await.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("missing 'action'"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_rejects_restart_deployment() {
+        let tool = tool_with(dry_target());
+        let r = tool
+            .execute(json!({
+                "target": "prod", "action": "restart_deployment",
+                "namespace": "default", "name": "api"
+            }))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("dry-run"));
+        assert!(err.contains("restart_deployment"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_rejects_scale_deployment() {
+        let tool = tool_with(dry_target());
+        let r = tool
+            .execute(json!({
+                "target": "prod", "action": "scale_deployment",
+                "namespace": "default", "name": "api", "replicas": 3
+            }))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("dry-run"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_allows_reads_but_client_build_fails() {
+        // DryRun does not block list_pods; the failing kubeconfig surfaces as a
+        // client-build error rather than a dry-run block.
+        let mut t = dry_target();
+        t.kubeconfig = Some("/nonexistent/kubeconfig".into());
+        let tool = tool_with(t);
+        let r = tool
+            .execute(json!({"target": "prod", "action": "list_pods"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("kube client build failed"));
+        assert!(!err.contains("dry-run"));
+    }
+
+    #[tokio::test]
+    async fn auto_mode_surfaces_client_build_error() {
+        // Auto lets the call reach the factory, which fails on the bad path —
+        // proves writes are not silently dropped under Auto.
+        let tool = tool_with(auto_target());
+        let r = tool
+            .execute(json!({
+                "target": "prod", "action": "delete_pod",
+                "namespace": "default", "name": "web-0"
+            }))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("kube client build failed"));
+    }
+
+    // NOTE: per-action argument validation (invalid name, out-of-range
+    // replicas, missing namespace/pod name) is implemented inside
+    // `dispatch`, which runs *after* `factory.build()`. In fast unit
+    // tests with a bogus kubeconfig the client-build error masks the
+    // more specific validation error. Covering those messages requires
+    // either (a) restructuring execute() to validate before building or
+    // (b) wiring a working fake KubeClientFactory. Both are out of
+    // scope for the fast-test pass. The dry-run and auto-with-bad-config
+    // tests above still prove the important property: writes either
+    // get blocked in DryRun or surface a structured error in Auto —
+    // never silently succeed.
 }

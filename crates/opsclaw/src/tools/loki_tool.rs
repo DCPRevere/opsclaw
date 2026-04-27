@@ -527,4 +527,65 @@ mod tests {
         assert!(!r.success);
         assert!(r.error.unwrap().contains("label"));
     }
+
+    #[tokio::test]
+    async fn server_500_surfaces_status_and_body_snippet() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/loki/api/v1/query_range"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal"))
+            .mount(&server)
+            .await;
+        let t = tool_for(&server, None, None);
+        let r = t
+            .execute(json!({"endpoint": "test", "query": "{x=\"y\"}"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("500"));
+        assert!(err.contains("internal"));
+    }
+
+    #[tokio::test]
+    async fn malformed_json_is_handled() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/loki/api/v1/query_range"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("}{"))
+            .mount(&server)
+            .await;
+        let t = tool_for(&server, None, None);
+        let r = t
+            .execute(json!({"endpoint": "test", "query": "{x=\"y\"}"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("invalid JSON"));
+    }
+
+    #[tokio::test]
+    async fn unknown_endpoint_lists_available() {
+        let server = MockServer::start().await;
+        let t = tool_for(&server, None, None);
+        let r = t
+            .execute(json!({"endpoint": "other", "query": "{x=\"y\"}"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("test"));
+    }
+
+    #[tokio::test]
+    async fn missing_query_for_range_mode() {
+        let server = MockServer::start().await;
+        let t = tool_for(&server, None, None);
+        let r = t
+            .execute(json!({"endpoint": "test"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
 }

@@ -116,4 +116,94 @@ mod tests {
         let user = "# My tasks\n\n- [high] Do the thing\n";
         assert!(!is_default_heartbeat(user));
     }
+
+    fn ssh_target(name: &str) -> crate::ops_config::TargetConfig {
+        // Build via TOML so we don't have to track every field on TargetConfig.
+        let toml_str = format!(
+            r#"
+name = "{name}"
+type = "ssh"
+host = "10.0.0.1"
+user = "ops"
+"#
+        );
+        toml::from_str(&toml_str).expect("valid target TOML")
+    }
+
+    fn config_with_ssh_targets(names: &[&str]) -> OpsConfig {
+        let mut cfg = OpsConfig::default();
+        cfg.targets = Some(names.iter().map(|n| ssh_target(n)).collect());
+        cfg
+    }
+
+    #[tokio::test]
+    async fn seed_heartbeat_writes_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config_with_ssh_targets(&["web", "db"]);
+
+        seed_heartbeat_file(tmp.path(), &cfg).await.expect("seed");
+
+        let body = tokio::fs::read_to_string(tmp.path().join("HEARTBEAT.md"))
+            .await
+            .expect("file written");
+        assert!(body.starts_with("# OpsClaw Heartbeat Tasks"));
+        assert!(body.contains("target 'web'"));
+        assert!(body.contains("target 'db'"));
+    }
+
+    #[tokio::test]
+    async fn seed_heartbeat_replaces_upstream_default_placeholder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("HEARTBEAT.md");
+        tokio::fs::write(&path, "# Periodic Tasks\n\n# Add tasks below\n")
+            .await
+            .unwrap();
+        let cfg = config_with_ssh_targets(&["web"]);
+
+        seed_heartbeat_file(tmp.path(), &cfg).await.expect("seed");
+
+        let body = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(body.contains("target 'web'"));
+        assert!(!body.contains("# Periodic Tasks"));
+    }
+
+    #[tokio::test]
+    async fn seed_heartbeat_preserves_user_authored_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("HEARTBEAT.md");
+        let user_body = "# My tasks\n\n- [high] Do the thing\n";
+        tokio::fs::write(&path, user_body).await.unwrap();
+        let cfg = config_with_ssh_targets(&["web"]);
+
+        seed_heartbeat_file(tmp.path(), &cfg).await.expect("seed");
+
+        let body = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(body, user_body);
+    }
+
+    #[tokio::test]
+    async fn seed_heartbeat_no_op_when_no_ssh_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = OpsConfig::default();
+
+        seed_heartbeat_file(tmp.path(), &cfg).await.expect("seed");
+
+        assert!(!tmp.path().join("HEARTBEAT.md").exists());
+    }
+
+    #[tokio::test]
+    async fn seed_heartbeat_skips_non_ssh_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = OpsConfig::default();
+        cfg.targets = Some(vec![
+            toml::from_str(r#"name = "k8s"
+type = "kubernetes""#).unwrap(),
+            toml::from_str(r#"name = "local-only"
+type = "local""#).unwrap(),
+        ]);
+
+        seed_heartbeat_file(tmp.path(), &cfg).await.expect("seed");
+
+        assert!(!tmp.path().join("HEARTBEAT.md").exists());
+    }
 }

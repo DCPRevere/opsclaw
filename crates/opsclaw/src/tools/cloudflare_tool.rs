@@ -685,4 +685,33 @@ mod tests {
             .unwrap();
         assert!(!r.success);
     }
+
+    #[tokio::test]
+    async fn server_500_surfaced() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/client/v4/zones"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let t = tool(&server, OpsClawAutonomy::Auto);
+        let r = t.execute(json!({"action": "list_zones"})).await.unwrap();
+        assert!(!r.success);
+    }
+
+    #[tokio::test]
+    async fn unknown_action_rejected() {
+        let server = MockServer::start().await;
+        let t = tool(&server, OpsClawAutonomy::Auto);
+        let r = t.execute(json!({"action": "nuke_internet"})).await.unwrap();
+        assert!(!r.success);
+    }
+
+    #[tokio::test]
+    async fn missing_action_rejected() {
+        let server = MockServer::start().await;
+        let t = tool(&server, OpsClawAutonomy::Auto);
+        let r = t.execute(json!({})).await.unwrap();
+        assert!(!r.success);
+    }
 }

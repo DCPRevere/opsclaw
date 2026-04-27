@@ -666,4 +666,35 @@ mod tests {
         assert!(e.contains("503"));
         assert!(e.contains("upstream dead"));
     }
+
+    #[tokio::test]
+    async fn malformed_json_returns_empty_output() {
+        // The tool treats malformed JSON as Value::Null and renders no data;
+        // it does not fail the call. This matches current behavior — see
+        // `list_services`. Call still succeeds with empty output.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/services"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("}{not json"))
+            .mount(&server)
+            .await;
+        let t = tool(&server);
+        let r = t
+            .execute(json!({"endpoint": "test", "action": "list_services"}))
+            .await
+            .unwrap();
+        assert!(r.success);
+        assert!(r.output.is_empty() || !r.output.contains("count:"));
+    }
+
+    #[tokio::test]
+    async fn unknown_action_rejected() {
+        let server = MockServer::start().await;
+        let t = tool(&server);
+        let r = t
+            .execute(json!({"endpoint": "test", "action": "nuke"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+    }
 }

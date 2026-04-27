@@ -447,4 +447,45 @@ mod tests {
         assert!(!r.success);
         assert!(r.error.unwrap().contains("[auth]"));
     }
+
+    #[tokio::test]
+    async fn server_500_surfaces_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_cluster/health"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let t = tool_for(&server, None, None, None);
+        let r = t
+            .execute(json!({"endpoint": "test", "action": "health"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn unknown_endpoint_rejected() {
+        let server = MockServer::start().await;
+        let t = tool_for(&server, None, None, None);
+        let r = t
+            .execute(json!({"endpoint": "other", "action": "health"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn unknown_action_rejected() {
+        let server = MockServer::start().await;
+        let t = tool_for(&server, None, None, None);
+        let r = t
+            .execute(json!({"endpoint": "test", "action": "nuke_cluster"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
 }

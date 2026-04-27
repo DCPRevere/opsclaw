@@ -902,4 +902,34 @@ mod tests {
         assert!(!r.success);
         assert!(r.error.unwrap().contains("401"));
     }
+
+    #[tokio::test]
+    async fn server_500_surfaced() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/issues"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let t = tool(&server, OpsClawAutonomy::Auto);
+        let r = t.execute(json!({"action": "list_issues"})).await.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("500"));
+    }
+
+    #[tokio::test]
+    async fn unknown_action_rejected() {
+        let server = MockServer::start().await;
+        let t = tool(&server, OpsClawAutonomy::Auto);
+        let r = t.execute(json!({"action": "nuke_repo"})).await.unwrap();
+        assert!(!r.success);
+    }
+
+    #[tokio::test]
+    async fn missing_action_rejected() {
+        let server = MockServer::start().await;
+        let t = tool(&server, OpsClawAutonomy::Auto);
+        let r = t.execute(json!({})).await.unwrap();
+        assert!(!r.success);
+    }
 }

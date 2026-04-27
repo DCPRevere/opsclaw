@@ -351,4 +351,48 @@ mod tests {
         assert!(r.success, "error: {:?}", r.error);
         assert!(r.output.contains("t-123"));
     }
+
+    #[tokio::test]
+    async fn a2a_tool_send_server_500() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/a2a"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let tool = A2aTool::new();
+        let r = tool
+            .execute(json!({
+                "action": "send", "url": server.uri(),
+                "token": "tok", "message": "hi"
+            }))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn a2a_tool_send_malformed_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/a2a"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not jsonrpc"))
+            .mount(&server)
+            .await;
+        let tool = A2aTool::new();
+        let r = tool
+            .execute(json!({
+                "action": "send", "url": server.uri(),
+                "token": "tok", "message": "hi"
+            }))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.is_some());
+    }
 }

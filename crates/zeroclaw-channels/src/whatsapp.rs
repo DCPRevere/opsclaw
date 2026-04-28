@@ -217,7 +217,7 @@ impl WhatsAppChannel {
                         tracing::warn!(
                             "WhatsApp: ignoring message from unauthorized number: {normalized_from}. \
                             Add to channels.whatsapp.allowed_numbers in config.toml, \
-                            or run `zeroclaw onboard --channels-only` to configure interactively."
+                            or run `opsclaw onboard --channels-only` to configure interactively."
                         );
                         continue;
                     }
@@ -447,7 +447,7 @@ mod tests {
                             "timestamp": "1699999999",
                             "type": "text",
                             "text": {
-                                "body": "Hello ZeroClaw!"
+                                "body": "Hello OpsClaw!"
                             }
                         }]
                     },
@@ -459,7 +459,7 @@ mod tests {
         let msgs = ch.parse_webhook_payload(&payload);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].sender, "+1234567890");
-        assert_eq!(msgs[0].content, "Hello ZeroClaw!");
+        assert_eq!(msgs[0].content, "Hello OpsClaw!");
         assert_eq!(msgs[0].channel, "whatsapp");
         assert_eq!(msgs[0].timestamp, 1_699_999_999);
     }
@@ -1286,7 +1286,7 @@ mod tests {
             "verify-me".into(),
             vec!["*".into()],
         )
-        .with_group_mention_patterns(vec!["@?ZeroClaw".into()])
+        .with_group_mention_patterns(vec!["@?OpsClaw".into()])
     }
 
     fn make_dm_mention_channel() -> WhatsAppChannel {
@@ -1296,7 +1296,7 @@ mod tests {
             "verify-me".into(),
             vec!["*".into()],
         )
-        .with_dm_mention_patterns(vec!["@?ZeroClaw".into()])
+        .with_dm_mention_patterns(vec!["@?OpsClaw".into()])
     }
 
     // ── compile_mention_patterns ──
@@ -1304,7 +1304,7 @@ mod tests {
     #[test]
     fn whatsapp_compile_valid_patterns() {
         let patterns = WhatsAppChannel::compile_mention_patterns(&[
-            "@?ZeroClaw".into(),
+            "@?OpsClaw".into(),
             r"\+?15555550123".into(),
         ]);
         assert_eq!(patterns.len(), 2);
@@ -1313,14 +1313,14 @@ mod tests {
     #[test]
     fn whatsapp_compile_skips_invalid_patterns() {
         let patterns =
-            WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into(), "[invalid".into()]);
+            WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into(), "[invalid".into()]);
         assert_eq!(patterns.len(), 1);
     }
 
     #[test]
     fn whatsapp_compile_skips_empty_patterns() {
         let patterns =
-            WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into(), "  ".into()]);
+            WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into(), "  ".into()]);
         assert_eq!(patterns.len(), 1);
     }
 
@@ -1334,25 +1334,25 @@ mod tests {
 
     #[test]
     fn whatsapp_text_matches_at_name() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert!(WhatsAppChannel::text_matches_patterns(
             &pats,
-            "Hello @ZeroClaw"
+            "Hello @OpsClaw"
         ));
     }
 
     #[test]
     fn whatsapp_text_matches_name_only() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert!(WhatsAppChannel::text_matches_patterns(
             &pats,
-            "Hello ZeroClaw"
+            "Hello OpsClaw"
         ));
     }
 
     #[test]
     fn whatsapp_text_matches_case_insensitive() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert!(WhatsAppChannel::text_matches_patterns(
             &pats,
             "Hello @zeroclaw"
@@ -1365,7 +1365,7 @@ mod tests {
 
     #[test]
     fn whatsapp_text_matches_no_match() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert!(!WhatsAppChannel::text_matches_patterns(
             &pats,
             "Hello @otherbot"
@@ -1396,12 +1396,12 @@ mod tests {
     #[test]
     fn whatsapp_text_matches_multiple_patterns() {
         let pats = WhatsAppChannel::compile_mention_patterns(&[
-            "@?ZeroClaw".into(),
+            "@?OpsClaw".into(),
             r"\+?15555550123".into(),
         ]);
         assert!(WhatsAppChannel::text_matches_patterns(
             &pats,
-            "Hello @ZeroClaw"
+            "Hello @OpsClaw"
         ));
         assert!(WhatsAppChannel::text_matches_patterns(
             &pats,
@@ -1418,7 +1418,7 @@ mod tests {
         let pats: Vec<Regex> = vec![];
         assert!(!WhatsAppChannel::text_matches_patterns(
             &pats,
-            "Hello @ZeroClaw"
+            "Hello @OpsClaw"
         ));
     }
 
@@ -1426,69 +1426,69 @@ mod tests {
 
     #[test]
     fn whatsapp_strip_at_name() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert_eq!(
-            WhatsAppChannel::strip_patterns(&pats, "@ZeroClaw what is the weather?"),
+            WhatsAppChannel::strip_patterns(&pats, "@OpsClaw what is the weather?"),
             Some("what is the weather?".into())
         );
     }
 
     #[test]
     fn whatsapp_strip_name_without_at() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert_eq!(
-            WhatsAppChannel::strip_patterns(&pats, "ZeroClaw what is the weather?"),
+            WhatsAppChannel::strip_patterns(&pats, "OpsClaw what is the weather?"),
             Some("what is the weather?".into())
         );
     }
 
     #[test]
     fn whatsapp_strip_at_end() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert_eq!(
-            WhatsAppChannel::strip_patterns(&pats, "Help me @ZeroClaw"),
+            WhatsAppChannel::strip_patterns(&pats, "Help me @OpsClaw"),
             Some("Help me".into())
         );
     }
 
     #[test]
     fn whatsapp_strip_mid_sentence() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert_eq!(
-            WhatsAppChannel::strip_patterns(&pats, "Hey @ZeroClaw how are you?"),
+            WhatsAppChannel::strip_patterns(&pats, "Hey @OpsClaw how are you?"),
             Some("Hey how are you?".into())
         );
     }
 
     #[test]
     fn whatsapp_strip_multiple_occurrences() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert_eq!(
-            WhatsAppChannel::strip_patterns(&pats, "@ZeroClaw hello @ZeroClaw"),
+            WhatsAppChannel::strip_patterns(&pats, "@OpsClaw hello @OpsClaw"),
             Some("hello".into())
         );
     }
 
     #[test]
     fn whatsapp_strip_returns_none_when_only_mention() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
-        assert_eq!(WhatsAppChannel::strip_patterns(&pats, "@ZeroClaw"), None);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
+        assert_eq!(WhatsAppChannel::strip_patterns(&pats, "@OpsClaw"), None);
     }
 
     #[test]
     fn whatsapp_strip_returns_none_for_whitespace_only() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert_eq!(
-            WhatsAppChannel::strip_patterns(&pats, "  @ZeroClaw  "),
+            WhatsAppChannel::strip_patterns(&pats, "  @OpsClaw  "),
             None
         );
     }
 
     #[test]
     fn whatsapp_strip_collapses_whitespace() {
-        let pats = WhatsAppChannel::compile_mention_patterns(&["@?ZeroClaw".into()]);
+        let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert_eq!(
-            WhatsAppChannel::strip_patterns(&pats, "@ZeroClaw   status   please"),
+            WhatsAppChannel::strip_patterns(&pats, "@OpsClaw   status   please"),
             Some("status please".into())
         );
     }
@@ -1622,7 +1622,7 @@ mod tests {
             "entry": [{
                 "changes": [{
                     "value": {
-                        "messages": [group_msg("111", "1", "@ZeroClaw what is the weather?")]
+                        "messages": [group_msg("111", "1", "@OpsClaw what is the weather?")]
                     }
                 }]
             }]
@@ -1639,7 +1639,7 @@ mod tests {
             "entry": [{
                 "changes": [{
                     "value": {
-                        "messages": [group_msg("111", "1", "Hey @ZeroClaw tell me a joke")]
+                        "messages": [group_msg("111", "1", "Hey @OpsClaw tell me a joke")]
                     }
                 }]
             }]
@@ -1656,7 +1656,7 @@ mod tests {
             "entry": [{
                 "changes": [{
                     "value": {
-                        "messages": [group_msg("111", "1", "@ZeroClaw")]
+                        "messages": [group_msg("111", "1", "@OpsClaw")]
                     }
                 }]
             }]
@@ -1675,7 +1675,7 @@ mod tests {
             "entry": [{
                 "changes": [{
                     "value": {
-                        "messages": [group_msg("111", "1", "@zeroclaw status")]
+                        "messages": [group_msg("111", "1", "@opsclaw status")]
                     }
                 }]
             }]
@@ -1711,7 +1711,7 @@ mod tests {
                     "value": {
                         "messages": [
                             group_msg("111", "1", "No mention here"),
-                            group_msg("222", "2", "@ZeroClaw help me"),
+                            group_msg("222", "2", "@OpsClaw help me"),
                             group_msg("333", "3", "Also no mention")
                         ]
                     }
@@ -1750,7 +1750,7 @@ mod tests {
             "entry": [{
                 "changes": [{
                     "value": {
-                        "messages": [dm_msg("111", "1", "@ZeroClaw what is the weather?")]
+                        "messages": [dm_msg("111", "1", "@OpsClaw what is the weather?")]
                     }
                 }]
             }]
@@ -1758,7 +1758,7 @@ mod tests {
         let msgs = ch.parse_webhook_payload(&payload);
         assert_eq!(msgs.len(), 1);
         assert_eq!(
-            msgs[0].content, "@ZeroClaw what is the weather?",
+            msgs[0].content, "@OpsClaw what is the weather?",
             "DM content should not be stripped by group patterns"
         );
     }
@@ -1788,7 +1788,7 @@ mod tests {
             "entry": [{
                 "changes": [{
                     "value": {
-                        "messages": [dm_msg("111", "1", "@ZeroClaw what is the weather?")]
+                        "messages": [dm_msg("111", "1", "@OpsClaw what is the weather?")]
                     }
                 }]
             }]

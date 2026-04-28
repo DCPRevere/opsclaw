@@ -109,18 +109,18 @@ pub struct HardwareBootResult {
     pub tools: Vec<Box<dyn zeroclaw_api::tool::Tool>>,
     /// Human-readable device summary for the LLM system prompt.
     pub device_summary: String,
-    /// Content of `~/.zeroclaw/hardware/` context files (HARDWARE.md, device
+    /// Content of `~/.opsclaw/hardware/` context files (HARDWARE.md, device
     /// profiles, and skills) for injection into the system prompt.
     pub context_files_prompt: String,
 }
 
-/// Load hardware context files from `~/.zeroclaw/hardware/` and return them
+/// Load hardware context files from `~/.opsclaw/hardware/` and return them
 /// concatenated as a single markdown string ready for system-prompt injection.
 ///
 /// Reads (if they exist):
-/// 1. `~/.zeroclaw/hardware/HARDWARE.md`
-/// 2. `~/.zeroclaw/hardware/devices/<alias>.md` for each discovered alias
-/// 3. All `~/.zeroclaw/hardware/skills/*.md` files (sorted by name)
+/// 1. `~/.opsclaw/hardware/HARDWARE.md`
+/// 2. `~/.opsclaw/hardware/devices/<alias>.md` for each discovered alias
+/// 3. All `~/.opsclaw/hardware/skills/*.md` files (sorted by name)
 ///
 /// Missing files are silently skipped. Returns an empty string when no files
 /// are found.
@@ -129,7 +129,7 @@ pub fn load_hardware_context_prompt(aliases: &[&str]) -> String {
         Some(h) => h,
         None => return String::new(),
     };
-    load_hardware_context_from_dir(&home.join(".zeroclaw").join("hardware"), aliases)
+    load_hardware_context_from_dir(&home.join(".opsclaw").join("hardware"), aliases)
 }
 
 /// Inner helper that reads hardware context from an explicit base directory.
@@ -236,7 +236,7 @@ fn inject_rpi_context(
 /// discovery. [`HardwareSerialTransport`] opens the port lazily per-send,
 /// so this succeeds even when the port doesn't exist at startup.
 ///
-/// Without the feature: loads plugin tools from `~/.zeroclaw/tools/` only,
+/// Without the feature: loads plugin tools from `~/.opsclaw/tools/` only,
 /// with an empty device registry (GPIO tools will report "no device found"
 /// if called, which is correct).
 #[cfg(feature = "hardware")]
@@ -292,7 +292,7 @@ pub async fn boot(
     // BOOTSEL auto-detect: warn the user if a Pico is in BOOTSEL mode at startup.
     if uf2::find_rpi_rp2_mount().is_some() {
         tracing::info!("Pico detected in BOOTSEL mode (RPI-RP2 drive found)");
-        tracing::info!("Say \"flash my pico\" to install ZeroClaw firmware automatically");
+        tracing::info!("Say \"flash my pico\" to install OpsClaw firmware automatically");
     }
 
     // Aardvark discovery: scan for Total Phase Aardvark USB adapters and
@@ -555,7 +555,7 @@ pub fn run_info(chip: &str) -> Result<()> {
         println!();
         println!("Build with: cargo build --features hardware,probe");
         println!();
-        println!("Then run: zeroclaw hardware info --chip {}", chip);
+        println!("Then run: opsclaw hardware info --chip {}", chip);
         println!();
         println!("This uses probe-rs to attach to the Nucleo's ST-Link over USB");
         println!("and read chip info (memory map, etc.) — no firmware on target needed.");

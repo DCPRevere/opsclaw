@@ -2,7 +2,7 @@
 //
 // After the agent completes a multi-step tool-call sequence, this module
 // can persist the execution as a reusable skill definition (SKILL.toml)
-// under `~/.zeroclaw/workspace/skills/<slug>/`.
+// under `~/.opsclaw/workspace/skills/<slug>/`.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;

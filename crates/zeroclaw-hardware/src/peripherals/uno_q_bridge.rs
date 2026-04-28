@@ -1,6 +1,6 @@
 //! Arduino Uno Q Bridge — GPIO via socket to Bridge app.
 //!
-//! When ZeroClaw runs on Uno Q, the Bridge app (Python + MCU) exposes
+//! When OpsClaw runs on Uno Q, the Bridge app (Python + MCU) exposes
 //! digitalWrite/digitalRead over a local socket. These tools connect to it.
 
 use async_trait::async_trait;

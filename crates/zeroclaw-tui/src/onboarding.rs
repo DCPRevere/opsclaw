@@ -322,7 +322,7 @@ struct App {
 impl App {
     fn new() -> Self {
         // Resolve gateway port: env vars → default
-        let port = std::env::var("ZEROCLAW_GATEWAY_PORT")
+        let port = std::env::var("OPSCLAW_GATEWAY_PORT")
             .or_else(|_| std::env::var("PORT"))
             .ok()
             .and_then(|s| s.parse::<u16>().ok())
@@ -330,7 +330,7 @@ impl App {
 
         // Resolve gateway host: env var → default
         let host =
-            std::env::var("ZEROCLAW_GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+            std::env::var("OPSCLAW_GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
 
         Self {
             screen: Screen::Welcome,
@@ -430,7 +430,7 @@ impl App {
         self.pairing_required = true;
     }
 
-    /// Run `zeroclaw gateway get-paircode --new` locally to generate a code.
+    /// Run `opsclaw gateway get-paircode --new` locally to generate a code.
     async fn generate_code_via_cli() -> Option<String> {
         let output = tokio::process::Command::new("zeroclaw")
             .args(["gateway", "get-paircode", "--new"])
@@ -440,9 +440,9 @@ impl App {
         Self::extract_code_from_output(&output.stdout)
     }
 
-    /// Run `docker exec <container> zeroclaw gateway get-paircode --new`.
+    /// Run `docker exec <container> opsclaw gateway get-paircode --new`.
     async fn generate_code_via_docker() -> Option<String> {
-        // Find zeroclaw container
+        // Find opsclaw container
         let ps = tokio::process::Command::new("docker")
             .args([
                 "ps",
@@ -638,7 +638,7 @@ pub async fn run_tui_onboarding() -> Result<()> {
                 };
 
                 println!();
-                println!("  \u{1f980} ZeroClaw {VERSION} configured successfully!");
+                println!("  \u{1f4df} OpsClaw {VERSION} configured successfully!");
                 println!(
                     "     Provider:   {} ({})",
                     app.selected_provider(),
@@ -666,16 +666,16 @@ pub async fn run_tui_onboarding() -> Result<()> {
                 let channel = app.selected_channel();
                 if channel != "Skip for now" {
                     println!("  Next: edit config.toml to add your {channel} credentials.");
-                    println!("        zeroclaw config edit");
+                    println!("        opsclaw config edit");
                     println!();
                 }
-                println!("  Run `zeroclaw daemon` to start your agent.");
+                println!("  Run `opsclaw daemon` to start your agent.");
                 println!();
             }
             Err(e) => {
                 eprintln!();
                 eprintln!("  \u{2717} Failed to save configuration: {e}");
-                eprintln!("  You can re-run: zeroclaw onboard --tui");
+                eprintln!("  You can re-run: opsclaw onboard --tui");
                 eprintln!();
             }
         }
@@ -740,7 +740,7 @@ fn apply_tui_selections_to_config(app: &App, config: &mut Config) {
     // ── Channel ─────────────────────────────────────────────────────
     // Create a stub config for the selected channel with placeholder
     // values so the section appears in config.toml. The user fills in
-    // real tokens via `zeroclaw config edit` or the dashboard.
+    // real tokens via `opsclaw config edit` or the dashboard.
     let channel = app.selected_channel();
     match channel {
         "Telegram" => {
@@ -993,9 +993,9 @@ fn apply_tui_selections_to_config(app: &App, config: &mut Config) {
     config.gateway.require_pairing = app.pairing_required;
 }
 
-/// If a ZeroClaw Docker container is running, reconfigure it via `docker exec`.
+/// If a OpsClaw Docker container is running, reconfigure it via `docker exec`.
 async fn push_config_to_docker(app: &App) {
-    // Find zeroclaw container
+    // Find opsclaw container
     let container = find_docker_container().await;
     let container = match container {
         Some(c) => c,
@@ -1004,7 +1004,7 @@ async fn push_config_to_docker(app: &App) {
 
     let provider_id = app.selected_provider_id();
 
-    // Use `zeroclaw onboard --quick` inside the container to reconfigure
+    // Use `opsclaw onboard --quick` inside the container to reconfigure
     let mut args = vec![
         "exec".to_string(),
         container,
@@ -1424,10 +1424,10 @@ fn render(frame: &mut Frame, app: &App) {
 
     // Version line
     let version_line = Line::from(vec![
-        Span::styled("\u{1f980} ", theme::accent_style()),
-        Span::styled(format!("ZeroClaw {VERSION}"), theme::heading_style()),
+        Span::styled("\u{1f4df} ", theme::accent_style()),
+        Span::styled(format!("OpsClaw {VERSION}"), theme::heading_style()),
         Span::styled(
-            "  \u{2502}  Zero overhead. Zero compromise.",
+            "  \u{2502}  OpsClaw watches your servers whilst you sleep.",
             theme::dim_style(),
         ),
     ]);
@@ -1537,7 +1537,7 @@ fn render(frame: &mut Frame, app: &App) {
 fn setup_title() -> Paragraph<'static> {
     Paragraph::new(Line::from(vec![
         Span::styled("\u{250c}  ", theme::border_style()),
-        Span::styled("ZeroClaw setup", theme::heading_style()),
+        Span::styled("OpsClaw setup", theme::heading_style()),
     ]))
 }
 
@@ -1554,14 +1554,14 @@ fn render_welcome(frame: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "\u{250c}  ZeroClaw setup",
+            "\u{250c}  OpsClaw setup",
             theme::heading_style(),
         )),
         Line::from(Span::styled("\u{2502}", theme::border_style())),
         Line::from(vec![
             Span::styled("\u{2502}  ", theme::border_style()),
             Span::styled(
-                "Welcome to ZeroClaw \u{2014} the fastest, smallest AI assistant.",
+                "Welcome to OpsClaw \u{2014} your autonomous SRE.",
                 theme::body_style(),
             ),
         ]),
@@ -1603,11 +1603,11 @@ fn render_security(frame: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "ZeroClaw is optimized for single-operator deployments.",
+            "OpsClaw is optimized for single-operator deployments.",
             theme::body_style(),
         )),
         Line::from(Span::styled(
-            "By default, ZeroClaw is a personal agent: one trusted operator",
+            "By default, OpsClaw is a personal agent: one trusted operator",
             theme::body_style(),
         )),
         Line::from(Span::styled("boundary.", theme::body_style())),
@@ -1621,7 +1621,7 @@ fn render_security(frame: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "ZeroClaw is not a hostile multi-tenant boundary by default.",
+            "OpsClaw is not a hostile multi-tenant boundary by default.",
             theme::body_style(),
         )),
         Line::from(Span::styled(
@@ -1638,7 +1638,7 @@ fn render_security(frame: &mut Frame, area: Rect) {
             theme::body_style(),
         )),
         Line::from(Span::styled(
-            "control, don't run ZeroClaw.",
+            "control, don't run OpsClaw.",
             theme::body_style(),
         )),
         Line::from(""),
@@ -1682,11 +1682,11 @@ fn render_security(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled("Run regularly:", theme::heading_style())),
         Line::from(Span::styled(
-            "  zeroclaw security audit --deep",
+            "  opsclaw security audit --deep",
             theme::dim_style(),
         )),
         Line::from(Span::styled(
-            "  zeroclaw security audit --fix",
+            "  opsclaw security audit --fix",
             theme::dim_style(),
         )),
         Line::from(""),
@@ -2304,7 +2304,7 @@ fn render_how_channels_work(frame: &mut Frame, area: Rect) {
             theme::body_style(),
         )),
         Line::from(Span::styled(
-            "  Approve with: zeroclaw pairing approve <channel> <code>",
+            "  Approve with: opsclaw pairing approve <channel> <code>",
             theme::dim_style(),
         )),
         Line::from(Span::styled(
@@ -2312,7 +2312,7 @@ fn render_how_channels_work(frame: &mut Frame, area: Rect) {
             theme::body_style(),
         )),
         Line::from(Span::styled(
-            "  Multi-user DMs: run: zeroclaw config set session.dmScope",
+            "  Multi-user DMs: run: opsclaw config set session.dmScope",
             theme::body_style(),
         )),
         Line::from(Span::styled(
@@ -3069,7 +3069,7 @@ fn render_complete(frame: &mut Frame, area: Rect, app: &App) {
     let title = Line::from(vec![
         Span::styled("\u{2514}  ", theme::border_style()),
         Span::styled(
-            "Onboarding complete. Use the dashboard link above to control ZeroClaw.",
+            "Onboarding complete. Use the dashboard link above to control OpsClaw.",
             theme::heading_style(),
         ),
     ]);
@@ -3080,7 +3080,7 @@ fn render_complete(frame: &mut Frame, area: Rect, app: &App) {
     let mut summary_lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  \u{1f980} ZeroClaw configured successfully!",
+            "  \u{1f4df} OpsClaw configured successfully!",
             theme::success_style().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -3124,11 +3124,11 @@ fn render_complete(frame: &mut Frame, area: Rect, app: &App) {
     summary_lines.extend([
         Line::from(""),
         Line::from(Span::styled(
-            "  Run `zeroclaw daemon` to start your agent.",
+            "  Run `opsclaw daemon` to start your agent.",
             theme::body_style(),
         )),
         Line::from(Span::styled(
-            "  Run `zeroclaw doctor` to validate your setup.",
+            "  Run `opsclaw doctor` to validate your setup.",
             theme::body_style(),
         )),
         Line::from(""),

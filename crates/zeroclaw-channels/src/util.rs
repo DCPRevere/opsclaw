@@ -9,7 +9,7 @@ pub fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
     }
 }
 
-pub const BLOCK_KIT_PREFIX: &str = "__ZEROCLAW_BLOCK_KIT__";
+pub const BLOCK_KIT_PREFIX: &str = "__OPSCLAW_BLOCK_KIT__";
 
 pub fn strip_tool_call_tags(message: &str) -> String {
     const TOOL_CALL_OPEN_TAGS: [&str; 7] = [

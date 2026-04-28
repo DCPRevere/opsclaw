@@ -317,12 +317,12 @@ mod tests {
 
     #[test]
     fn unicode_content() {
-        let text = "# 日本語\nこんにちは世界\n\n## Émojis\n🦀 Rust is great 🚀";
+        let text = "# 日本語\nこんにちは世界\n\n## Émojis\n📟 Rust is great 🚀";
         let chunks = chunk_markdown(text, 512);
         assert!(!chunks.is_empty());
         let all: String = chunks.iter().map(|c| c.content.clone()).collect();
         assert!(all.contains("こんにちは"));
-        assert!(all.contains("🦀"));
+        assert!(all.contains("📟"));
     }
 
     #[test]

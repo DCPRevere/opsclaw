@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-/// Icy-blue ZeroClaw palette.
+/// Icy-blue OpsClaw palette.
 pub const ICY_BLUE: Color = Color::Rgb(100, 200, 255);
 pub const ICY_CYAN: Color = Color::Rgb(140, 230, 255);
 pub const ICY_WHITE: Color = Color::Rgb(220, 240, 255);

@@ -91,7 +91,7 @@ impl V1Compat {
             from = from,
             to = CURRENT_SCHEMA_VERSION,
             "Config schema migrated in-memory from version {from} to {CURRENT_SCHEMA_VERSION}. \
-             Run `zeroclaw config migrate` to update the file on disk.",
+             Run `opsclaw config migrate` to update the file on disk.",
         );
 
         self.config

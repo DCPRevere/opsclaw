@@ -1742,7 +1742,7 @@ mod tests {
             idle_timeout_secs: 1740,
             poll_interval_secs: 60,
             allowed_senders: vec!["*".to_string()],
-            default_subject: "ZeroClaw Message".to_string(),
+            default_subject: "OpsClaw Message".to_string(),
             max_attachment_bytes: 25 * 1024 * 1024,
         });
         cfg.providers.model_routes = vec![zeroclaw_config::schema::ModelRouteConfig {
@@ -1897,7 +1897,7 @@ mod tests {
             idle_timeout_secs: 1740,
             poll_interval_secs: 60,
             allowed_senders: vec!["*".to_string()],
-            default_subject: "ZeroClaw Message".to_string(),
+            default_subject: "OpsClaw Message".to_string(),
             max_attachment_bytes: 25 * 1024 * 1024,
         });
         current.providers.model_routes = vec![

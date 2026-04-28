@@ -10,7 +10,7 @@ use zeroclaw_config::schema::OtpConfig;
 
 const OTP_SECRET_FILE: &str = "otp-secret";
 const OTP_DIGITS: u32 = 6;
-const OTP_ISSUER: &str = "ZeroClaw";
+const OTP_ISSUER: &str = "OpsClaw";
 
 #[derive(Debug)]
 pub struct OtpValidator {

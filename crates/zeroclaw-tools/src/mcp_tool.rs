@@ -53,7 +53,7 @@ impl Tool for McpToolWrapper {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // Strip the `approved` field before forwarding to the MCP server.
-        // ZeroClaw's security model injects `approved: bool` into built-in tool
+        // OpsClaw's security model injects `approved: bool` into built-in tool
         // calls for supervised-mode confirmation. MCP servers have no knowledge
         // of this field and will reject calls that include it as an unexpected
         // parameter. We strip it here so MCP servers always receive clean args.
@@ -185,7 +185,7 @@ mod tests {
     }
 
     // ── approved-field stripping ───────────────────────────────────────────
-    // ZeroClaw's security model injects `approved: bool` into built-in tool args.
+    // OpsClaw's security model injects `approved: bool` into built-in tool args.
     // MCP servers are unaware of this field and reject calls that include it.
     // execute() must strip it before forwarding.
 

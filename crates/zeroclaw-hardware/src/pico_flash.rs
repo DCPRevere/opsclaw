@@ -1,4 +1,4 @@
-//! `pico_flash` tool — flash ZeroClaw firmware to a Pico in BOOTSEL mode.
+//! `pico_flash` tool — flash OpsClaw firmware to a Pico in BOOTSEL mode.
 //!
 //! # Happy path
 //! 1. User holds BOOTSEL while plugging in Pico → RPI-RP2 drive appears.
@@ -7,7 +7,7 @@
 //! 4. Tool copies UF2 to RPI-RP2 drive; Pico reboots into the firmware.
 //! 5. Tool waits up to 20 s for `/dev/cu.usbmodem*` to appear.
 //! 6. Tool reconnects the serial transport in the DeviceRegistry.
-//! 7. Tool returns success; user restarts ZeroClaw to get `pico0`.
+//! 7. Tool returns success; user restarts OpsClaw to get `pico0`.
 
 use super::device::DeviceRegistry;
 use super::uf2;
@@ -25,12 +25,12 @@ const PORT_POLL_MS: u64 = 500;
 
 // ── PicoFlashTool ─────────────────────────────────────────────────────────────
 
-/// Tool: flash ZeroClaw firmware to a Pico in BOOTSEL mode.
+/// Tool: flash OpsClaw firmware to a Pico in BOOTSEL mode.
 ///
 /// The Pico must be connected with BOOTSEL held so it mounts as `RPI-RP2`.
 /// After flashing, the tool reconnects the serial transport in the
 /// [`DeviceRegistry`] so subsequent `gpio_write` calls work immediately
-/// without restarting ZeroClaw.
+/// without restarting OpsClaw.
 pub struct PicoFlashTool {
     registry: Arc<RwLock<DeviceRegistry>>,
 }
@@ -48,7 +48,7 @@ impl Tool for PicoFlashTool {
     }
 
     fn description(&self) -> &str {
-        "Flash ZeroClaw firmware to a Raspberry Pi Pico in BOOTSEL mode. \
+        "Flash OpsClaw firmware to a Raspberry Pi Pico in BOOTSEL mode. \
          The Pico must be connected with the BOOTSEL button held (shows as RPI-RP2 drive in Finder). \
          After flashing the Pico reboots and the serial \
          connection is refreshed automatically — no restart needed."
@@ -143,7 +143,7 @@ impl Tool for PicoFlashTool {
                     output: String::new(),
                     error: Some(format!(
                         "UF2 copied to {} but serial port did not appear within {PORT_WAIT_SECS}s. \
-                         Unplug and replug the Pico, then restart ZeroClaw.",
+                         Unplug and replug the Pico, then restart OpsClaw.",
                         mount.display()
                     )),
                 });
@@ -190,7 +190,7 @@ impl Tool for PicoFlashTool {
                 let suffix = if reconnected {
                     "pico0 is ready — you can use gpio_write immediately."
                 } else {
-                    "Restart ZeroClaw to reconnect as pico0."
+                    "Restart OpsClaw to reconnect as pico0."
                 };
                 Ok(ToolResult {
                     success: true,
@@ -206,7 +206,7 @@ impl Tool for PicoFlashTool {
                 output: format!(
                     "Pico flashed successfully. \
                          Serial port did not reappear within {PORT_WAIT_SECS}s — \
-                         unplug and replug the Pico, then restart ZeroClaw to connect as pico0."
+                         unplug and replug the Pico, then restart OpsClaw to connect as pico0."
                 ),
                 error: None,
             }),

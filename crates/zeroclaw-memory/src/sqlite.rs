@@ -1794,14 +1794,14 @@ mod tests {
     async fn store_unicode_and_emoji() {
         let (_tmp, mem) = temp_sqlite();
         mem.store(
-            "emoji_key_🦀",
+            "emoji_key_📟",
             "こんにちは 🚀 Ñoño",
             MemoryCategory::Core,
             None,
         )
         .await
         .unwrap();
-        let entry = mem.get("emoji_key_🦀").await.unwrap().unwrap();
+        let entry = mem.get("emoji_key_📟").await.unwrap().unwrap();
         assert_eq!(entry.content, "こんにちは 🚀 Ñoño");
     }
 
@@ -1987,8 +1987,8 @@ mod tests {
 
     #[test]
     fn content_hash_unicode() {
-        let h1 = SqliteMemory::content_hash("🦀");
-        let h2 = SqliteMemory::content_hash("🦀");
+        let h1 = SqliteMemory::content_hash("📟");
+        let h2 = SqliteMemory::content_hash("📟");
         assert_eq!(h1, h2);
         let h3 = SqliteMemory::content_hash("🚀");
         assert_ne!(h1, h3);

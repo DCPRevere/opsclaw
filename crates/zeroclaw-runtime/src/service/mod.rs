@@ -5,8 +5,8 @@ use std::process::Command;
 use std::str::FromStr;
 use zeroclaw_config::schema::Config;
 
-const SERVICE_LABEL: &str = "com.zeroclaw.daemon";
-const WINDOWS_TASK_NAME: &str = "ZeroClaw Daemon";
+const SERVICE_LABEL: &str = "com.opsclaw.daemon";
+const WINDOWS_TASK_NAME: &str = "OpsClaw Daemon";
 
 /// Supported init systems for service management
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,7 +89,7 @@ fn windows_task_name() -> &'static str {
     WINDOWS_TASK_NAME
 }
 
-/// Returns whether the ZeroClaw daemon service is currently running.
+/// Returns whether the OpsClaw daemon service is currently running.
 pub fn is_running() -> bool {
     if cfg!(target_os = "macos") {
         run_capture(Command::new("launchctl").arg("list"))
@@ -566,7 +566,7 @@ fn uninstall_linux(config: &Config, init_system: InitSystem) -> Result<()> {
                     run_checked(Command::new("rc-update").args(["del", "zeroclaw", "default"]))
                 {
                     eprintln!(
-                        "⚠️  Warning: Could not remove zeroclaw from OpenRC default runlevel: {err}"
+                        "⚠️  Warning: Could not remove opsclaw from OpenRC default runlevel: {err}"
                     );
                 }
                 fs::remove_file(init_script)
@@ -591,7 +591,7 @@ fn detect_homebrew_var_dir(exe: &Path) -> Option<PathBuf> {
     // Symlinked binary: <prefix>/bin/zeroclaw
     // Cellar binary:    <prefix>/Cellar/zeroclaw/<version>/bin/zeroclaw
     let prefix = if path_str.contains("/Cellar/") {
-        // Walk up from .../Cellar/zeroclaw/<ver>/bin/zeroclaw to the prefix
+        // Walk up from .../Cellar/zeroclaw/<ver>/bin/opsclaw to the prefix
         let mut ancestor = exe.to_path_buf();
         while let Some(parent) = ancestor.parent() {
             ancestor = parent.to_path_buf();
@@ -653,13 +653,13 @@ fn install_macos(config: &Config) -> Result<()> {
     let stdout = logs_dir.join("daemon.stdout.log");
     let stderr = logs_dir.join("daemon.stderr.log");
 
-    // When running under Homebrew, inject ZEROCLAW_CONFIG_DIR and
+    // When running under Homebrew, inject OPSCLAW_CONFIG_DIR and
     // WorkingDirectory so the daemon finds its data in the Homebrew prefix.
     let env_section = if let Some(ref var_dir) = homebrew_var_dir {
         format!(
             r#"  <key>EnvironmentVariables</key>
   <dict>
-    <key>ZEROCLAW_CONFIG_DIR</key>
+    <key>OPSCLAW_CONFIG_DIR</key>
     <string>{config_dir}</string>
   </dict>
   <key>WorkingDirectory</key>
@@ -707,7 +707,7 @@ fn install_macos(config: &Config) -> Result<()> {
     if let Some(ref var_dir) = homebrew_var_dir {
         println!("   Homebrew var: {}", var_dir.display());
     }
-    println!("   Start with: zeroclaw service start");
+    println!("   Start with: opsclaw service start");
     Ok(())
 }
 
@@ -728,7 +728,7 @@ fn install_linux_systemd(config: &Config) -> Result<()> {
     let exe = std::env::current_exe().context("Failed to resolve current executable")?;
     let unit = format!(
         "[Unit]\n\
-         Description=ZeroClaw daemon\n\
+         Description=OpsClaw daemon\n\
          After=network.target\n\
          \n\
          [Service]\n\
@@ -751,7 +751,7 @@ fn install_linux_systemd(config: &Config) -> Result<()> {
     let _ = run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]));
     let _ = run_checked(Command::new("systemctl").args(["--user", "enable", "zeroclaw.service"]));
     println!("✅ Installed systemd user service: {}", file.display());
-    println!("   Start with: zeroclaw service start");
+    println!("   Start with: opsclaw service start");
     Ok(())
 }
 
@@ -769,7 +769,7 @@ fn is_root() -> bool {
     false
 }
 
-/// Check if the zeroclaw user exists and has expected properties.
+/// Check if the opsclaw user exists and has expected properties.
 /// Returns Ok if user doesn't exist (OpenRC will handle creation or fail gracefully).
 /// Returns error if user exists but has unexpected properties.
 fn check_zeroclaw_user() -> Result<()> {
@@ -779,7 +779,7 @@ fn check_zeroclaw_user() -> Result<()> {
     let (del_cmd, add_cmd) = if is_alpine {
         (
             "deluser zeroclaw && delgroup zeroclaw",
-            "addgroup -S zeroclaw && adduser -S -s /sbin/nologin -H -D -G zeroclaw zeroclaw",
+            "addgroup -S zeroclaw && adduser -S -s /sbin/nologin -H -D -G opsclaw zeroclaw",
         )
     } else {
         ("userdel zeroclaw", "useradd -r -s /sbin/nologin zeroclaw")
@@ -817,7 +817,7 @@ fn check_zeroclaw_user() -> Result<()> {
 
                 if home != "/var/lib/zeroclaw" && home != "/nonexistent" {
                     eprintln!(
-                        "⚠️  Warning: zeroclaw user has home directory '{}' (expected /var/lib/zeroclaw or /nonexistent)",
+                        "⚠️  Warning: opsclaw user has home directory '{}' (expected /var/lib/opsclaw or /nonexistent)",
                         home
                     );
                 }
@@ -848,11 +848,11 @@ fn ensure_zeroclaw_user() -> Result<()> {
             let output = Command::new("addgroup")
                 .args(["-S", "zeroclaw"])
                 .output()
-                .context("Failed to create zeroclaw group")?;
+                .context("Failed to create opsclaw group")?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("Failed to create zeroclaw group: {}", stderr.trim());
+                bail!("Failed to create opsclaw group: {}", stderr.trim());
             }
             println!("✅ Created system group: zeroclaw");
         }
@@ -869,21 +869,21 @@ fn ensure_zeroclaw_user() -> Result<()> {
                 "zeroclaw",
             ])
             .output()
-            .context("Failed to create zeroclaw user")?;
+            .context("Failed to create opsclaw user")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Failed to create zeroclaw user: {}", stderr.trim());
+            bail!("Failed to create opsclaw user: {}", stderr.trim());
         }
     } else {
         let output = Command::new("useradd")
             .args(["-r", "-s", "/sbin/nologin", "zeroclaw"])
             .output()
-            .context("Failed to create zeroclaw user")?;
+            .context("Failed to create opsclaw user")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Failed to create zeroclaw user: {}", stderr.trim());
+            bail!("Failed to create opsclaw user: {}", stderr.trim());
         }
     }
 
@@ -985,14 +985,14 @@ fn resolve_invoking_user_config_dir() -> Option<PathBuf> {
         let entry = String::from_utf8_lossy(&output.stdout);
         let fields: Vec<&str> = entry.trim().split(':').collect();
         if fields.len() >= 6 {
-            return Some(PathBuf::from(fields[5]).join(".zeroclaw"));
+            return Some(PathBuf::from(fields[5]).join(".opsclaw"));
         }
     }
 
     std::env::var("HOME")
         .ok()
         .map(PathBuf::from)
-        .map(|home| home.join(".zeroclaw"))
+        .map(|home| home.join(".opsclaw"))
 }
 
 fn migrate_openrc_runtime_state_if_needed(config_dir: &Path) -> Result<()> {
@@ -1080,7 +1080,7 @@ fn ensure_openrc_runtime_path_writable(path: &Path) -> Result<()> {
         };
         bail!(
             "OpenRC runtime user 'zeroclaw' cannot write {} ({details}). \
-             Re-run `sudo zeroclaw service install` and ensure ownership is zeroclaw:zeroclaw.",
+             Re-run `sudo opsclaw service install` and ensure ownership is zeroclaw:zeroclaw.",
             path.display(),
         );
     }
@@ -1129,7 +1129,7 @@ fn generate_openrc_script(exe_path: &Path, config_dir: &Path) -> String {
         r#"#!/sbin/openrc-run
 
 name="zeroclaw"
-description="ZeroClaw daemon"
+description="OpsClaw daemon"
 
 command="{exe}"
 command_args="--config-dir {config_dir} daemon"
@@ -1172,7 +1172,7 @@ fn install_linux_openrc(config: &Config) -> Result<()> {
     if !is_root() {
         bail!(
             "OpenRC service installation requires root privileges.\n\
-             Please run with sudo: sudo zeroclaw service install"
+             Please run with sudo: sudo opsclaw service install"
         );
     }
 
@@ -1283,7 +1283,7 @@ fn install_linux_openrc(config: &Config) -> Result<()> {
     run_checked(Command::new("rc-update").args(["add", "zeroclaw", "default"]))?;
     println!("✅ Installed OpenRC service: /etc/init.d/zeroclaw");
     println!("   Config path: /etc/zeroclaw/config.toml");
-    println!("   Start with: sudo zeroclaw service start");
+    println!("   Start with: sudo opsclaw service start");
     let _ = config;
     Ok(())
 }
@@ -1333,7 +1333,7 @@ fn install_windows(config: &Config) -> Result<()> {
     println!("✅ Installed Windows scheduled task: {}", task_name);
     println!("   Wrapper: {}", wrapper.display());
     println!("   Logs: {}", logs_dir.display());
-    println!("   Start with: zeroclaw service start");
+    println!("   Start with: opsclaw service start");
     Ok(())
 }
 
@@ -1429,7 +1429,7 @@ mod tests {
 
     #[test]
     fn windows_task_name_is_constant() {
-        assert_eq!(windows_task_name(), "ZeroClaw Daemon");
+        assert_eq!(windows_task_name(), "OpsClaw Daemon");
     }
 
     #[cfg(target_os = "windows")]
@@ -1496,11 +1496,11 @@ mod tests {
 
         assert!(script.starts_with("#!/sbin/openrc-run"));
         assert!(script.contains("name=\"zeroclaw\""));
-        assert!(script.contains("description=\"ZeroClaw daemon\""));
+        assert!(script.contains("description=\"OpsClaw daemon\""));
         assert!(script.contains("command=\"/usr/local/bin/zeroclaw\""));
-        assert!(script.contains("command_args=\"--config-dir /etc/zeroclaw daemon\""));
-        assert!(!script.contains("env ZEROCLAW_CONFIG_DIR"));
-        assert!(!script.contains("env ZEROCLAW_WORKSPACE"));
+        assert!(script.contains("command_args=\"--config-dir /etc/opsclaw daemon\""));
+        assert!(!script.contains("env OPSCLAW_CONFIG_DIR"));
+        assert!(!script.contains("env OPSCLAW_WORKSPACE"));
         assert!(script.contains("command_background=\"yes\""));
         assert!(script.contains("command_user=\"zeroclaw:zeroclaw\""));
         assert!(script.contains("pidfile=\"/run/${RC_SVCNAME}.pid\""));
@@ -1538,19 +1538,19 @@ mod tests {
         );
         assert!(
             script.contains("checkpath --directory --owner zeroclaw:zeroclaw"),
-            "start_pre must ensure /var/lib/zeroclaw exists with correct ownership"
+            "start_pre must ensure /var/lib/opsclaw exists with correct ownership"
         );
     }
 
     #[test]
     fn systemd_unit_contains_home_and_pass_environment() {
         let unit = "[Unit]\n\
-             Description=ZeroClaw daemon\n\
+             Description=OpsClaw daemon\n\
              After=network.target\n\
              \n\
              [Service]\n\
              Type=simple\n\
-             ExecStart=/usr/local/bin/zeroclaw daemon\n\
+             ExecStart=/usr/local/bin/opsclaw daemon\n\
              Restart=always\n\
              RestartSec=3\n\
              # Ensure HOME is set so headless browsers can create profile/cache dirs.\n\

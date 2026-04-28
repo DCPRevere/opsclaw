@@ -7182,7 +7182,9 @@ dependencies = [
  "zeroclaw-config",
  "zeroclaw-gateway",
  "zeroclaw-memory",
+ "zeroclaw-providers",
  "zeroclaw-runtime",
+ "zeroclaw-tools",
  "zeroclawlabs",
 ]
 

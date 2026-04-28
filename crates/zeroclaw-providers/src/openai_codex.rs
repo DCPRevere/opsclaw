@@ -11,10 +11,10 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 const DEFAULT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const CODEX_RESPONSES_URL_ENV: &str = "ZEROCLAW_CODEX_RESPONSES_URL";
-const CODEX_BASE_URL_ENV: &str = "ZEROCLAW_CODEX_BASE_URL";
+const CODEX_RESPONSES_URL_ENV: &str = "OPSCLAW_CODEX_RESPONSES_URL";
+const CODEX_BASE_URL_ENV: &str = "OPSCLAW_CODEX_BASE_URL";
 const DEFAULT_CODEX_INSTRUCTIONS: &str =
-    "You are ZeroClaw, a concise and helpful coding assistant.";
+    "You are OpsClaw, a concise and helpful coding assistant.";
 
 pub struct OpenAiCodexProvider {
     auth: AuthService,
@@ -118,8 +118,8 @@ impl OpenAiCodexProvider {
 
 fn default_zeroclaw_dir() -> PathBuf {
     directories::UserDirs::new().map_or_else(
-        || PathBuf::from(".zeroclaw"),
-        |dirs| dirs.home_dir().join(".zeroclaw"),
+        || PathBuf::from(".opsclaw"),
+        |dirs| dirs.home_dir().join(".opsclaw"),
     )
 }
 
@@ -310,7 +310,7 @@ fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
 fn resolve_reasoning_effort(model_id: &str, configured: Option<&str>) -> String {
     let raw = configured
         .map(ToString::to_string)
-        .or_else(|| std::env::var("ZEROCLAW_CODEX_REASONING_EFFORT").ok())
+        .or_else(|| std::env::var("OPSCLAW_CODEX_REASONING_EFFORT").ok())
         .and_then(|value| first_nonempty(Some(&value)))
         .unwrap_or_else(|| "xhigh".to_string())
         .to_ascii_lowercase();
@@ -643,7 +643,7 @@ impl OpenAiCodexProvider {
         } else {
             Some(oauth_access_token.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "OpenAI Codex auth profile not found. Run `zeroclaw auth login --provider openai-codex`."
+                    "OpenAI Codex auth profile not found. Run `opsclaw auth login --provider openai-codex`."
                 )
             })?)
         };
@@ -652,7 +652,7 @@ impl OpenAiCodexProvider {
         } else {
             Some(account_id.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "OpenAI Codex account id not found in auth profile/token. Run `zeroclaw auth login --provider openai-codex` again."
+                    "OpenAI Codex account id not found in auth profile/token. Run `opsclaw auth login --provider openai-codex` again."
                 )
             })?)
         };
@@ -939,7 +939,7 @@ mod tests {
     #[test]
     fn resolve_reasoning_effort_prefers_configured_override() {
         let _lock = env_lock();
-        let _guard = EnvGuard::set("ZEROCLAW_CODEX_REASONING_EFFORT", Some("low"));
+        let _guard = EnvGuard::set("OPSCLAW_CODEX_REASONING_EFFORT", Some("low"));
         assert_eq!(
             resolve_reasoning_effort("gpt-5-codex", Some("high")),
             "high".to_string()
@@ -949,7 +949,7 @@ mod tests {
     #[test]
     fn resolve_reasoning_effort_uses_legacy_env_when_unconfigured() {
         let _lock = env_lock();
-        let _guard = EnvGuard::set("ZEROCLAW_CODEX_REASONING_EFFORT", Some("minimal"));
+        let _guard = EnvGuard::set("OPSCLAW_CODEX_REASONING_EFFORT", Some("minimal"));
         assert_eq!(
             resolve_reasoning_effort("gpt-5-codex", None),
             "low".to_string()

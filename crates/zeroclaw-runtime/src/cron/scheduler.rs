@@ -630,7 +630,7 @@ async fn run_job_command_with_timeout(
 
 /// Build a shell `Command` for cron job execution.
 ///
-/// Uses `sh -c <command>` (non-login shell). On Windows, ZeroClaw users
+/// Uses `sh -c <command>` (non-login shell). On Windows, OpsClaw users
 /// typically have Git Bash installed which provides `sh` in PATH, and
 /// cron commands are written with Unix shell syntax. The previous `-lc`
 /// (login shell) flag was dropped: login shells load the full user

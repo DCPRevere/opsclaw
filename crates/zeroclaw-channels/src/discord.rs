@@ -582,7 +582,7 @@ const BASE64_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstu
 ///
 /// Discord rejects longer payloads with `50035 Invalid Form Body`.
 const DISCORD_MAX_MESSAGE_LENGTH: usize = 2000;
-const DISCORD_ACK_REACTIONS: &[&str] = &["⚡️", "🦀", "🙌", "💪", "👌", "👀", "👣"];
+const DISCORD_ACK_REACTIONS: &[&str] = &["⚡️", "📟", "🙌", "💪", "👌", "👀", "👣"];
 
 /// Split a message into chunks that respect Discord's 2000-character limit.
 /// Tries to split at word boundaries when possible.
@@ -1912,7 +1912,7 @@ mod tests {
     #[test]
     fn split_unicode_content() {
         // Test with emoji and multi-byte characters
-        let msg = "🦀 Rust is awesome! ".repeat(500);
+        let msg = "📟 Rust is awesome! ".repeat(500);
         let chunks = split_message_for_discord(&msg);
         // All chunks should be valid UTF-8
         for chunk in &chunks {
@@ -1935,7 +1935,7 @@ mod tests {
 
     #[test]
     fn split_multibyte_only_content_without_panics() {
-        let msg = "🦀".repeat(2500);
+        let msg = "📟".repeat(2500);
         let chunks = split_message_for_discord(&msg);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chars().count(), DISCORD_MAX_MESSAGE_LENGTH);

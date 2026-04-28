@@ -4,7 +4,7 @@
 //! 1. [`find_rpi_rp2_mount`] — check well-known mount points for the RPI-RP2 volume
 //!    that appears when a Pico is held in BOOTSEL mode.
 //! 2. [`ensure_firmware_dir`] — extract the bundled UF2 to
-//!    `~/.zeroclaw/firmware/pico/` if it isn't there yet.
+//!    `~/.opsclaw/firmware/pico/` if it isn't there yet.
 //! 3. [`flash_uf2`] — copy the UF2 to the mount point; the Pico reboots automatically.
 //!
 //! # Embedded assets
@@ -53,7 +53,7 @@ pub fn find_rpi_rp2_mount() -> Option<PathBuf> {
 
 // ── Firmware directory management ─────────────────────────────────────────────
 
-/// Ensure `~/.zeroclaw/firmware/pico/` exists and contains the bundled assets.
+/// Ensure `~/.opsclaw/firmware/pico/` exists and contains the bundled assets.
 ///
 /// Files are only written if they are absent — existing files are never overwritten
 /// so users can substitute their own firmware.
@@ -66,7 +66,7 @@ pub fn ensure_firmware_dir() -> Result<PathBuf> {
 
     let firmware_dir = base
         .home_dir()
-        .join(".zeroclaw")
+        .join(".opsclaw")
         .join("firmware")
         .join("pico");
     std::fs::create_dir_all(&firmware_dir)?;
@@ -78,7 +78,7 @@ pub fn ensure_firmware_dir() -> Result<PathBuf> {
             bail!(
                 "Bundled UF2 is a placeholder — download the real MicroPython UF2 from \
                  https://micropython.org/download/RPI_PICO/ and place it at \
-                 src/firmware/pico/zeroclaw-pico.uf2, then rebuild ZeroClaw."
+                 src/firmware/pico/zeroclaw-pico.uf2, then rebuild OpsClaw."
             );
         }
         std::fs::write(&uf2_path, PICO_UF2)?;
@@ -118,7 +118,7 @@ pub async fn flash_uf2(mount_point: &Path, firmware_dir: &Path) -> Result<()> {
         bail!(
             "UF2 at {} does not look like a valid UF2 file (magic mismatch). \
              Download from https://micropython.org/download/RPI_PICO/ and delete \
-             the existing file so ZeroClaw can re-extract it.",
+             the existing file so OpsClaw can re-extract it.",
             uf2_src.display()
         );
     }
@@ -201,7 +201,7 @@ pub async fn flash_uf2(mount_point: &Path, firmware_dir: &Path) -> Result<()> {
 
     // ── All attempts failed — give the user a clear manual command ────────────
     bail!(
-        "All copy methods failed. Run this command manually, then restart ZeroClaw:\n\
+        "All copy methods failed. Run this command manually, then restart OpsClaw:\n\
          \n  sudo cp {src_str} {dst_str}\n"
     )
 }
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn ensure_firmware_dir_creates_directory() {
-        // This test verifies ensure_firmware_dir creates the ~/.zeroclaw/firmware/pico/ path.
+        // This test verifies ensure_firmware_dir creates the ~/.opsclaw/firmware/pico/ path.
         // It may fail on the UF2 magic check (placeholder UF2) — that's expected and OK.
         let result = ensure_firmware_dir();
         // Either succeeds (real UF2) or fails with a clear placeholder message.

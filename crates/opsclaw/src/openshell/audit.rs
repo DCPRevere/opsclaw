@@ -31,7 +31,7 @@ pub struct AuditEvent {
 
 /// Append an OpenShell audit event to the zeroclaw audit log.
 ///
-/// The log lives at `<zeroclaw_dir>/<audit.log_path>` (default: `audit.log`)
+/// The log lives at `<opsclaw_dir>/<audit.log_path>` (default: `audit.log`)
 /// and is hash-chained — each entry is `SHA-256(prev_hash || content)`, so
 /// tampering invalidates every subsequent entry.
 ///
@@ -39,7 +39,7 @@ pub struct AuditEvent {
 /// directory) or the write fails, a warning is logged and the function
 /// returns without error. Audit is best-effort by design.
 pub async fn emit_audit_event(ctx: &OpenShellContext, event: &AuditEvent) {
-    let zeroclaw_dir = match resolve_zeroclaw_dir() {
+    let opsclaw_dir = match resolve_opsclaw_dir() {
         Some(d) => d,
         None => {
             warn!("Cannot resolve zeroclaw dir — OpenShell audit event dropped");
@@ -47,7 +47,7 @@ pub async fn emit_audit_event(ctx: &OpenShellContext, event: &AuditEvent) {
         }
     };
 
-    let logger = match AuditLogger::new(AuditConfig::default(), zeroclaw_dir) {
+    let logger = match AuditLogger::new(AuditConfig::default(), opsclaw_dir) {
         Ok(l) => l,
         Err(e) => {
             warn!(error = %e, "Failed to open audit logger — OpenShell audit event dropped");
@@ -81,12 +81,12 @@ pub async fn emit_audit_event(ctx: &OpenShellContext, event: &AuditEvent) {
 }
 
 /// Resolve the zeroclaw config dir (mirrors `zeroclaw::Config::default_path`'s
-/// parent). Prefers `ZEROCLAW_CONFIG_DIR`, then `$HOME/.zeroclaw`.
-fn resolve_zeroclaw_dir() -> Option<std::path::PathBuf> {
-    if let Ok(dir) = std::env::var("ZEROCLAW_CONFIG_DIR") {
+/// parent). Prefers `OPSCLAW_CONFIG_DIR`, then `$HOME/.opsclaw`.
+fn resolve_opsclaw_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("OPSCLAW_CONFIG_DIR") {
         return Some(std::path::PathBuf::from(dir));
     }
-    directories::UserDirs::new().map(|u| u.home_dir().join(".zeroclaw"))
+    directories::UserDirs::new().map(|u| u.home_dir().join(".opsclaw"))
 }
 
 #[cfg(test)]
@@ -94,11 +94,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn emit_tolerates_missing_zeroclaw_dir() {
+    async fn emit_tolerates_missing_opsclaw_dir() {
         let saved_home = std::env::var("HOME").ok();
-        let saved_dir = std::env::var("ZEROCLAW_CONFIG_DIR").ok();
+        let saved_dir = std::env::var("OPSCLAW_CONFIG_DIR").ok();
         std::env::remove_var("HOME");
-        std::env::remove_var("ZEROCLAW_CONFIG_DIR");
+        std::env::remove_var("OPSCLAW_CONFIG_DIR");
 
         let ctx = OpenShellContext {
             active: true,
@@ -120,15 +120,15 @@ mod tests {
             std::env::set_var("HOME", v);
         }
         if let Some(v) = saved_dir {
-            std::env::set_var("ZEROCLAW_CONFIG_DIR", v);
+            std::env::set_var("OPSCLAW_CONFIG_DIR", v);
         }
     }
 
     #[tokio::test]
     async fn emit_writes_to_temp_audit_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let saved = std::env::var("ZEROCLAW_CONFIG_DIR").ok();
-        std::env::set_var("ZEROCLAW_CONFIG_DIR", tmp.path());
+        let saved = std::env::var("OPSCLAW_CONFIG_DIR").ok();
+        std::env::set_var("OPSCLAW_CONFIG_DIR", tmp.path());
 
         let ctx = OpenShellContext {
             active: true,
@@ -152,8 +152,8 @@ mod tests {
         assert!(contents.contains("\"prev_hash\""));
 
         match saved {
-            Some(v) => std::env::set_var("ZEROCLAW_CONFIG_DIR", v),
-            None => std::env::remove_var("ZEROCLAW_CONFIG_DIR"),
+            Some(v) => std::env::set_var("OPSCLAW_CONFIG_DIR", v),
+            None => std::env::remove_var("OPSCLAW_CONFIG_DIR"),
         }
     }
 }

@@ -264,7 +264,7 @@ impl ResponseCache {
         Ok((count as usize, hits as u64, tokens_saved as u64))
     }
 
-    /// Wipe the entire cache (useful for `zeroclaw cache clear`).
+    /// Wipe the entire cache (useful for `opsclaw cache clear`).
     pub fn clear(&self) -> Result<usize> {
         self.hot_cache.lock().clear();
         let conn = self.conn.lock();
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn unicode_prompt_handling() {
         let (_tmp, cache) = temp_cache(60);
-        let key = ResponseCache::cache_key("gpt-4", None, "日本語のテスト 🦀");
+        let key = ResponseCache::cache_key("gpt-4", None, "日本語のテスト 📟");
 
         cache
             .put(&key, "gpt-4", "はい、Rustは素晴らしい", 30)

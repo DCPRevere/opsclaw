@@ -1,8 +1,8 @@
-//! Nevis IAM authentication provider for ZeroClaw.
+//! Nevis IAM authentication provider for OpsClaw.
 //!
 //! Integrates with Nevis Security Suite (Adnovum) for OAuth2/OIDC token
 //! validation, FIDO2/passkey verification, and session management. Maps Nevis
-//! roles to ZeroClaw tool permissions via [`super::iam_policy::IamPolicy`].
+//! roles to OpsClaw tool permissions via [`super::iam_policy::IamPolicy`].
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};

@@ -2412,7 +2412,7 @@ pub async fn run(
         ));
         tool_descs.push((
             "arduino_upload",
-            "Upload agent-generated Arduino sketch. Use when: user asks for 'make a heart', 'blink pattern', or custom LED behavior on Arduino. You write the full .ino code; ZeroClaw compiles and uploads it. Pin 13 = built-in LED on Uno.",
+            "Upload agent-generated Arduino sketch. Use when: user asks for 'make a heart', 'blink pattern', or custom LED behavior on Arduino. You write the full .ino code; OpsClaw compiles and uploads it. Pin 13 = built-in LED on Uno.",
         ));
         tool_descs.push((
             "hardware_memory_map",
@@ -2678,7 +2678,7 @@ pub async fn run(
         println!("{response}");
         observer.record_event(&ObserverEvent::TurnComplete);
     } else {
-        println!("🦀 ZeroClaw Interactive Mode");
+        println!("📟 OpsClaw Interactive Mode");
         println!("Type /help for commands.\n");
         let cli = CLI_CHANNEL_FN
             .get()
@@ -3306,7 +3306,7 @@ pub async fn process_message(
         ));
         tool_descs.push((
             "arduino_upload",
-            "Upload Arduino sketch. Use for 'make a heart', custom patterns. You write full .ino code; ZeroClaw uploads it.",
+            "Upload Arduino sketch. Use for 'make a heart', custom patterns. You write full .ino code; OpsClaw uploads it.",
         ));
         tool_descs.push((
             "hardware_memory_map",
@@ -3521,7 +3521,7 @@ mod tests {
     #[test]
     fn truncate_tool_result_utf8_boundary_safety() {
         // Create string with multi-byte chars: each emoji is 4 bytes
-        let output = "🦀".repeat(100); // 400 bytes
+        let output = "📟".repeat(100); // 400 bytes
         // This should not panic even with a limit that falls mid-char
         let result = truncate_tool_result(&output, 50);
         assert!(result.contains("[... "));

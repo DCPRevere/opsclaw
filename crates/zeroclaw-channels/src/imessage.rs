@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn escape_applescript_unicode() {
-        assert_eq!(escape_applescript("hello 🦀 world"), "hello 🦀 world");
+        assert_eq!(escape_applescript("hello 📟 world"), "hello 📟 world");
     }
 
     #[test]
@@ -974,14 +974,14 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO message (ROWID, handle_id, text, is_from_me) VALUES (10, 1, 'Hello 🦀 世界 مرحبا', 0)",
+                "INSERT INTO message (ROWID, handle_id, text, is_from_me) VALUES (10, 1, 'Hello 📟 世界 مرحبا', 0)",
                 []
             ).unwrap();
         }
 
         let result = fetch_new_messages(&db_path, 0).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].2, "Hello 🦀 世界 مرحبا");
+        assert_eq!(result[0].2, "Hello 📟 世界 مرحبا");
     }
 
     #[tokio::test]

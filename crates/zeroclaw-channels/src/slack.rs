@@ -92,7 +92,7 @@ enum SlackPermalinkLookup {
     NotFound,
 }
 
-/// Extract the Slack message timestamp from a ZeroClaw message ID.
+/// Extract the Slack message timestamp from a OpsClaw message ID.
 ///
 /// Message IDs follow the format `slack_{channel_id}_{ts}` where `ts`
 /// contains a dot (e.g. `"1234567890.123456"`). If the format is

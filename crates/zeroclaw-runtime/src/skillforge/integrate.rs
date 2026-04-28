@@ -1,4 +1,4 @@
-//! Integrator — generates ZeroClaw-standard SKILL.toml + SKILL.md from scout results.
+//! Integrator — generates OpsClaw-standard SKILL.toml + SKILL.md from scout results.
 
 use std::fs;
 use std::path::PathBuf;
@@ -115,7 +115,7 @@ forge_timestamp = "{now}"
 ## Usage
 
 ```toml
-# Add to your ZeroClaw config:
+# Add to your OpsClaw config:
 [skills.{name}]
 enabled = true
 ```

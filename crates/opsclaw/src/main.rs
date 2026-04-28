@@ -41,35 +41,6 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// Copy OPSCLAW_* env vars → ZEROCLAW_* so the upstream zeroclawlabs library
-/// reads values the user set under the OpsClaw-branded names.
-/// If ZEROCLAW_* is already set explicitly, it wins (no overwrite).
-fn shim_env_vars() {
-    const VARS: &[&str] = &[
-        "CONFIG_DIR",
-        "AUTOSTART_CHANNELS",
-        "API_KEY",
-        "PROVIDER",
-        "PROVIDER_URL",
-        "MODEL",
-        "TEMPERATURE",
-        "REASONING_ENABLED",
-        "WORKSPACE",
-        "GATEWAY_PORT",
-        "GATEWAY_HOST",
-        "ALLOW_PUBLIC_BIND",
-    ];
-    for suffix in VARS {
-        let src = format!("OPSCLAW_{suffix}");
-        let dst = format!("ZEROCLAW_{suffix}");
-        if let Ok(val) = std::env::var(&src) {
-            if std::env::var_os(&dst).is_none() {
-                std::env::set_var(&dst, val);
-            }
-        }
-    }
-}
-
 fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     let t: f64 = s.parse().map_err(|e| format!("{e}"))?;
     config::schema::validate_temperature(t)
@@ -948,10 +919,6 @@ async fn main() -> Result<()> {
         eprintln!("Warning: Failed to install default crypto provider: {e:?}");
     }
 
-    // Bridge OPSCLAW_* env vars → ZEROCLAW_* so the upstream zeroclawlabs
-    // library reads values set under OpsClaw-branded names.
-    shim_env_vars();
-
     if std::env::args_os().len() <= 1 {
         return print_no_command_help();
     }
@@ -962,7 +929,8 @@ async fn main() -> Result<()> {
         if config_dir.trim().is_empty() {
             bail!("--config-dir cannot be empty");
         }
-        std::env::set_var("OPSCLAW_CONFIG_DIR", config_dir);
+        // SAFETY: called during startup before async runtime / threads spin up.
+        unsafe { std::env::set_var("OPSCLAW_CONFIG_DIR", config_dir); }
     }
 
     // Completions must remain stdout-only and should not load config or initialize logging.

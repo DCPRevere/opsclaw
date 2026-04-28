@@ -462,7 +462,7 @@ impl MatrixChannel {
         }
 
         // Generate a new device_id
-        let device_id = format!("ZEROCLAW_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let device_id = format!("OPSCLAW_{}", &uuid::Uuid::new_v4().to_string()[..8]);
         tracing::info!(
             "Matrix auto-generated device_id '{}'. \
              To keep this device stable, it has been saved locally. \
@@ -1169,7 +1169,7 @@ impl Channel for MatrixChannel {
                 let body = if let Some((source, filename)) = media_download {
                     let workspace = std::path::PathBuf::from(
                         shellexpand::tilde(
-                            &std::env::var("ZEROCLAW_WORKSPACE")
+                            &std::env::var("OPSCLAW_WORKSPACE")
                                 .unwrap_or_else(|_| "/tmp/zeroclaw-uploads".to_string()),
                         )
                         .as_ref(),

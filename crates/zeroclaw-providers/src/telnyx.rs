@@ -48,7 +48,7 @@ impl TelnyxProvider {
     ///
     /// The API key can be provided directly or will be resolved from:
     /// 1. `TELNYX_API_KEY` environment variable
-    /// 2. `ZEROCLAW_API_KEY` environment variable (fallback)
+    /// 2. `OPSCLAW_API_KEY` environment variable (fallback)
     pub fn new(api_key: Option<&str>) -> Self {
         let resolved_key = resolve_telnyx_api_key(api_key);
         Self {
@@ -112,7 +112,7 @@ fn resolve_telnyx_api_key(api_key: Option<&str>) -> Option<String> {
     }
 
     // Fall back to generic env vars
-    for env_var in ["ZEROCLAW_API_KEY", "API_KEY"] {
+    for env_var in ["OPSCLAW_API_KEY", "API_KEY"] {
         if let Ok(key) = std::env::var(env_var) {
             let key = key.trim();
             if !key.is_empty() {
@@ -176,7 +176,7 @@ impl Provider for TelnyxProvider {
     ) -> anyhow::Result<String> {
         let api_key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "Telnyx API key not set. Set TELNYX_API_KEY environment variable or run `zeroclaw onboard`."
+                "Telnyx API key not set. Set TELNYX_API_KEY environment variable or run `opsclaw onboard`."
             )
         })?;
 
@@ -234,7 +234,7 @@ impl Provider for TelnyxProvider {
     ) -> anyhow::Result<String> {
         let api_key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "Telnyx API key not set. Set TELNYX_API_KEY environment variable or run `zeroclaw onboard`."
+                "Telnyx API key not set. Set TELNYX_API_KEY environment variable or run `opsclaw onboard`."
             )
         })?;
 

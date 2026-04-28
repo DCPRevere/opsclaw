@@ -555,12 +555,12 @@ mod tests {
     fn parse_image_markers_collapses_line_wrapped_path() {
         // Terminal-wrapped paste: a long path split across two rows with
         // leading indentation should be recovered into the original path.
-        let input = "from the logs whether the agent emits\n  [IMAGE:/home/zeroclaw_user/.zeroclaw/workspace/signal_i\n  nbound/attachment.jpg] (which the\n  channel resolves)";
+        let input = "from the logs whether the agent emits\n  [IMAGE:/home/zeroclaw_user/.opsclaw/workspace/signal_i\n  nbound/attachment.jpg] (which the\n  channel resolves)";
         let (_, refs) = parse_image_markers(input);
         assert_eq!(refs.len(), 1);
         assert_eq!(
             refs[0],
-            "/home/zeroclaw_user/.zeroclaw/workspace/signal_inbound/attachment.jpg"
+            "/home/zeroclaw_user/.opsclaw/workspace/signal_inbound/attachment.jpg"
         );
     }
 

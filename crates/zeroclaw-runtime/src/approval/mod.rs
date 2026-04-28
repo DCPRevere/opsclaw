@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     pub fn summarize_args_unicode_safe_truncation() {
-        let long_val = "🦀".repeat(120);
+        let long_val = "📟".repeat(120);
         let args = serde_json::json!({ "content": long_val });
         let summary = summarize_args(&args);
         assert!(summary.contains("content:"));

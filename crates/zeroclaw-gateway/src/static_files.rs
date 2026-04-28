@@ -24,7 +24,7 @@ pub async fn handle_static(State(state): State<AppState>, uri: Uri) -> Response 
 }
 
 /// SPA fallback: serve index.html for any non-API, non-static GET request.
-/// Injects `window.__ZEROCLAW_BASE__` so the frontend knows the path prefix.
+/// Injects `window.__OPSCLAW_BASE__` so the frontend knows the path prefix.
 pub async fn handle_spa_fallback(State(state): State<AppState>) -> Response {
     let Some(ref dist_dir) = state.web_dist_dir else {
         return (
@@ -53,7 +53,7 @@ pub async fn handle_spa_fallback(State(state): State<AppState>) -> Response {
         let pfx = &state.path_prefix;
         // JSON-encode the prefix to safely embed in a <script> block
         let json_pfx = serde_json::to_string(pfx).unwrap_or_else(|_| "\"\"".to_string());
-        let script = format!("<script>window.__ZEROCLAW_BASE__={json_pfx};</script>");
+        let script = format!("<script>window.__OPSCLAW_BASE__={json_pfx};</script>");
         // Rewrite absolute /_app/ references so the browser requests {prefix}/_app/...
         html.replace("/_app/", &format!("{pfx}/_app/"))
             .replace("<head>", &format!("<head>{script}"))

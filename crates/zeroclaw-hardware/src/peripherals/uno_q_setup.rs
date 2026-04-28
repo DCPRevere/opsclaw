@@ -1,4 +1,4 @@
-//! Deploy ZeroClaw Bridge app to Arduino Uno Q.
+//! Deploy OpsClaw Bridge app to Arduino Uno Q.
 
 use anyhow::{Context, Result};
 use std::process::Command;
@@ -18,7 +18,7 @@ pub fn setup_uno_q_bridge(host: Option<&str>) -> Result<()> {
             deploy_remote(h, &bridge_dir)?;
         } else {
             anyhow::bail!(
-                "Bridge app not found at {}. Run from zeroclaw repo root.",
+                "Bridge app not found at {}. Run from opsclaw repo root.",
                 bridge_dir.display()
             );
         }
@@ -75,7 +75,7 @@ fn deploy_remote(host: &str, bridge_dir: &std::path::Path) -> Result<()> {
         anyhow::bail!("Failed to start Bridge app. Ensure arduino-app-cli is installed on Uno Q.");
     }
 
-    println!("ZeroClaw Bridge app started. Add to config.toml:");
+    println!("OpsClaw Bridge app started. Add to config.toml:");
     println!("  [[peripherals.boards]]");
     println!("  board = \"arduino-uno-q\"");
     println!("  transport = \"bridge\"");
@@ -106,7 +106,7 @@ fn deploy_local(bridge_dir: Option<&std::path::Path>) -> Result<()> {
         anyhow::bail!("Failed to start Bridge app. Ensure arduino-app-cli is installed on Uno Q.");
     }
 
-    println!("ZeroClaw Bridge app started.");
+    println!("OpsClaw Bridge app started.");
     Ok(())
 }
 
@@ -205,8 +205,8 @@ mod tests {
 
         let main_py = std::fs::read_to_string(dest.join("python").join("main.py")).unwrap();
         assert!(
-            main_py.contains("ZeroClaw") || main_py.contains("zeroclaw"),
-            "main.py should contain ZeroClaw marker"
+            main_py.contains("OpsClaw") || main_py.contains("zeroclaw"),
+            "main.py should contain OpsClaw marker"
         );
     }
 

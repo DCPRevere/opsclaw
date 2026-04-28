@@ -338,7 +338,7 @@ fn default_true() -> bool {
     true
 }
 fn default_subject() -> String {
-    "ZeroClaw Message".into()
+    "OpsClaw Message".into()
 }
 fn default_max_attachment_bytes() -> usize {
     25 * 1024 * 1024

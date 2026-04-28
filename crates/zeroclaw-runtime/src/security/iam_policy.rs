@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Maps a single Nevis role to ZeroClaw permissions.
+/// Maps a single Nevis role to OpsClaw permissions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleMapping {
     /// Nevis role name (case-insensitive matching).
@@ -35,7 +35,7 @@ impl PolicyDecision {
     }
 }
 
-/// IAM policy engine that maps Nevis roles to ZeroClaw tool permissions.
+/// IAM policy engine that maps Nevis roles to OpsClaw tool permissions.
 ///
 /// Deny-by-default: if no role mapping grants access, the request is denied.
 #[derive(Debug, Clone)]

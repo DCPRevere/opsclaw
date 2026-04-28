@@ -51,7 +51,7 @@ impl NextcloudTalkChannel {
 
     /// Returns true if the given name/id belongs to this bot itself.
     ///
-    /// Prevents feedback loops where ZeroClaw reacts to its own messages.
+    /// Prevents feedback loops where OpsClaw reacts to its own messages.
     fn is_bot_name(&self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
         // Match the configured bot name, or the known bot name "zeroclaw".
@@ -214,7 +214,7 @@ impl NextcloudTalkChannel {
             tracing::warn!(
                 "Nextcloud Talk: ignoring message from unauthorized actor: {actor_id}. \
                 Add to channels.nextcloud_talk.allowed_users in config.toml, \
-                or run `zeroclaw onboard --channels-only` to configure interactively."
+                or run `opsclaw onboard --channels-only` to configure interactively."
             );
             return messages;
         }
@@ -315,7 +315,7 @@ impl NextcloudTalkChannel {
             tracing::warn!(
                 "Nextcloud Talk: ignoring message from unauthorized actor: {actor_id}. \
                 Add to channels.nextcloud_talk.allowed_users in config.toml, \
-                or run `zeroclaw onboard --channels-only` to configure interactively."
+                or run `opsclaw onboard --channels-only` to configure interactively."
             );
             return messages;
         }

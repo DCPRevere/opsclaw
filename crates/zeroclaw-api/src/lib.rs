@@ -1,6 +1,6 @@
-//! ZeroClaw API layer — trait definitions and shared types.
+//! OpsClaw API layer — trait definitions and shared types.
 //!
-//! This crate defines the fundamental abstractions that all ZeroClaw subsystems
+//! This crate defines the fundamental abstractions that all OpsClaw subsystems
 //! depend on. No implementations, no heavy dependencies. Every other crate in
 //! the workspace depends on this. The compiler enforces that no implementation
 //! crate can import another without going through these interfaces.

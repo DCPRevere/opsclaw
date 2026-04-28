@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn truncates_multibyte_commit_message_without_panicking() {
-        let long = "🦀".repeat(2500);
+        let long = "📟".repeat(2500);
         let truncated = GitOperationsTool::truncate_commit_message(&long);
 
         assert_eq!(truncated.chars().count(), 2000);

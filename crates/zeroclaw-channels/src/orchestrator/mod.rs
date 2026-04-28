@@ -1,7 +1,7 @@
 //! Channel subsystem for messaging platform integrations.
 //!
 //! This module provides the multi-channel messaging infrastructure that connects
-//! ZeroClaw to external platforms. Each channel implements the [`Channel`] trait
+//! OpsClaw to external platforms. Each channel implements the [`Channel`] trait
 //! defined in [`traits`], which provides a uniform interface for sending messages,
 //! listening for incoming messages, health checking, and typing indicators.
 //!
@@ -1550,7 +1550,7 @@ fn build_models_help_response(
     if cached_models.is_empty() {
         let _ = writeln!(
             response,
-            "\nNo cached model list found for `{}`. Ask the operator to run `zeroclaw models refresh --provider {}`.",
+            "\nNo cached model list found for `{}`. Ask the operator to run `opsclaw models refresh --provider {}`.",
             current.provider, current.provider
         );
     } else {
@@ -1832,7 +1832,7 @@ async fn handle_runtime_command_if_needed(
                     &ctx.model_routes,
                 );
                 // Use a magic prefix so SlackChannel::send() can detect Block Kit JSON.
-                format!("__ZEROCLAW_BLOCK_KIT__{blocks_json}")
+                format!("__OPSCLAW_BLOCK_KIT__{blocks_json}")
             } else {
                 build_config_text_response(&current, ctx.workspace_dir.as_path(), &ctx.model_routes)
             }
@@ -3769,7 +3769,7 @@ pub async fn bind_telegram_identity(config: &Config, identity: &str) -> Result<(
     let mut updated = config.clone();
     let Some(telegram) = updated.channels.telegram.as_mut() else {
         anyhow::bail!(
-            "Telegram channel is not configured. Run `zeroclaw onboard --channels-only` first"
+            "Telegram channel is not configured. Run `opsclaw onboard --channels-only` first"
         );
     };
 
@@ -3799,13 +3799,13 @@ pub async fn bind_telegram_identity(config: &Config, identity: &str) -> Result<(
         }
         Ok(false) => {
             println!(
-                "ℹ️ No managed daemon service detected. If `zeroclaw daemon`/`channel start` is already running, restart it to load the updated allowlist."
+                "ℹ️ No managed daemon service detected. If `opsclaw daemon`/`channel start` is already running, restart it to load the updated allowlist."
             );
         }
         Err(e) => {
             eprintln!(
                 "⚠️ Allowlist saved, but failed to reload daemon service automatically: {e}\n\
-                 Restart service manually with `zeroclaw service stop && zeroclaw service start`."
+                 Restart service manually with `opsclaw service stop && opsclaw service start`."
             );
         }
     }
@@ -3820,7 +3820,7 @@ fn maybe_restart_managed_daemon_service() -> Result<bool> {
         let plist = home
             .join("Library")
             .join("LaunchAgents")
-            .join("com.zeroclaw.daemon.plist");
+            .join("com.opsclaw.daemon.plist");
         if !plist.exists() {
             return Ok(false);
         }
@@ -3830,15 +3830,15 @@ fn maybe_restart_managed_daemon_service() -> Result<bool> {
             .output()
             .context("Failed to query launchctl list")?;
         let listed = String::from_utf8_lossy(&list_output.stdout);
-        if !listed.contains("com.zeroclaw.daemon") {
+        if !listed.contains("com.opsclaw.daemon") {
             return Ok(false);
         }
 
         let _ = Command::new("launchctl")
-            .args(["stop", "com.zeroclaw.daemon"])
+            .args(["stop", "com.opsclaw.daemon"])
             .output();
         let start_output = Command::new("launchctl")
-            .args(["start", "com.zeroclaw.daemon"])
+            .args(["start", "com.opsclaw.daemon"])
             .output()
             .context("Failed to start launchd daemon service")?;
         if !start_output.status.success() {
@@ -4991,11 +4991,11 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     }
 
     if channels.is_empty() {
-        println!("No real-time channels configured. Run `zeroclaw onboard` first.");
+        println!("No real-time channels configured. Run `opsclaw onboard` first.");
         return Ok(());
     }
 
-    println!("🩺 ZeroClaw Channel Doctor");
+    println!("🩺 OpsClaw Channel Doctor");
     println!();
 
     let mut healthy = 0_u32;
@@ -5027,7 +5027,7 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     }
 
     if config.channels.webhook.is_some() {
-        println!("  ℹ️  Webhook   check via `zeroclaw gateway` then GET /health");
+        println!("  ℹ️  Webhook   check via `opsclaw gateway` then GET /health");
     }
 
     println!();
@@ -5359,11 +5359,11 @@ pub async fn start_channels(config: Config) -> Result<()> {
         ));
     }
     if channels.is_empty() {
-        println!("No channels configured. Run `zeroclaw onboard` to set up channels.");
+        println!("No channels configured. Run `opsclaw onboard` to set up channels.");
         return Ok(());
     }
 
-    println!("🦀 ZeroClaw Channel Server");
+    println!("📟 OpsClaw Channel Server");
     println!("  🤖 Model:    {model}");
     let effective_backend = zeroclaw_memory::effective_memory_backend_name(
         &config.memory.backend,
@@ -5759,7 +5759,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         // Create minimal workspace files
         std::fs::write(tmp.path().join("SOUL.md"), "# Soul\nBe helpful.").unwrap();
-        std::fs::write(tmp.path().join("IDENTITY.md"), "# Identity\nName: ZeroClaw").unwrap();
+        std::fs::write(tmp.path().join("IDENTITY.md"), "# Identity\nName: OpsClaw").unwrap();
         std::fs::write(tmp.path().join("USER.md"), "# User\nName: Test User").unwrap();
         std::fs::write(
             tmp.path().join("AGENTS.md"),
@@ -8959,7 +8959,7 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(prompt.contains("Be helpful"), "missing SOUL content");
         assert!(prompt.contains("### IDENTITY.md"), "missing IDENTITY.md");
         assert!(
-            prompt.contains("Name: ZeroClaw"),
+            prompt.contains("Name: OpsClaw"),
             "missing IDENTITY content"
         );
         assert!(prompt.contains("### USER.md"), "missing USER.md");
@@ -9197,7 +9197,7 @@ BTC is currently around $65,000 based on latest tool output."#
 
     #[test]
     fn channel_log_truncation_is_utf8_safe_for_multibyte_text() {
-        let msg = "Hello from ZeroClaw 🌍. Current status is healthy, and café-style UTF-8 text stays safe in logs.";
+        let msg = "Hello from OpsClaw 🌍. Current status is healthy, and café-style UTF-8 text stays safe in logs.";
 
         // Reproduces the production crash path where channel logs truncate at 80 chars.
         let result =

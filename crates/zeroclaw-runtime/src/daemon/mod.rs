@@ -208,7 +208,7 @@ pub async fn run(
         tracing::info!("Cron disabled; scheduler supervisor not started");
     }
 
-    println!("🧠 ZeroClaw daemon started");
+    println!("🧠 OpsClaw daemon started");
     println!("   Gateway:  http://{host}:{port}");
     println!("   Components: gateway, channels, heartbeat, scheduler");
     if config.gateway.require_pairing {

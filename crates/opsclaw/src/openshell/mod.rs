@@ -67,7 +67,7 @@ mod tests {
     fn detect_inactive_when_env_unset() {
         // With no env vars set the context should be inactive.
         // (Other tests may have set them, so we clear first.)
-        std::env::remove_var("OPENSHELL_ACTIVE");
+        unsafe { std::env::remove_var("OPENSHELL_ACTIVE"); }
         let ctx = OpenShellContext::detect();
         assert!(!ctx.is_active());
         assert!(ctx.sandbox_id.is_none());
@@ -75,10 +75,10 @@ mod tests {
 
     #[test]
     fn detect_active_with_env_vars() {
-        std::env::set_var("OPENSHELL_ACTIVE", "1");
-        std::env::set_var("OPENSHELL_SANDBOX_ID", "sandbox-42");
-        std::env::set_var("OPENSHELL_POLICY_ENDPOINT", "http://localhost:7070");
-        std::env::set_var("OPENSHELL_AUDIT_ENDPOINT", "http://localhost:7071");
+        unsafe { std::env::set_var("OPENSHELL_ACTIVE", "1"); }
+        unsafe { std::env::set_var("OPENSHELL_SANDBOX_ID", "sandbox-42"); }
+        unsafe { std::env::set_var("OPENSHELL_POLICY_ENDPOINT", "http://localhost:7070"); }
+        unsafe { std::env::set_var("OPENSHELL_AUDIT_ENDPOINT", "http://localhost:7071"); }
 
         let ctx = OpenShellContext::detect();
         assert!(ctx.is_active());
@@ -90,9 +90,9 @@ mod tests {
         assert_eq!(ctx.audit_endpoint.as_deref(), Some("http://localhost:7071"));
 
         // Cleanup
-        std::env::remove_var("OPENSHELL_ACTIVE");
-        std::env::remove_var("OPENSHELL_SANDBOX_ID");
-        std::env::remove_var("OPENSHELL_POLICY_ENDPOINT");
-        std::env::remove_var("OPENSHELL_AUDIT_ENDPOINT");
+        unsafe { std::env::remove_var("OPENSHELL_ACTIVE"); }
+        unsafe { std::env::remove_var("OPENSHELL_SANDBOX_ID"); }
+        unsafe { std::env::remove_var("OPENSHELL_POLICY_ENDPOINT"); }
+        unsafe { std::env::remove_var("OPENSHELL_AUDIT_ENDPOINT"); }
     }
 }

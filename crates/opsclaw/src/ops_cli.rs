@@ -592,72 +592,11 @@ async fn shutdown_signal() {
 // project commands
 // ---------------------------------------------------------------------------
 
-/// Interactive wizard to add a new project (target) to the config.
+/// Interactive wizard to add a new target. Walks through picking (or
+/// creating) a project + environment first, then prompts for the
+/// target's connection details. See `crate::ops::wizard::run_target_add`.
 pub async fn handle_target_add(_config: &OpsConfig) -> Result<()> {
-    use crate::ops::setup::{
-        load_existing_config, opsclaw_config_path, step_autonomy, step_data_sources,
-        step_discovery_scan, step_kubernetes_target, step_local_target, step_target_context,
-        step_connection_type, step_ssh_target,
-    };
-    use crate::ops_config::ConnectionType;
-    use console::style;
-
-    println!();
-    println!("  {}", style("Add Project").cyan().bold());
-    println!(
-        "  {}",
-        style("Configure a new project for OpsClaw to monitor.").dim()
-    );
-
-    let connection_type = step_connection_type()?;
-    let mut project_result = match connection_type {
-        ConnectionType::Ssh => step_ssh_target().await?,
-        ConnectionType::Local => step_local_target()?,
-        ConnectionType::Kubernetes => step_kubernetes_target()?,
-    };
-
-    project_result.config.context_file = step_target_context(&project_result.config.name)?;
-    project_result.config.autonomy = step_autonomy()?;
-
-    if let Some(ref runner) = project_result.runner {
-        step_discovery_scan(&project_result.config.name, runner.as_ref()).await;
-    } else {
-        println!("  Skipping shell-based discovery scan (Kubernetes projects use the kube API).");
-    }
-
-    project_result.config.data_sources = step_data_sources()?;
-
-    let config_path = opsclaw_config_path()?;
-    if let Some(parent) = config_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let mut cfg = load_existing_config(&config_path);
-    cfg.config_path = config_path.clone();
-
-    let projects = cfg.targets.get_or_insert_with(Vec::new);
-    let name = project_result.config.name.clone();
-    if let Some(pos) = projects.iter().position(|t| t.name == name) {
-        projects[pos] = project_result.config;
-    } else {
-        projects.push(project_result.config);
-    }
-
-    cfg.save().await?;
-
-    println!();
-    println!(
-        "  {} Project '{}' added and saved to {}",
-        style("✓").green().bold(),
-        name,
-        style(config_path.display()).underlined()
-    );
-    println!(
-        "  {}",
-        style("Run 'opsclaw daemon' to start the autonomous loop.").dim()
-    );
-    println!();
-
-    Ok(())
+    crate::ops::wizard::run_target_add().await
 }
 
 /// List all configured projects.
@@ -807,57 +746,11 @@ pub async fn handle_target_remove(name: &str) -> Result<()> {
 // `config project` subcommands
 // ---------------------------------------------------------------------------
 
-/// Interactively add a new empty project to the config. Environments and
-/// targets are populated later via `config env add` and the setup wizard.
+/// Interactive wizard to add a new project. Walks the user through
+/// optionally chaining into env + target creation in the same flow.
+/// See `crate::ops::wizard::run_project_add`.
 pub async fn handle_project_add() -> Result<()> {
-    use crate::ops::setup::{load_existing_config, opsclaw_config_path};
-    use crate::ops_config::ProjectConfig;
-    use console::style;
-    use dialoguer::Input;
-
-    println!();
-    println!("  {}", style("Add Project").cyan().bold());
-
-    let name: String = Input::new()
-        .with_prompt("Project name")
-        .interact_text()?;
-    let description: String = Input::new()
-        .with_prompt("Description (leave blank to skip)")
-        .allow_empty(true)
-        .interact_text()?;
-
-    let config_path = opsclaw_config_path()?;
-    if let Some(parent) = config_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let mut cfg = load_existing_config(&config_path);
-    cfg.config_path = config_path.clone();
-
-    if cfg.projects.iter().any(|p| p.name == name) {
-        bail!("A project named '{name}' already exists.");
-    }
-
-    cfg.projects.push(ProjectConfig {
-        name: name.clone(),
-        description: if description.is_empty() { None } else { Some(description) },
-        context_file: None,
-        owners: None,
-        environments: Vec::new(),
-    });
-
-    cfg.save().await?;
-
-    println!(
-        "  {} Project '{}' added to {}",
-        style("✓").green().bold(),
-        name,
-        style(config_path.display()).underlined()
-    );
-    println!(
-        "  {}",
-        style("Run 'opsclaw config env add' to add an environment.").dim()
-    );
-    Ok(())
+    crate::ops::wizard::run_project_add().await
 }
 
 pub fn handle_project_list(config: &OpsConfig) -> Result<()> {
@@ -967,62 +860,12 @@ fn parse_env_address(address: &str) -> Result<(&str, &str)> {
     Ok((project, env))
 }
 
-/// Interactively add a new environment to an existing project.
+/// Interactive wizard to add a new environment under an existing
+/// project (or create the project inline if none exist). Optionally
+/// chains into adding a first target. See
+/// `crate::ops::wizard::run_env_add`.
 pub async fn handle_env_add() -> Result<()> {
-    use crate::ops::setup::{load_existing_config, opsclaw_config_path};
-    use crate::ops_config::EnvironmentConfig;
-    use console::style;
-    use dialoguer::{Input, Select};
-
-    println!();
-    println!("  {}", style("Add Environment").cyan().bold());
-
-    let config_path = opsclaw_config_path()?;
-    let mut cfg = load_existing_config(&config_path);
-    cfg.config_path = config_path.clone();
-
-    if cfg.projects.is_empty() {
-        bail!("No projects configured. Run 'opsclaw config project add' first.");
-    }
-
-    let project_names: Vec<&str> = cfg.projects.iter().map(|p| p.name.as_str()).collect();
-    let project_name = if project_names.len() == 1 {
-        println!("  Project: {}", project_names[0]);
-        project_names[0].to_string()
-    } else {
-        let idx = Select::new()
-            .with_prompt("Project")
-            .items(&project_names)
-            .default(0)
-            .interact()?;
-        project_names[idx].to_string()
-    };
-
-    let env_name: String = Input::new()
-        .with_prompt("Environment name (e.g. dev, staging, prod)")
-        .interact_text()?;
-
-    let project = cfg.projects.iter_mut().find(|p| p.name == project_name)
-        .expect("project selected from existing list");
-
-    if project.environments.iter().any(|e| e.name == env_name) {
-        bail!("Environment '{env_name}' already exists in project '{project_name}'.");
-    }
-
-    project.environments.push(EnvironmentConfig {
-        name: env_name.clone(),
-        ..EnvironmentConfig::default()
-    });
-
-    cfg.save().await?;
-    println!(
-        "  {} Environment '{}::{}' added to {}",
-        style("✓").green().bold(),
-        project_name,
-        env_name,
-        style(config_path.display()).underlined()
-    );
-    Ok(())
+    crate::ops::wizard::run_env_add().await
 }
 
 pub fn handle_env_list(config: &OpsConfig) -> Result<()> {

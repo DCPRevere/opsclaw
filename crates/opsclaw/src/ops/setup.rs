@@ -527,7 +527,7 @@ mod tests {
     fn test_write_context_file_creates_and_returns_path() {
         let home = tempfile::tempdir().unwrap();
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", home.path());
+        unsafe { std::env::set_var("HOME", home.path()); }
         let result = std::panic::catch_unwind(|| {
             let path = write_context_file("my-server", "Redis is for sessions only").unwrap();
             assert_eq!(path, "~/.opsclaw/context/my-server.md");
@@ -535,9 +535,12 @@ mod tests {
             let content = std::fs::read_to_string(&abs_path).unwrap();
             assert_eq!(content, "Redis is for sessions only");
         });
-        match original_home {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
+        // SAFETY: test-only restore of HOME captured at the start of the test.
+        unsafe {
+            match original_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
         }
         result.unwrap();
     }

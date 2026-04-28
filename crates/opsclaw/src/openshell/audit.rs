@@ -97,8 +97,8 @@ mod tests {
     async fn emit_tolerates_missing_opsclaw_dir() {
         let saved_home = std::env::var("HOME").ok();
         let saved_dir = std::env::var("OPSCLAW_CONFIG_DIR").ok();
-        std::env::remove_var("HOME");
-        std::env::remove_var("OPSCLAW_CONFIG_DIR");
+        unsafe { std::env::remove_var("HOME"); }
+        unsafe { std::env::remove_var("OPSCLAW_CONFIG_DIR"); }
 
         let ctx = OpenShellContext {
             active: true,
@@ -117,10 +117,10 @@ mod tests {
         emit_audit_event(&ctx, &event).await;
 
         if let Some(v) = saved_home {
-            std::env::set_var("HOME", v);
+            unsafe { std::env::set_var("HOME", v); }
         }
         if let Some(v) = saved_dir {
-            std::env::set_var("OPSCLAW_CONFIG_DIR", v);
+            unsafe { std::env::set_var("OPSCLAW_CONFIG_DIR", v); }
         }
     }
 
@@ -128,7 +128,7 @@ mod tests {
     async fn emit_writes_to_temp_audit_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let saved = std::env::var("OPSCLAW_CONFIG_DIR").ok();
-        std::env::set_var("OPSCLAW_CONFIG_DIR", tmp.path());
+        unsafe { std::env::set_var("OPSCLAW_CONFIG_DIR", tmp.path()); }
 
         let ctx = OpenShellContext {
             active: true,
@@ -151,9 +151,12 @@ mod tests {
         assert!(contents.contains("\"entry_hash\""));
         assert!(contents.contains("\"prev_hash\""));
 
-        match saved {
-            Some(v) => std::env::set_var("OPSCLAW_CONFIG_DIR", v),
-            None => std::env::remove_var("OPSCLAW_CONFIG_DIR"),
+        // SAFETY: test-only restore of env var captured at the start of the test.
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("OPSCLAW_CONFIG_DIR", v),
+                None => std::env::remove_var("OPSCLAW_CONFIG_DIR"),
+            }
         }
     }
 }

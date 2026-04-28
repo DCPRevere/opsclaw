@@ -547,16 +547,16 @@ mod tests {
     async fn env_resolver_reads_env_var() {
         let key = "OPSCLAW_TEST_ENV_RESOLVER_READS";
         // SAFETY: test-only, single-threaded per test.
-        std::env::set_var(key, "from-env");
+        unsafe { std::env::set_var(key, "from-env"); }
         let got = EnvVarResolver.resolve(&format!("env:{key}")).await.unwrap();
-        std::env::remove_var(key);
+        unsafe { std::env::remove_var(key); }
         assert_eq!(got, Some("from-env".to_string()));
     }
 
     #[tokio::test]
     async fn env_resolver_missing_var_errors() {
         let key = "OPSCLAW_TEST_ENV_RESOLVER_MISSING";
-        std::env::remove_var(key);
+        unsafe { std::env::remove_var(key); }
         let err = EnvVarResolver
             .resolve(&format!("env:{key}"))
             .await
@@ -732,10 +732,10 @@ mod tests {
     async fn composite_prefers_env_over_encrypted_store() {
         let tmp = TempDir::new().unwrap();
         let key = "OPSCLAW_TEST_COMPOSITE_ENV_WINS";
-        std::env::set_var(key, "from-env-composite");
+        unsafe { std::env::set_var(key, "from-env-composite"); }
         let composite = CompositeResolver::default_for(tmp.path(), true);
         let got = composite.resolve(&format!("env:{key}")).await.unwrap();
-        std::env::remove_var(key);
+        unsafe { std::env::remove_var(key); }
         assert_eq!(got, "from-env-composite");
     }
 
@@ -890,14 +890,17 @@ mod tests {
 
         // Point the resolver's mount root at our tempdir via the env var.
         let prev = std::env::var(K8S_MOUNT_ROOT_ENV).ok();
-        std::env::set_var(K8S_MOUNT_ROOT_ENV, mount.path());
+        unsafe { std::env::set_var(K8S_MOUNT_ROOT_ENV, mount.path()); }
 
         let composite = CompositeResolver::default_for(config_dir.path(), true);
         let got = composite.resolve("k8s:ops/creds/tok").await.unwrap();
 
-        match prev {
-            Some(v) => std::env::set_var(K8S_MOUNT_ROOT_ENV, v),
-            None => std::env::remove_var(K8S_MOUNT_ROOT_ENV),
+        // SAFETY: test-only restore of env var captured at the start of the test.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(K8S_MOUNT_ROOT_ENV, v),
+                None => std::env::remove_var(K8S_MOUNT_ROOT_ENV),
+            }
         }
 
         assert_eq!(got, "mounted-token");

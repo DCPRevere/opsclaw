@@ -7,3 +7,4 @@ pub mod data_sources;
 pub mod doctor;
 pub mod probes;
 pub mod setup;
+pub mod wizard;

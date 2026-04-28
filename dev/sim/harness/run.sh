@@ -41,14 +41,20 @@ skip=""
 parallel=1
 bring_up=false
 no_tear_down=false
+replay=false
+replay_manifest=""
+replay_port=18080
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --only)         only="$2";           shift 2 ;;
-        --skip)         skip="$2";           shift 2 ;;
-        --parallel)     parallel="$2";       shift 2 ;;
-        --bring-up)     bring_up=true;       shift ;;
-        --no-tear-down) no_tear_down=true;   shift ;;
+        --only)             only="$2";           shift 2 ;;
+        --skip)             skip="$2";           shift 2 ;;
+        --parallel)         parallel="$2";       shift 2 ;;
+        --bring-up)         bring_up=true;       shift ;;
+        --no-tear-down)     no_tear_down=true;   shift ;;
+        --replay)           replay=true;         shift ;;
+        --replay-manifest)  replay_manifest="$2"; shift 2 ;;
+        --replay-port)      replay_port="$2";    shift 2 ;;
         *) err "unknown arg: $1"; exit 2 ;;
     esac
 done
@@ -57,6 +63,52 @@ if ! [[ "$parallel" =~ ^[1-9][0-9]*$ ]]; then
     err "--parallel must be a positive integer"
     exit 2
 fi
+
+# Replay mode: deterministic LLM via dev/sim/replay-llm/server.py.
+# Manifest defaults: --only N → scripts/N.jsonl. Otherwise the user
+# must pass --replay-manifest explicitly. This keeps the common
+# single-scenario case ergonomic while preventing cross-contamination
+# from concatenated manifests.
+REPLAY_PID=""
+if $replay; then
+    if [ -z "$replay_manifest" ]; then
+        if [ -n "$only" ] && [ -f "$SIMDIR/replay-llm/scripts/$only.jsonl" ]; then
+            replay_manifest="$SIMDIR/replay-llm/scripts/$only.jsonl"
+        else
+            err "--replay needs --replay-manifest <path>, or use --only <name> with an existing scripts/<name>.jsonl"
+            exit 2
+        fi
+    fi
+    if [ ! -f "$replay_manifest" ]; then
+        err "replay manifest not found: $replay_manifest"
+        exit 2
+    fi
+    log "starting replay-llm on 127.0.0.1:$replay_port (manifest: $replay_manifest)"
+    REPLAY_REQUESTS_LOG="$SIMDIR/.replay-llm-requests.jsonl"
+    : > "$REPLAY_REQUESTS_LOG"
+    python3 "$SIMDIR/replay-llm/server.py" \
+        --port "$replay_port" --manifest "$replay_manifest" \
+        --log-requests "$REPLAY_REQUESTS_LOG" \
+        > "$SIMDIR/.replay-llm.log" 2>&1 &
+    REPLAY_PID=$!
+    # Give the server a beat to bind before slots try to connect.
+    sleep 0.5
+    if ! kill -0 "$REPLAY_PID" 2>/dev/null; then
+        err "replay-llm failed to start; see $SIMDIR/.replay-llm.log"
+        exit 2
+    fi
+    export OPSCLAW_REPLAY_LLM_URL="http://127.0.0.1:$replay_port/v1"
+    # The openai provider rejects an empty key before sending the request,
+    # so set an obvious dummy. The replay server doesn't read it.
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-replay-llm-dummy-key}"
+fi
+
+shutdown_replay() {
+    if [ -n "$REPLAY_PID" ] && kill -0 "$REPLAY_PID" 2>/dev/null; then
+        kill "$REPLAY_PID" 2>/dev/null
+        wait "$REPLAY_PID" 2>/dev/null
+    fi
+}
 
 # ── helpers ─────────────────────────────────────────────────────────
 
@@ -186,7 +238,7 @@ run_scenario() {
 START=$(date +%s)
 mkdir -p "$(dirname "$OUT")"
 VERDICTS_DIR=$(mktemp -d)
-trap 'rm -rf "$VERDICTS_DIR"' EXIT
+trap 'shutdown_replay; rm -rf "$VERDICTS_DIR"' EXIT
 
 # Ensure opsclaw binary is built once; slots spawn daemons from it.
 if [ ! -x "$REPO_ROOT/target/debug/opsclaw" ]; then

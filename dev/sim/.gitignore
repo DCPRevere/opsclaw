@@ -1,3 +1,5 @@
 .state/
 .env
+.replay-llm.log
+.replay-llm-requests.jsonl
 

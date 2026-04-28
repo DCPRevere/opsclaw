@@ -1,0 +1,14 @@
+# baseline_silent — no fault; agent must NOT call opsclaw_notify.
+# Match anchor is in the *user* message because the heartbeat task
+# arrives there, not in the system prompt (the system prompt is the
+# generic ZeroClaw runtime prompt with built-in tools).
+#
+# IMPORTANT (April 2026): Tier 2 today shows that the opsclaw SRE
+# tools (monitor, ssh, opsclaw_notify) are NOT being injected into
+# heartbeat agent runs — the available tools list is the upstream
+# zeroclaw default (shell, file_read, file_write, ...). That is a
+# real opsclaw bug, not a replay-llm bug. Until it's fixed, baseline
+# silence under replay just means the agent says "ok" without ever
+# being able to call the SRE tools. Once opsclaw_notify is reachable,
+# rewrite this to script the full monitor → conclude flow.
+{"conversation": "baseline_silent", "match": {"user_prompt_contains": "Heartbeat Task"}, "turns": [{"role": "assistant", "content": "Heartbeat scan complete: sim-target healthy. No anomalies; not calling opsclaw_notify."}]}

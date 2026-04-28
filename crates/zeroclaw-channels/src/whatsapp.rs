@@ -1424,11 +1424,11 @@ mod tests {
         let pats = WhatsAppChannel::compile_mention_patterns(&["@?OpsClaw".into()]);
         assert!(WhatsAppChannel::text_matches_patterns(
             &pats,
-            "Hello @zeroclaw"
+            "Hello @opsclaw"
         ));
         assert!(WhatsAppChannel::text_matches_patterns(
             &pats,
-            "Hello ZEROCLAW"
+            "Hello OPSCLAW"
         ));
     }
 

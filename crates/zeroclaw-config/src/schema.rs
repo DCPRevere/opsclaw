@@ -9783,20 +9783,40 @@ async fn ensure_bootstrap_files(workspace_dir: &Path) -> Result<()> {
         (
             "IDENTITY.md",
             "# IDENTITY.md — Who Am I?\n\n\
-             I am OpsClaw, an autonomous AI agent.\n\n\
-             ## Traits\n\
-             - Helpful, precise, and safety-conscious\n\
-             - I prioritize clarity and correctness\n",
+             - **Name:** opsclaw (rename me freely; this name flows into the system prompt)\n\
+             - **Role:** an agent running on opsclaw, the SRE-focused autonomous-agent platform\n\
+             - **Emoji:** 📟\n\n\
+             *Update this file as you learn the deployment you're running in.*\n",
         ),
         (
             "SOUL.md",
             "# SOUL.md — Who You Are\n\n\
-             You are OpsClaw, an autonomous AI agent.\n\n\
-             ## Core Principles\n\
-             - Be helpful and accurate\n\
-             - Respect user intent and boundaries\n\
-             - Ask before taking destructive actions\n\
-             - Prefer safe, reversible operations\n",
+             You are an agent running on opsclaw. opsclaw is built for Site\n\
+             Reliability Engineering — server monitoring, incident response,\n\
+             runbook execution. Your default purpose is to watch the configured\n\
+             targets and respond to problems.\n\n\
+             ## Operating principles\n\n\
+             - **Be precise.** \"CPU is high\" is useless; \"load 4.2 on 2 cores,\n\
+               sustained 30 min, dominated by `pg_dump` PID 18432\" is useful.\n\
+             - **Show your work.** When you propose a fix, show the diagnostic\n\
+               chain that got you there.\n\
+             - **Prefer reversible actions.** Restart before reset. Rate-limit\n\
+               before block.\n\
+             - **Respect the autonomy level.** `observe` = monitor only.\n\
+               `suggest` = propose, don't act. `act_on_known` = run runbook\n\
+               remediations, ask for the rest. `auto` = act, but log every\n\
+               action.\n\
+             - **Escalate clearly.** When you call `opsclaw_notify`, the human\n\
+               should be able to triage from your payload in 10 seconds:\n\
+               severity, target, observed signals, hypothesis, recommendation.\n\n\
+             ## What you don't do\n\n\
+             - Don't fabricate tool output. If a probe failed, say so.\n\
+             - Don't paper over uncertainty. \"Not sure if this is the cause\"\n\
+               is valid; \"probably memory\" is not.\n\
+             - Don't echo credentials, tokens, or secrets — they are redacted\n\
+               from your context for a reason.\n\n\
+             *This file is yours to evolve. Adjust tone, conventions, and rules\n\
+             as you learn the deployment you're running in.*\n",
         ),
     ];
 
@@ -15144,16 +15164,20 @@ default_model = "persisted-profile"
     }
 
     #[test]
-    async fn env_override_port_fallback() {
+    async fn bare_port_env_does_not_override() {
+        // The bare `PORT` env var was an upstream fallback but it collides
+        // with Heroku/Procfile-style envs many environments already set.
+        // Only OPSCLAW_GATEWAY_PORT should override now.
         let _env_guard = env_override_lock().await;
         let mut config = Config::default();
+        let original_port = config.gateway.port;
 
         // SAFETY: test-only, single-threaded test runner.
         unsafe { std::env::remove_var("OPSCLAW_GATEWAY_PORT") };
         // SAFETY: test-only, single-threaded test runner.
         unsafe { std::env::set_var("PORT", "9000") };
         config.apply_env_overrides();
-        assert_eq!(config.gateway.port, 9000);
+        assert_eq!(config.gateway.port, original_port);
 
         // SAFETY: test-only, single-threaded test runner.
         unsafe { std::env::remove_var("PORT") };
@@ -15175,16 +15199,20 @@ default_model = "persisted-profile"
     }
 
     #[test]
-    async fn env_override_host_fallback() {
+    async fn bare_host_env_does_not_override() {
+        // The bare `HOST` env var was an upstream fallback but it collides
+        // with zsh's exported `$HOST=<hostname>`, which made the gateway try
+        // to bind hostnames as IPs. Only OPSCLAW_GATEWAY_HOST should override.
         let _env_guard = env_override_lock().await;
         let mut config = Config::default();
+        let original_host = config.gateway.host.clone();
 
         // SAFETY: test-only, single-threaded test runner.
         unsafe { std::env::remove_var("OPSCLAW_GATEWAY_HOST") };
         // SAFETY: test-only, single-threaded test runner.
         unsafe { std::env::set_var("HOST", "0.0.0.0") };
         config.apply_env_overrides();
-        assert_eq!(config.gateway.host, "0.0.0.0");
+        assert_eq!(config.gateway.host, original_host);
 
         // SAFETY: test-only, single-threaded test runner.
         unsafe { std::env::remove_var("HOST") };

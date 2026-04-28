@@ -121,7 +121,9 @@ impl Tool for A2aTool {
 
     fn description(&self) -> &str {
         "Communicate with remote A2A-compliant agents. Actions: discover (fetch agent card), \
-         send (send a task), get (check task status), cancel (cancel a task)."
+         send (send a task), get (check task status), cancel (cancel a task). \
+         The 'token' parameter is a bearer credential — never echo, log, or include it in any \
+         response, summary, or final reply. Pass it only via this tool's token argument."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

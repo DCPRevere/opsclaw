@@ -771,11 +771,27 @@ impl OpsConfig {
             );
         }
 
+        // context_file paths must be relative and not traverse upward — the
+        // workspace_dir is the only legitimate root. An absolute path or `..`
+        // segment would let a malicious or buggy config read arbitrary files
+        // when the agent loads the context at run time.
+        if let Some(targets) = self.targets.as_ref() {
+            for t in targets {
+                validate_context_file(
+                    t.context_file.as_deref(),
+                    &format!("target '{}'", t.name),
+                )?;
+            }
+        }
         let mut seen_projects = std::collections::HashSet::new();
         for project in &self.projects {
             if !seen_projects.insert(project.name.as_str()) {
                 anyhow::bail!("duplicate project name '{}'", project.name);
             }
+            validate_context_file(
+                project.context_file.as_deref(),
+                &format!("project '{}'", project.name),
+            )?;
             let mut seen_envs = std::collections::HashSet::new();
             for env in &project.environments {
                 if !seen_envs.insert(env.name.as_str()) {
@@ -785,10 +801,56 @@ impl OpsConfig {
                         project.name
                     );
                 }
+                validate_context_file(
+                    env.context_file.as_deref(),
+                    &format!("project '{}' environment '{}'", project.name, env.name),
+                )?;
+                for t in &env.targets {
+                    validate_context_file(
+                        t.context_file.as_deref(),
+                        &format!(
+                            "project '{}' environment '{}' target '{}'",
+                            project.name, env.name, t.name
+                        ),
+                    )?;
+                }
             }
         }
         Ok(())
     }
+}
+
+/// Reject context_file paths that are absolute or contain `..` components.
+/// Empty strings and `None` are no-ops. Validation is purely lexical — we
+/// don't touch the filesystem here, the loader resolves relative to the
+/// workspace_dir later.
+fn validate_context_file(value: Option<&str>, owner: &str) -> Result<()> {
+    let Some(raw) = value else { return Ok(()) };
+    if raw.is_empty() {
+        return Ok(());
+    }
+    let path = std::path::Path::new(raw);
+    if path.is_absolute() {
+        anyhow::bail!(
+            "context_file for {owner} must be a workspace-relative path, got absolute '{raw}'"
+        );
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                anyhow::bail!(
+                    "context_file for {owner} contains a '..' segment; paths must stay within the workspace"
+                );
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                anyhow::bail!(
+                    "context_file for {owner} must be a workspace-relative path, got '{raw}'"
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Resolve autonomy for a target: target override must be equal to or more
@@ -1143,6 +1205,82 @@ name = "data-platform"
 
   [[projects.environments]]
   name = "prod"
+"#,
+        )
+        .expect("parses");
+        cfg.validate_hierarchy().expect("must pass");
+    }
+
+    #[test]
+    fn validate_rejects_absolute_context_file_on_target() {
+        let cfg: OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[targets]]
+name = "t"
+type = "local"
+context_file = "/etc/passwd"
+"#,
+        )
+        .expect("parses");
+        let err = cfg.validate_hierarchy().unwrap_err().to_string();
+        assert!(err.contains("absolute"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_parent_traversal_context_file_on_project() {
+        let cfg: OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "p"
+context_file = "../etc/passwd"
+"#,
+        )
+        .expect("parses");
+        let err = cfg.validate_hierarchy().unwrap_err().to_string();
+        assert!(err.contains("'..'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_parent_traversal_context_file_on_environment() {
+        let cfg: OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "p"
+
+  [[projects.environments]]
+  name = "prod"
+  context_file = "ctx/../../escape.md"
+"#,
+        )
+        .expect("parses");
+        let err = cfg.validate_hierarchy().unwrap_err().to_string();
+        assert!(err.contains("'..'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_relative_context_file() {
+        let cfg: OpsConfig = toml::from_str(
+            r#"
+workspace_dir = "/tmp/x"
+
+[[projects]]
+name = "p"
+context_file = "docs/p.md"
+
+  [[projects.environments]]
+  name = "prod"
+  context_file = "docs/p/prod.md"
+
+    [[projects.environments.targets]]
+    name = "t"
+    type = "local"
+    context_file = "docs/t.md"
 "#,
         )
         .expect("parses");

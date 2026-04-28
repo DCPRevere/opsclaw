@@ -13,6 +13,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Environment variable naming the root directory where k8s Secret
 /// volumes are mounted. Each secret key is one file under
@@ -143,6 +144,12 @@ impl KubeSecretFetcher for NullKubeFetcher {
     }
 }
 
+/// Hard ceiling on how long we'll wait for a single kube API call (config
+/// inference or Secret fetch). Without this, an unreachable API server
+/// will block secret resolution forever, which in turn stalls daemon
+/// startup or any tool call that depends on a `k8s:` reference.
+const KUBE_API_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Live fetcher backed by `kube::Api::<Secret>::namespaced`. The kube
 /// client is built lazily on first use via `kube::Config::infer()`, so
 /// startup on a laptop without a cluster is free and the first missing
@@ -160,8 +167,14 @@ impl LiveKubeFetcher {
     async fn client(&self) -> Result<&kube::Client> {
         self.client
             .get_or_try_init(|| async {
-                let config = kube::Config::infer()
+                let config = tokio::time::timeout(KUBE_API_TIMEOUT, kube::Config::infer())
                     .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "kube config inference timed out after {}s",
+                            KUBE_API_TIMEOUT.as_secs()
+                        )
+                    })?
                     .context("failed to infer kube config (no in-cluster creds or ~/.kube/config)")?;
                 kube::Client::try_from(config).context("failed to build kube client")
             })
@@ -177,9 +190,14 @@ impl KubeSecretFetcher for LiveKubeFetcher {
 
         let client = self.client().await?;
         let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
-        let secret = api
-            .get(name)
+        let secret = tokio::time::timeout(KUBE_API_TIMEOUT, api.get(name))
             .await
+            .map_err(|_| {
+                anyhow!(
+                    "kube API: get Secret {namespace}/{name} timed out after {}s",
+                    KUBE_API_TIMEOUT.as_secs()
+                )
+            })?
             .with_context(|| format!("kube API: get Secret {namespace}/{name}"))?;
 
         // `ByteString` in k8s_openapi is base64-decoded on deserialize, so

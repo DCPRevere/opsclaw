@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
@@ -421,7 +421,16 @@ impl GithubTool {
         }
         let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
         let mut out = String::new();
-        for k in ["id", "name", "status", "conclusion", "head_branch", "head_sha", "created_at", "html_url"] {
+        for k in [
+            "id",
+            "name",
+            "status",
+            "conclusion",
+            "head_branch",
+            "head_sha",
+            "created_at",
+            "html_url",
+        ] {
             if let Some(val) = v.get(k) {
                 writeln!(out, "{k}: {val}").ok();
             }
@@ -531,10 +540,7 @@ impl GithubTool {
             for r in a {
                 let tag = r.get("tag_name").and_then(|v| v.as_str()).unwrap_or("");
                 let name = r.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let published = r
-                    .get("published_at")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let published = r.get("published_at").and_then(|v| v.as_str()).unwrap_or("");
                 writeln!(out, "  {tag} {published} — {name}").ok();
             }
         }
@@ -639,10 +645,7 @@ impl GithubTool {
         }
         let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
         let num = v.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
-        let url = v
-            .get("html_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let url = v.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
         Ok(ok_res(format!("created issue #{num}: {url}")))
     }
 
@@ -743,7 +746,14 @@ fn ok_res(mut s: String) -> ToolResult {
 
 fn format_issue(v: &Value) -> String {
     let mut out = String::new();
-    for k in ["number", "state", "title", "created_at", "updated_at", "html_url"] {
+    for k in [
+        "number",
+        "state",
+        "title",
+        "created_at",
+        "updated_at",
+        "html_url",
+    ] {
         if let Some(val) = v.get(k) {
             writeln!(out, "{k}: {val}").ok();
         }
@@ -792,10 +802,7 @@ mod tests {
             .mount(&server)
             .await;
         let t = tool(&server, OpsClawAutonomy::Auto);
-        let r = t
-            .execute(json!({"action": "list_issues"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"action": "list_issues"})).await.unwrap();
         assert!(r.success, "{:?}", r.error);
         assert!(r.output.contains("#1"));
         assert!(r.output.contains("t1"));
@@ -878,10 +885,7 @@ mod tests {
             autonomy: OpsClawAutonomy::Auto,
             api_base: server.uri(),
         });
-        let r = t
-            .execute(json!({"action": "list_issues"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"action": "list_issues"})).await.unwrap();
         assert!(!r.success);
         assert!(r.error.unwrap().contains("owner"));
     }
@@ -895,10 +899,7 @@ mod tests {
             .mount(&server)
             .await;
         let t = tool(&server, OpsClawAutonomy::Auto);
-        let r = t
-            .execute(json!({"action": "list_issues"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"action": "list_issues"})).await.unwrap();
         assert!(!r.success);
         assert!(r.error.unwrap().contains("401"));
     }

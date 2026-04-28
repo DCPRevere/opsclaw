@@ -7,14 +7,15 @@
 //! with a uniqueness check on `name`; singleton pools error if more than one
 //! environment declares them.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use zeroclaw::tools::Tool;
 
 use crate::ops_config::{
-    AzureServiceBusConfig, CloudflareConfig, ElkEndpointConfig, GithubConfig,
+    AzureServiceBusConfig, CloudflareConfig, ConnectionType, ElkEndpointConfig, GithubConfig,
     JaegerEndpointConfig, LokiEndpointConfig, OpsConfig, PagerDutyConfig, PrometheusEndpointConfig,
-    RabbitMqConfig, ConnectionType,
+    RabbitMqConfig,
 };
+use crate::tools::a2a_tool::A2aTool;
 use crate::tools::azure_service_bus_tool::{AzureServiceBusTool, AzureServiceBusToolConfig};
 use crate::tools::cert_tool::CertTool;
 use crate::tools::cloudflare_tool::{CloudflareTool, CloudflareToolConfig};
@@ -23,16 +24,15 @@ use crate::tools::docker_tool::{DockerTool, DockerToolConfig};
 use crate::tools::elk_tool::{ElkEndpoint, ElkTool};
 use crate::tools::firewall_tool::{FirewallTool, FirewallToolConfig};
 use crate::tools::github_tool::{GithubTool, GithubToolConfig};
-use crate::tools::a2a_tool::A2aTool;
 use crate::tools::jaeger_tool::{JaegerEndpoint, JaegerTool};
 use crate::tools::kube_tool::{KubeTool, KubeToolConfig};
 use crate::tools::loki_tool::{LokiEndpoint, LokiTool};
-use crate::tools::postgres_tool::{PostgresInstance, PostgresTool, PostgresToolConfig};
 use crate::tools::monitor_tool::MonitorTool;
 use crate::tools::pagerduty_tool::{PagerDutyTool, PagerDutyToolConfig};
+use crate::tools::postgres_tool::{PostgresInstance, PostgresTool, PostgresToolConfig};
 use crate::tools::prometheus_tool::{PrometheusEndpoint, PrometheusTool};
 use crate::tools::rabbitmq_tool::{RabbitMqTool, RabbitMqToolConfig};
-use crate::tools::ssh_tool::{TargetEntry, SshTool, SshToolConfig};
+use crate::tools::ssh_tool::{SshTool, SshToolConfig, TargetEntry};
 use crate::tools::systemd_tool::{SystemdTool, SystemdToolConfig};
 
 /// Build OpsClaw-specific tools from the current configuration.
@@ -98,7 +98,12 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
             endpoints.push(PrometheusEndpoint {
                 name: e.name.clone(),
                 url: e.url.clone(),
-                bearer_token: decrypt_optional(config, e.bearer_token.as_deref(), "prometheus bearer_token").await?,
+                bearer_token: decrypt_optional(
+                    config,
+                    e.bearer_token.as_deref(),
+                    "prometheus bearer_token",
+                )
+                .await?,
             });
         }
         tools.push(Box::new(PrometheusTool::new(endpoints)));
@@ -111,7 +116,12 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
             endpoints.push(LokiEndpoint {
                 name: e.name.clone(),
                 url: e.url.clone(),
-                bearer_token: decrypt_optional(config, e.bearer_token.as_deref(), "loki bearer_token").await?,
+                bearer_token: decrypt_optional(
+                    config,
+                    e.bearer_token.as_deref(),
+                    "loki bearer_token",
+                )
+                .await?,
                 org_id: e.org_id.clone(),
             });
         }
@@ -136,7 +146,9 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
 
     // PagerDuty.
     if let Some(pd) = pools.pagerduty.as_ref() {
-        let api_key = config.decrypt_secret(&pd.api_key).await
+        let api_key = config
+            .decrypt_secret(&pd.api_key)
+            .await
             .context("Failed to resolve PagerDuty api_key")?;
         let mut cfg = PagerDutyToolConfig::new(api_key);
         cfg.default_service_id = pd.default_service_id.clone();
@@ -147,7 +159,9 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
 
     // GitHub.
     if let Some(gh) = pools.github.as_ref() {
-        let token = config.decrypt_secret(&gh.token).await
+        let token = config
+            .decrypt_secret(&gh.token)
+            .await
             .context("Failed to resolve GitHub token")?;
         let mut cfg = GithubToolConfig::new(token);
         cfg.default_owner = gh.default_owner.clone();
@@ -158,7 +172,9 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
 
     // Cloudflare.
     if let Some(cf) = pools.cloudflare.as_ref() {
-        let tok = config.decrypt_secret(&cf.api_token).await
+        let tok = config
+            .decrypt_secret(&cf.api_token)
+            .await
             .context("Failed to resolve Cloudflare api_token")?;
         let mut cfg = CloudflareToolConfig::new(tok);
         cfg.default_zone_id = cf.default_zone_id.clone();
@@ -169,10 +185,11 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
 
     // RabbitMQ.
     if let Some(rmq) = pools.rabbitmq.as_ref() {
-        let password = config.decrypt_secret(&rmq.password).await
+        let password = config
+            .decrypt_secret(&rmq.password)
+            .await
             .context("Failed to resolve RabbitMQ password")?;
-        let mut cfg =
-            RabbitMqToolConfig::new(rmq.api_base.clone(), rmq.username.clone(), password);
+        let mut cfg = RabbitMqToolConfig::new(rmq.api_base.clone(), rmq.username.clone(), password);
         cfg.default_vhost = rmq.default_vhost.clone();
         cfg.autonomy = rmq.autonomy;
         tools.push(Box::new(RabbitMqTool::new(cfg)));
@@ -185,7 +202,12 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
             endpoints.push(JaegerEndpoint {
                 name: e.name.clone(),
                 url: e.url.clone(),
-                bearer_token: decrypt_optional(config, e.bearer_token.as_deref(), "jaeger bearer_token").await?,
+                bearer_token: decrypt_optional(
+                    config,
+                    e.bearer_token.as_deref(),
+                    "jaeger bearer_token",
+                )
+                .await?,
             });
         }
         tools.push(Box::new(JaegerTool::new(endpoints)));
@@ -195,8 +217,9 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
     if let Some(pgs) = config.postgres.as_ref() {
         let mut instances: Vec<PostgresInstance> = Vec::with_capacity(pgs.len());
         for p in pgs {
-            let dsn = config.decrypt_secret(&p.dsn).await
-                .with_context(|| format!("Failed to resolve DSN for postgres instance '{}'", p.name))?;
+            let dsn = config.decrypt_secret(&p.dsn).await.with_context(|| {
+                format!("Failed to resolve DSN for postgres instance '{}'", p.name)
+            })?;
             instances.push(PostgresInstance {
                 name: p.name.clone(),
                 dsn,
@@ -212,13 +235,12 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
 
     // Azure Service Bus.
     if let Some(sb) = pools.azure_service_bus.as_ref() {
-        let key = config.decrypt_secret(&sb.sas_key).await
+        let key = config
+            .decrypt_secret(&sb.sas_key)
+            .await
             .context("Failed to resolve Azure Service Bus sas_key")?;
-        let mut cfg = AzureServiceBusToolConfig::new(
-            sb.namespace.clone(),
-            sb.sas_key_name.clone(),
-            key,
-        );
+        let mut cfg =
+            AzureServiceBusToolConfig::new(sb.namespace.clone(), sb.sas_key_name.clone(), key);
         cfg.autonomy = sb.autonomy;
         tools.push(Box::new(AzureServiceBusTool::new(cfg)));
     }
@@ -236,7 +258,9 @@ async fn decrypt_optional(
     match value {
         None => Ok(None),
         Some(v) => {
-            let plain = config.decrypt_secret(v).await
+            let plain = config
+                .decrypt_secret(v)
+                .await
                 .with_context(|| format!("Failed to resolve {field}"))?;
             Ok(Some(plain))
         }
@@ -291,7 +315,10 @@ fn gather_endpoints(config: &OpsConfig) -> Result<GatheredEndpoints<'_>> {
             if let Some(list) = eps.loki.as_ref() {
                 for e in list {
                     if !seen_loki.insert(e.name.clone()) {
-                        bail!("Duplicate loki endpoint '{}' in environment {origin}", e.name);
+                        bail!(
+                            "Duplicate loki endpoint '{}' in environment {origin}",
+                            e.name
+                        );
                     }
                     out.loki.push(e);
                 }
@@ -299,7 +326,10 @@ fn gather_endpoints(config: &OpsConfig) -> Result<GatheredEndpoints<'_>> {
             if let Some(list) = eps.elk.as_ref() {
                 for e in list {
                     if !seen_elk.insert(e.name.clone()) {
-                        bail!("Duplicate elk endpoint '{}' in environment {origin}", e.name);
+                        bail!(
+                            "Duplicate elk endpoint '{}' in environment {origin}",
+                            e.name
+                        );
                     }
                     out.elk.push(e);
                 }
@@ -307,17 +337,50 @@ fn gather_endpoints(config: &OpsConfig) -> Result<GatheredEndpoints<'_>> {
             if let Some(list) = eps.jaeger.as_ref() {
                 for e in list {
                     if !seen_jaeger.insert(e.name.clone()) {
-                        bail!("Duplicate jaeger endpoint '{}' in environment {origin}", e.name);
+                        bail!(
+                            "Duplicate jaeger endpoint '{}' in environment {origin}",
+                            e.name
+                        );
                     }
                     out.jaeger.push(e);
                 }
             }
 
-            set_singleton(&mut out.pagerduty, eps.pagerduty.as_ref(), &mut pagerduty_origin, &origin, "pagerduty")?;
-            set_singleton(&mut out.github, eps.github.as_ref(), &mut github_origin, &origin, "github")?;
-            set_singleton(&mut out.cloudflare, eps.cloudflare.as_ref(), &mut cloudflare_origin, &origin, "cloudflare")?;
-            set_singleton(&mut out.rabbitmq, eps.rabbitmq.as_ref(), &mut rabbitmq_origin, &origin, "rabbitmq")?;
-            set_singleton(&mut out.azure_service_bus, eps.azure_service_bus.as_ref(), &mut asb_origin, &origin, "azure_service_bus")?;
+            set_singleton(
+                &mut out.pagerduty,
+                eps.pagerduty.as_ref(),
+                &mut pagerduty_origin,
+                &origin,
+                "pagerduty",
+            )?;
+            set_singleton(
+                &mut out.github,
+                eps.github.as_ref(),
+                &mut github_origin,
+                &origin,
+                "github",
+            )?;
+            set_singleton(
+                &mut out.cloudflare,
+                eps.cloudflare.as_ref(),
+                &mut cloudflare_origin,
+                &origin,
+                "cloudflare",
+            )?;
+            set_singleton(
+                &mut out.rabbitmq,
+                eps.rabbitmq.as_ref(),
+                &mut rabbitmq_origin,
+                &origin,
+                "rabbitmq",
+            )?;
+            set_singleton(
+                &mut out.azure_service_bus,
+                eps.azure_service_bus.as_ref(),
+                &mut asb_origin,
+                &origin,
+                "azure_service_bus",
+            )?;
         }
     }
 
@@ -331,7 +394,9 @@ fn set_singleton<'a, T>(
     origin: &str,
     name: &str,
 ) -> Result<()> {
-    let Some(cfg) = incoming else { return Ok(()); };
+    let Some(cfg) = incoming else {
+        return Ok(());
+    };
     if let Some(prev) = origin_slot.as_deref() {
         bail!(
             "Duplicate {name} config: declared in environment {prev} and {origin}. \
@@ -433,7 +498,10 @@ name = "shopfront"
             Ok(_) => panic!("expected duplicate-name error"),
             Err(e) => e.to_string(),
         };
-        assert!(err.contains("Duplicate prometheus endpoint 'shared'"), "got: {err}");
+        assert!(
+            err.contains("Duplicate prometheus endpoint 'shared'"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -598,7 +666,9 @@ async fn build_ssh_entries(config: &OpsConfig) -> Result<Vec<TargetEntry>> {
             None => continue,
         };
 
-        let key_pem = config.decrypt_secret(raw_key).await
+        let key_pem = config
+            .decrypt_secret(raw_key)
+            .await
             .with_context(|| format!("Failed to resolve SSH key for target '{}'", project.name))?;
 
         entries.push(TargetEntry {

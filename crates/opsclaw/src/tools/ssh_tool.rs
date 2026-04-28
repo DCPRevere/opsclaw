@@ -421,7 +421,15 @@ pub fn write_audit_entry(
     duration_ms: u128,
     audit_base: Option<&PathBuf>,
 ) -> std::io::Result<()> {
-    write_audit_entry_qualified(None, None, target_name, command, exit_code, duration_ms, audit_base)
+    write_audit_entry_qualified(
+        None,
+        None,
+        target_name,
+        command,
+        exit_code,
+        duration_ms,
+        audit_base,
+    )
 }
 
 /// Full audit-entry writer. Prefer `write_audit_entry` for flat-list
@@ -834,11 +842,13 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.success);
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("unknown SSH target"));
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("unknown SSH target")
+        );
     }
 
     // ── Observe mode enforcement via execute ────────────

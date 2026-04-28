@@ -180,10 +180,8 @@ impl OpsConfig {
             .config_path
             .parent()
             .context("config path has no parent")?;
-        let composite = crate::secrets::CompositeResolver::default_for(
-            config_dir,
-            self.inner.secrets.encrypt,
-        );
+        let composite =
+            crate::secrets::CompositeResolver::default_for(config_dir, self.inner.secrets.encrypt);
         composite.resolve(value).await
     }
 
@@ -293,15 +291,11 @@ impl OpsConfig {
                 config_path.parent().context("config path has no parent")?,
                 self.inner.secrets.encrypt,
             );
-            if !a2a.server.token.is_empty()
-                && !crate::secrets::is_reference(&a2a.server.token)
-            {
+            if !a2a.server.token.is_empty() && !crate::secrets::is_reference(&a2a.server.token) {
                 a2a.server.token = store.encrypt(&a2a.server.token)?;
             }
             for peer in &mut a2a.peers {
-                if !peer.token.is_empty()
-                    && !crate::secrets::is_reference(&peer.token)
-                {
+                if !peer.token.is_empty() && !crate::secrets::is_reference(&peer.token) {
                     peer.token = store.encrypt(&peer.token)?;
                 }
             }
@@ -685,10 +679,7 @@ impl OpsConfig {
     }
 
     fn lookup_flat(&self, name: &str) -> Result<ResolvedTarget<'_>> {
-        let targets = self
-            .targets
-            .as_deref()
-            .unwrap_or_default();
+        let targets = self.targets.as_deref().unwrap_or_default();
         let target = targets
             .iter()
             .find(|t| t.name == name)
@@ -777,10 +768,7 @@ impl OpsConfig {
         // when the agent loads the context at run time.
         if let Some(targets) = self.targets.as_ref() {
             for t in targets {
-                validate_context_file(
-                    t.context_file.as_deref(),
-                    &format!("target '{}'", t.name),
-                )?;
+                validate_context_file(t.context_file.as_deref(), &format!("target '{}'", t.name))?;
             }
         }
         let mut seen_projects = std::collections::HashSet::new();
@@ -896,8 +884,7 @@ mod golden_tests {
         );
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read fixture {path}: {e}"));
-        toml::from_str(&text)
-            .unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"))
+        toml::from_str(&text).unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"))
     }
 
     #[test]
@@ -1028,7 +1015,9 @@ min_severity = "bogus"
         assert_eq!(ok.target.name, "web-1");
 
         // But "prod::web-1" is also unique (only shopfront/prod has it).
-        let ok2 = cfg.resolve_target("prod::web-1").expect("unique env::target");
+        let ok2 = cfg
+            .resolve_target("prod::web-1")
+            .expect("unique env::target");
         assert_eq!(ok2.target.name, "web-1");
     }
 
@@ -1160,7 +1149,10 @@ name = "shopfront"
         )
         .expect("parses");
         let err = cfg.validate_hierarchy().unwrap_err().to_string();
-        assert!(err.contains("duplicate project name 'shopfront'"), "got: {err}");
+        assert!(
+            err.contains("duplicate project name 'shopfront'"),
+            "got: {err}"
+        );
     }
 
     #[test]

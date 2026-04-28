@@ -11,11 +11,11 @@ use console::style;
 use dialoguer::{Confirm, Input, Select};
 
 use crate::ops_config::OpsConfig;
-use crate::ops_config::{OpsClawAutonomy, TargetConfig, ConnectionType};
+use crate::ops_config::{ConnectionType, OpsClawAutonomy, TargetConfig};
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::ssh_command_runner::{LocalCommandRunner, SshCommandRunner};
-use crate::tools::ssh_tool::TargetEntry;
 use crate::tools::ssh_tool::RealSshExecutor;
+use crate::tools::ssh_tool::TargetEntry;
 
 fn print_bullet(text: &str) {
     println!("  {} {}", style("›").cyan(), text);
@@ -480,10 +480,7 @@ pub fn step_data_sources() -> Result<Option<crate::ops::data_sources::DataSource
             .default("http://localhost:5341".into())
             .interact_text()?;
         let api_key = crate::secrets::prompt_secret_source("the Seq API key", true)?;
-        config.seq = Some(SeqConfig {
-            url,
-            api_key,
-        });
+        config.seq = Some(SeqConfig { url, api_key });
         any = true;
     }
 
@@ -501,11 +498,7 @@ pub fn step_data_sources() -> Result<Option<crate::ops::data_sources::DataSource
         any = true;
     }
 
-    if any {
-        Ok(Some(config))
-    } else {
-        Ok(None)
-    }
+    if any { Ok(Some(config)) } else { Ok(None) }
 }
 
 // ---------------------------------------------------------------------------
@@ -527,7 +520,9 @@ mod tests {
     fn test_write_context_file_creates_and_returns_path() {
         let home = tempfile::tempdir().unwrap();
         let original_home = std::env::var("HOME").ok();
-        unsafe { std::env::set_var("HOME", home.path()); }
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
         let result = std::panic::catch_unwind(|| {
             let path = write_context_file("my-server", "Redis is for sessions only").unwrap();
             assert_eq!(path, "~/.opsclaw/context/my-server.md");

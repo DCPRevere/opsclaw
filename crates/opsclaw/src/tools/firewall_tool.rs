@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
-use crate::tools::ssh_tool::{write_audit_entry, TargetEntry, RealSshExecutor, SshExecutor};
+use crate::tools::ssh_tool::{RealSshExecutor, SshExecutor, TargetEntry, write_audit_entry};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;
@@ -61,9 +61,12 @@ impl FirewallTool {
 pub fn is_safe_rule_arg(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 256
-        && !s
-            .chars()
-            .any(|c| matches!(c, '`' | '$' | ';' | '|' | '&' | '>' | '<' | '\n' | '\r' | '"' | '\''))
+        && !s.chars().any(|c| {
+            matches!(
+                c,
+                '`' | '$' | ';' | '|' | '&' | '>' | '<' | '\n' | '\r' | '"' | '\''
+            )
+        })
 }
 
 #[derive(Debug)]
@@ -102,7 +105,10 @@ fn build_iptables(action: &str, args: &Value) -> Build {
         .get("chain")
         .and_then(|v| v.as_str())
         .unwrap_or("INPUT");
-    if !chain.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !chain
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return Build::Err(format!("invalid chain '{chain}'"));
     }
 
@@ -162,7 +168,10 @@ fn build_nftables(action: &str, args: &Value) -> Build {
             if !family.chars().all(|c| c.is_ascii_alphanumeric()) {
                 return Build::Err(format!("invalid family '{family}'"));
             }
-            if !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            if !table
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
                 return Build::Err(format!("invalid table '{table}'"));
             }
             Build::Ok {
@@ -171,7 +180,11 @@ fn build_nftables(action: &str, args: &Value) -> Build {
             }
         }
         "add_rule" | "delete_rule" => {
-            let verb = if action == "add_rule" { "add rule" } else { "delete rule" };
+            let verb = if action == "add_rule" {
+                "add rule"
+            } else {
+                "delete rule"
+            };
             let rule = match args.get("rule").and_then(|v| v.as_str()) {
                 Some(s) if !s.is_empty() => s,
                 _ => return Build::Err(format!("action '{action}' requires 'rule'")),
@@ -320,7 +333,10 @@ impl Tool for FirewallTool {
         }
 
         let start = std::time::Instant::now();
-        let result = self.executor.run(target, &command, self.timeout, false).await;
+        let result = self
+            .executor
+            .run(target, &command, self.timeout, false)
+            .await;
         let elapsed = start.elapsed().as_millis();
 
         match result {
@@ -356,13 +372,8 @@ impl Tool for FirewallTool {
                 })
             }
             Err(e) => {
-                let _ = write_audit_entry(
-                    target_name,
-                    &command,
-                    -1,
-                    elapsed,
-                    self.audit_dir.as_ref(),
-                );
+                let _ =
+                    write_audit_entry(target_name, &command, -1, elapsed, self.audit_dir.as_ref());
                 Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -521,7 +532,10 @@ mod tests {
             .await
             .unwrap();
         assert!(r.success);
-        assert_eq!(last.lock().unwrap().as_deref(), Some("sudo ufw allow 22/tcp"));
+        assert_eq!(
+            last.lock().unwrap().as_deref(),
+            Some("sudo ufw allow 22/tcp")
+        );
     }
 
     #[tokio::test]

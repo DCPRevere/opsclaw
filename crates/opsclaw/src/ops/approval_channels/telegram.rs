@@ -11,9 +11,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use zeroclaw_api::channel::{
-    Channel, ChannelApprovalRequest, ChannelApprovalResponse,
-};
+use zeroclaw_api::channel::{Channel, ChannelApprovalRequest, ChannelApprovalResponse};
 
 use crate::ops::approval::ApprovalRequest;
 use crate::ops::approval_channel::{ApprovalChannel, ApprovalOutcome};
@@ -50,7 +48,11 @@ impl ApprovalChannel for TelegramApprovalChannel {
             arguments_summary: req.action_description.clone(),
         };
 
-        match self.channel.request_approval(&self.recipient, &upstream_req).await {
+        match self
+            .channel
+            .request_approval(&self.recipient, &upstream_req)
+            .await
+        {
             Ok(Some(ChannelApprovalResponse::Approve))
             | Ok(Some(ChannelApprovalResponse::AlwaysApprove)) => Ok(ApprovalOutcome::Approved),
             Ok(Some(ChannelApprovalResponse::Deny)) => Ok(ApprovalOutcome::Rejected),
@@ -128,7 +130,10 @@ mod tests {
     async fn approve_maps_to_approved() {
         let ch = adapter(Some(ChannelApprovalResponse::Approve));
         let req = ApprovalRequest::new("web-1", "restart");
-        let out = ch.request(&req, "web-1", Duration::from_secs(1)).await.unwrap();
+        let out = ch
+            .request(&req, "web-1", Duration::from_secs(1))
+            .await
+            .unwrap();
         assert_eq!(out, ApprovalOutcome::Approved);
     }
 
@@ -136,7 +141,10 @@ mod tests {
     async fn always_approve_maps_to_approved() {
         let ch = adapter(Some(ChannelApprovalResponse::AlwaysApprove));
         let req = ApprovalRequest::new("web-1", "restart");
-        let out = ch.request(&req, "web-1", Duration::from_secs(1)).await.unwrap();
+        let out = ch
+            .request(&req, "web-1", Duration::from_secs(1))
+            .await
+            .unwrap();
         assert_eq!(out, ApprovalOutcome::Approved);
     }
 
@@ -144,7 +152,10 @@ mod tests {
     async fn deny_maps_to_rejected() {
         let ch = adapter(Some(ChannelApprovalResponse::Deny));
         let req = ApprovalRequest::new("web-1", "restart");
-        let out = ch.request(&req, "web-1", Duration::from_secs(1)).await.unwrap();
+        let out = ch
+            .request(&req, "web-1", Duration::from_secs(1))
+            .await
+            .unwrap();
         assert_eq!(out, ApprovalOutcome::Rejected);
     }
 
@@ -152,7 +163,11 @@ mod tests {
     async fn none_response_maps_to_failed() {
         let ch = adapter(None);
         let req = ApprovalRequest::new("web-1", "restart");
-        match ch.request(&req, "web-1", Duration::from_secs(1)).await.unwrap() {
+        match ch
+            .request(&req, "web-1", Duration::from_secs(1))
+            .await
+            .unwrap()
+        {
             ApprovalOutcome::Failed(msg) => assert!(msg.contains("does not support")),
             other => panic!("expected Failed, got {other:?}"),
         }
@@ -162,7 +177,11 @@ mod tests {
     async fn upstream_error_maps_to_failed() {
         let ch = erroring_adapter();
         let req = ApprovalRequest::new("web-1", "restart");
-        match ch.request(&req, "web-1", Duration::from_secs(1)).await.unwrap() {
+        match ch
+            .request(&req, "web-1", Duration::from_secs(1))
+            .await
+            .unwrap()
+        {
             ApprovalOutcome::Failed(msg) => assert!(msg.contains("upstream error")),
             other => panic!("expected Failed, got {other:?}"),
         }

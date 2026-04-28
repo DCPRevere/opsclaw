@@ -9,7 +9,7 @@
 //! All schemes share one choke-point: [`CompositeResolver`]. Downstream
 //! tools never see the reference string — they only see resolved plaintext.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -175,7 +175,9 @@ impl LiveKubeFetcher {
                             KUBE_API_TIMEOUT.as_secs()
                         )
                     })?
-                    .context("failed to infer kube config (no in-cluster creds or ~/.kube/config)")?;
+                    .context(
+                        "failed to infer kube config (no in-cluster creds or ~/.kube/config)",
+                    )?;
                 kube::Client::try_from(config).context("failed to build kube client")
             })
             .await
@@ -279,10 +281,7 @@ impl SecretResolver for K8sSecretResolver {
         match tokio::fs::read(&file_path).await {
             Ok(bytes) => {
                 let s = String::from_utf8(bytes).with_context(|| {
-                    format!(
-                        "k8s secret at {} is not valid UTF-8",
-                        file_path.display()
-                    )
+                    format!("k8s secret at {} is not valid UTF-8", file_path.display())
                 })?;
                 // Trim a single trailing newline — projected volumes don't
                 // add one, but `kubectl create secret --from-file` does
@@ -307,9 +306,7 @@ impl SecretResolver for K8sSecretResolver {
             .fetch(ns, name, key)
             .await
             .with_context(|| format!("k8s API lookup failed for {ns}/{name}/{key}"))?
-            .ok_or_else(|| {
-                anyhow!("k8s secret {ns}/{name} has no key `{key}`")
-            })?;
+            .ok_or_else(|| anyhow!("k8s secret {ns}/{name} has no key `{key}`"))?;
         let s = String::from_utf8(bytes)
             .with_context(|| format!("k8s secret {ns}/{name}/{key} is not valid UTF-8"))?;
         Ok(Some(s))
@@ -547,16 +544,22 @@ mod tests {
     async fn env_resolver_reads_env_var() {
         let key = "OPSCLAW_TEST_ENV_RESOLVER_READS";
         // SAFETY: test-only, single-threaded per test.
-        unsafe { std::env::set_var(key, "from-env"); }
+        unsafe {
+            std::env::set_var(key, "from-env");
+        }
         let got = EnvVarResolver.resolve(&format!("env:{key}")).await.unwrap();
-        unsafe { std::env::remove_var(key); }
+        unsafe {
+            std::env::remove_var(key);
+        }
         assert_eq!(got, Some("from-env".to_string()));
     }
 
     #[tokio::test]
     async fn env_resolver_missing_var_errors() {
         let key = "OPSCLAW_TEST_ENV_RESOLVER_MISSING";
-        unsafe { std::env::remove_var(key); }
+        unsafe {
+            std::env::remove_var(key);
+        }
         let err = EnvVarResolver
             .resolve(&format!("env:{key}"))
             .await
@@ -608,8 +611,7 @@ mod tests {
     fn parse_k8s_ref_allows_dotted_but_not_traversal() {
         // `.env` and similar should still work — only literal `.` / `..`
         // segments are rejected.
-        let (ns, name, key) =
-            parse_k8s_ref("k8s:ops/my-secret/.tls.crt").unwrap();
+        let (ns, name, key) = parse_k8s_ref("k8s:ops/my-secret/.tls.crt").unwrap();
         assert_eq!((ns, name, key), ("ops", "my-secret", ".tls.crt"));
     }
 
@@ -695,10 +697,7 @@ mod tests {
     #[tokio::test]
     async fn k8s_resolver_api_missing_key_errors() {
         let tmp = TempDir::new().unwrap();
-        let r = K8sSecretResolver::new(
-            tmp.path(),
-            Arc::new(StubFetcher { value: None }),
-        );
+        let r = K8sSecretResolver::new(tmp.path(), Arc::new(StubFetcher { value: None }));
         let err = r.resolve("k8s:ops/creds/absent").await.unwrap_err();
         assert!(err.to_string().contains("absent"));
     }
@@ -710,7 +709,11 @@ mod tests {
         let err = r.resolve("k8s:ops/creds/api_key").await.unwrap_err();
         // The outer context mentions the ns/name/key; the inner source
         // mentions "kube client". Walk the chain.
-        let chain: String = err.chain().map(|e| e.to_string()).collect::<Vec<_>>().join(" | ");
+        let chain: String = err
+            .chain()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
         assert!(
             chain.contains("kube client"),
             "expected kube-client mention in error chain, got: {chain}"
@@ -732,10 +735,14 @@ mod tests {
     async fn composite_prefers_env_over_encrypted_store() {
         let tmp = TempDir::new().unwrap();
         let key = "OPSCLAW_TEST_COMPOSITE_ENV_WINS";
-        unsafe { std::env::set_var(key, "from-env-composite"); }
+        unsafe {
+            std::env::set_var(key, "from-env-composite");
+        }
         let composite = CompositeResolver::default_for(tmp.path(), true);
         let got = composite.resolve(&format!("env:{key}")).await.unwrap();
-        unsafe { std::env::remove_var(key); }
+        unsafe {
+            std::env::remove_var(key);
+        }
         assert_eq!(got, "from-env-composite");
     }
 
@@ -890,7 +897,9 @@ mod tests {
 
         // Point the resolver's mount root at our tempdir via the env var.
         let prev = std::env::var(K8S_MOUNT_ROOT_ENV).ok();
-        unsafe { std::env::set_var(K8S_MOUNT_ROOT_ENV, mount.path()); }
+        unsafe {
+            std::env::set_var(K8S_MOUNT_ROOT_ENV, mount.path());
+        }
 
         let composite = CompositeResolver::default_for(config_dir.path(), true);
         let got = composite.resolve("k8s:ops/creds/tok").await.unwrap();

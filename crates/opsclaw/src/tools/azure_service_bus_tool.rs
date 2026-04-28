@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::Sha256;
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
@@ -26,7 +26,7 @@ const SAS_TOKEN_TTL_SECS: u64 = 300;
 /// against the namespace, or against a specific entity.
 #[derive(Debug, Clone)]
 pub struct AzureServiceBusToolConfig {
-    pub namespace: String,   // foo → foo.servicebus.windows.net
+    pub namespace: String, // foo → foo.servicebus.windows.net
     pub sas_key_name: String,
     pub sas_key: String,
     pub autonomy: OpsClawAutonomy,
@@ -83,8 +83,8 @@ impl AzureServiceBusTool {
             .unwrap_or(SAS_TOKEN_TTL_SECS);
         let encoded_uri = urlencode(target_url);
         let string_to_sign = format!("{encoded_uri}\n{expiry}");
-        let mut mac = Hmac::<Sha256>::new_from_slice(self.config.sas_key.as_bytes())
-            .expect("hmac key");
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(self.config.sas_key.as_bytes()).expect("hmac key");
         mac.update(string_to_sign.as_bytes());
         let sig = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         let encoded_sig = urlencode(&sig);
@@ -103,8 +103,15 @@ impl AzureServiceBusTool {
         let base = self.base_url();
         let url = format!("{base}/{path}");
         let auth_target = target_resource_for_sas
-            .map(|t| format!("https://{}.servicebus.windows.net/{t}", self.config.namespace))
-            .unwrap_or_else(|| format!("https://{}.servicebus.windows.net/", self.config.namespace));
+            .map(|t| {
+                format!(
+                    "https://{}.servicebus.windows.net/{t}",
+                    self.config.namespace
+                )
+            })
+            .unwrap_or_else(|| {
+                format!("https://{}.servicebus.windows.net/", self.config.namespace)
+            });
         let token = self.sas_token(&auth_target);
         self.client
             .request(method, &url)
@@ -324,7 +331,9 @@ impl AzureServiceBusTool {
     async fn receive_destructive(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let base = Self::entity_message_path(args).map_err(anyhow::Error::msg)?;
         if self.is_dry_run() {
-            return Ok(ok_res(format!("[dry-run] would DELETE one message from {base}")));
+            return Ok(ok_res(format!(
+                "[dry-run] would DELETE one message from {base}"
+            )));
         }
         let path = format!("{base}/head?timeout=10");
         let resp = self
@@ -507,10 +516,7 @@ mod tests {
             .mount(&server)
             .await;
         let t = tool(&server, OpsClawAutonomy::Auto);
-        let r = t
-            .execute(json!({"action": "list_queues"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"action": "list_queues"})).await.unwrap();
         assert!(r.success, "{:?}", r.error);
         assert!(r.output.contains("orders"));
         assert!(r.output.contains("shipments"));
@@ -577,10 +583,7 @@ mod tests {
     async fn dead_letter_requires_lock_url() {
         let server = MockServer::start().await;
         let t = tool(&server, OpsClawAutonomy::Auto);
-        let r = t
-            .execute(json!({"action": "dead_letter"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"action": "dead_letter"})).await.unwrap();
         assert!(!r.success);
         assert!(r.error.unwrap().contains("lock_url"));
     }

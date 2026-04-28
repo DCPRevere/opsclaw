@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 const MAX_OUTPUT_BYTES: usize = 8 * 1024;
@@ -25,10 +25,7 @@ pub struct PrometheusTool {
 
 impl PrometheusTool {
     pub fn new(endpoints: Vec<PrometheusEndpoint>) -> Self {
-        let map = endpoints
-            .into_iter()
-            .map(|e| (e.name.clone(), e))
-            .collect();
+        let map = endpoints.into_iter().map(|e| (e.name.clone(), e)).collect();
         Self {
             endpoints: map,
             client: reqwest::Client::builder()
@@ -108,7 +105,10 @@ impl Tool for PrometheusTool {
             }
         };
 
-        let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("instant");
+        let mode = args
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("instant");
 
         let (path, params) = match mode {
             "instant" => {
@@ -250,10 +250,7 @@ fn format_metric(metric: Option<&Value>) -> String {
         Some(m) => m,
         None => return "{}".into(),
     };
-    let name = m
-        .get("__name__")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let name = m.get("__name__").and_then(|v| v.as_str()).unwrap_or("");
     let mut labels: Vec<String> = m
         .iter()
         .filter(|(k, _)| *k != "__name__")
@@ -481,10 +478,7 @@ mod tests {
     async fn missing_query_arg() {
         let server = MockServer::start().await;
         let t = tool_for(&server);
-        let r = t
-            .execute(json!({"endpoint": "test"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"endpoint": "test"})).await.unwrap();
         assert!(!r.success);
         assert!(r.error.is_some());
     }

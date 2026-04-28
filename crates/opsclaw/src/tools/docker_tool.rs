@@ -8,11 +8,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
-use crate::tools::ssh_tool::{write_audit_entry, RealSshExecutor, SshExecutor, TargetEntry};
+use crate::tools::ssh_tool::{RealSshExecutor, SshExecutor, TargetEntry, write_audit_entry};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;
@@ -63,8 +63,7 @@ pub fn is_valid_ref(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 256
         && s.chars().all(|c| {
-            c.is_ascii_alphanumeric()
-                || matches!(c, '.' | '_' | '-' | '/' | ':' | '@' | '+')
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '@' | '+')
         })
 }
 
@@ -75,8 +74,7 @@ pub fn is_safe_arg(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 512
         && !s.chars().any(|c| {
-            c.is_whitespace()
-                || matches!(c, '`' | '$' | ';' | '|' | '&' | '>' | '<' | '"' | '\'')
+            c.is_whitespace() || matches!(c, '`' | '$' | ';' | '|' | '&' | '>' | '<' | '"' | '\'')
         })
 }
 
@@ -339,13 +337,8 @@ impl Tool for DockerTool {
                 })
             }
             Err(e) => {
-                let _ = write_audit_entry(
-                    target_name,
-                    &command,
-                    -1,
-                    elapsed,
-                    self.audit_dir.as_ref(),
-                );
+                let _ =
+                    write_audit_entry(target_name, &command, -1, elapsed, self.audit_dir.as_ref());
                 Ok(err(format!("SSH error: {e}")))
             }
         }
@@ -453,7 +446,13 @@ mod tests {
             .execute(json!({"target": "prod", "action": "ps", "all": true}))
             .await
             .unwrap();
-        assert!(last.lock().unwrap().clone().unwrap().contains("docker ps -a"));
+        assert!(
+            last.lock()
+                .unwrap()
+                .clone()
+                .unwrap()
+                .contains("docker ps -a")
+        );
     }
 
     #[tokio::test]

@@ -72,10 +72,7 @@ pub fn scan_plugin_dir() -> Vec<LoadedPlugin> {
                 .to_str()
                 .unwrap_or("~/.opsclaw/tools")
                 .replace(home, "~"),
-            None => tools_dir
-                .to_str()
-                .unwrap_or("~/.opsclaw/tools")
-                .to_string(),
+            None => tools_dir.to_str().unwrap_or("~/.opsclaw/tools").to_string(),
         }
     );
 

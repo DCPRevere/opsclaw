@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
@@ -63,7 +63,11 @@ impl RabbitMqTool {
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let url = format!("{}/api/{}", self.config.api_base.trim_end_matches('/'), path);
+        let url = format!(
+            "{}/api/{}",
+            self.config.api_base.trim_end_matches('/'),
+            path
+        );
         self.client
             .request(method, &url)
             .basic_auth(&self.config.username, Some(&self.config.password))
@@ -201,7 +205,10 @@ impl RabbitMqTool {
             writeln!(out, "NAME\tREADY\tUNACKED\tCONSUMERS\tSTATE").ok();
             for q in qs {
                 let name = q.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let ready = q.get("messages_ready").and_then(|v| v.as_u64()).unwrap_or(0);
+                let ready = q
+                    .get("messages_ready")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 let unacked = q
                     .get("messages_unacknowledged")
                     .and_then(|v| v.as_u64())
@@ -272,10 +279,7 @@ impl RabbitMqTool {
                     .get("destination_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let rk = b
-                    .get("routing_key")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let rk = b.get("routing_key").and_then(|v| v.as_str()).unwrap_or("");
                 writeln!(out, "  {src} → {dest}({dtype}) rk={rk}").ok();
             }
         }
@@ -295,7 +299,10 @@ impl RabbitMqTool {
         if let Some(es) = arr.as_array() {
             writeln!(out, "count: {}", es.len()).ok();
             for e in es {
-                let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("(default)");
+                let name = e
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(default)");
                 let t = e.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 let durable = e.get("durable").and_then(|v| v.as_bool()).unwrap_or(false);
                 writeln!(out, "  {name} [{t}] durable={durable}").ok();
@@ -334,10 +341,17 @@ impl RabbitMqTool {
             writeln!(out, "peeked: {}", msgs.len()).ok();
             for m in msgs {
                 let rk = m.get("routing_key").and_then(|v| v.as_str()).unwrap_or("");
-                let redelivered = m.get("redelivered").and_then(|v| v.as_bool()).unwrap_or(false);
+                let redelivered = m
+                    .get("redelivered")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let payload = m.get("payload").and_then(|v| v.as_str()).unwrap_or("");
                 let pl_short: String = payload.chars().take(200).collect();
-                writeln!(out, "  rk={rk} redelivered={redelivered} payload={pl_short}").ok();
+                writeln!(
+                    out,
+                    "  rk={rk} redelivered={redelivered} payload={pl_short}"
+                )
+                .ok();
             }
         }
         Ok(ok_res(out))
@@ -345,10 +359,7 @@ impl RabbitMqTool {
 
     async fn publish(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let vhost = encode_vhost(&self.resolve_vhost(args));
-        let exchange = args
-            .get("exchange")
-            .and_then(|v| v.as_str())
-            .unwrap_or(""); // "" = default exchange
+        let exchange = args.get("exchange").and_then(|v| v.as_str()).unwrap_or(""); // "" = default exchange
         let routing_key = match args.get("routing_key").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => return Ok(err("missing 'routing_key'")),
@@ -462,9 +473,7 @@ impl RabbitMqTool {
         if !ok {
             return Ok(err(format!("{status}: {}", snippet(&resp_body))));
         }
-        Ok(ok_res(format!(
-            "bound {exchange} → {destination}({dtype})"
-        )))
+        Ok(ok_res(format!("bound {exchange} → {destination}({dtype})")))
     }
 
     async fn delete_binding(&self, args: &Value) -> anyhow::Result<ToolResult> {
@@ -495,7 +504,11 @@ impl RabbitMqTool {
         // key as `<rk>` when unambiguous, or `~` for empty. We use the
         // routing key as-is; if you need exact matching for complex keys,
         // fetch the binding first.
-        let prop = if routing_key.is_empty() { "~" } else { routing_key };
+        let prop = if routing_key.is_empty() {
+            "~"
+        } else {
+            routing_key
+        };
         let path = format!(
             "bindings/{vhost}/e/{}/{seg}/{}/{}",
             urlencode(&exchange),
@@ -605,10 +618,7 @@ mod tests {
             .mount(&server)
             .await;
         let t = tool(&server, OpsClawAutonomy::Auto);
-        let r = t
-            .execute(json!({"action": "list_queues"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"action": "list_queues"})).await.unwrap();
         assert!(r.success, "{:?}", r.error);
         assert!(r.output.contains("q1"));
         assert!(r.output.contains("running"));

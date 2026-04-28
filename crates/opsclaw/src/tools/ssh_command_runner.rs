@@ -11,11 +11,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 
 use super::discovery::{CommandOutput, CommandRunner};
-use super::ssh_tool::{is_read_only_command, write_audit_entry, TargetEntry, SshExecutor};
+use super::ssh_tool::{SshExecutor, TargetEntry, is_read_only_command, write_audit_entry};
 use crate::ops_config::OpsClawAutonomy;
 
 // ---------------------------------------------------------------------------

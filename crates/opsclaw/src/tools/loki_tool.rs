@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
@@ -27,10 +27,7 @@ pub struct LokiTool {
 
 impl LokiTool {
     pub fn new(endpoints: Vec<LokiEndpoint>) -> Self {
-        let map = endpoints
-            .into_iter()
-            .map(|e| (e.name.clone(), e))
-            .collect();
+        let map = endpoints.into_iter().map(|e| (e.name.clone(), e)).collect();
         Self {
             endpoints: map,
             client: reqwest::Client::builder()
@@ -288,8 +285,10 @@ fn render_logs_or_metrics(body: &Value) -> String {
                     .get("stream")
                     .and_then(|v| v.as_object())
                     .map(|m| {
-                        let mut v: Vec<String> =
-                            m.iter().map(|(k, val)| format!("{k}={}", val.as_str().unwrap_or(""))).collect();
+                        let mut v: Vec<String> = m
+                            .iter()
+                            .map(|(k, val)| format!("{k}={}", val.as_str().unwrap_or("")))
+                            .collect();
                         v.sort();
                         v.join(",")
                     })
@@ -316,14 +315,17 @@ fn render_logs_or_metrics(body: &Value) -> String {
                     .get("metric")
                     .and_then(|v| v.as_object())
                     .map(|m| {
-                        let mut v: Vec<String> =
-                            m.iter().map(|(k, val)| format!("{k}={}", val.as_str().unwrap_or(""))).collect();
+                        let mut v: Vec<String> = m
+                            .iter()
+                            .map(|(k, val)| format!("{k}={}", val.as_str().unwrap_or("")))
+                            .collect();
                         v.sort();
                         v.join(",")
                     })
                     .unwrap_or_default();
                 if result_type == "matrix" {
-                    let (min, max, mean, n) = matrix_stats(item.get("values").and_then(|v| v.as_array()));
+                    let (min, max, mean, n) =
+                        matrix_stats(item.get("values").and_then(|v| v.as_array()));
                     writeln!(
                         out,
                         "  {{{labels}}} n={n} min={min:.4} max={max:.4} mean={mean:.4}"
@@ -581,10 +583,7 @@ mod tests {
     async fn missing_query_for_range_mode() {
         let server = MockServer::start().await;
         let t = tool_for(&server, None, None);
-        let r = t
-            .execute(json!({"endpoint": "test"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"endpoint": "test"})).await.unwrap();
         assert!(!r.success);
         assert!(r.error.is_some());
     }

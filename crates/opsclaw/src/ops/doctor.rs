@@ -4,7 +4,7 @@
 //! SSH target reachability, notification credentials, LLM provider readiness,
 //! disk space, and data-directory integrity.
 
-use crate::ops_config::{OpsConfig, ConnectionType};
+use crate::ops_config::{ConnectionType, OpsConfig};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 

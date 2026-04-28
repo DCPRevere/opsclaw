@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
@@ -81,12 +81,7 @@ impl PagerDutyTool {
             .await
     }
 
-    async fn put(
-        &self,
-        path: &str,
-        from: &str,
-        body: Value,
-    ) -> reqwest::Result<reqwest::Response> {
+    async fn put(&self, path: &str, from: &str, body: Value) -> reqwest::Result<reqwest::Response> {
         let url = format!("{}/{}", self.config.api_base.trim_end_matches('/'), path);
         self.client
             .put(&url)
@@ -287,7 +282,12 @@ impl PagerDutyTool {
             .cloned()
             .unwrap_or_else(|| body.clone());
         let mut out = String::new();
-        let get = |k: &str| inc.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let get = |k: &str| {
+            inc.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
         writeln!(out, "id: {}", get("id")).ok();
         writeln!(out, "status: {}", get("status")).ok();
         writeln!(out, "urgency: {}", get("urgency")).ok();
@@ -353,15 +353,16 @@ impl PagerDutyTool {
         args: &Value,
         new_status: &str,
     ) -> anyhow::Result<ToolResult> {
-        let ids: Vec<String> = if let Some(arr) = args.get("incident_ids").and_then(|v| v.as_array()) {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        } else if let Some(id) = args.get("incident_id").and_then(|v| v.as_str()) {
-            vec![id.to_string()]
-        } else {
-            return Ok(param_err("requires 'incident_id' or 'incident_ids'"));
-        };
+        let ids: Vec<String> =
+            if let Some(arr) = args.get("incident_ids").and_then(|v| v.as_array()) {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            } else if let Some(id) = args.get("incident_id").and_then(|v| v.as_str()) {
+                vec![id.to_string()]
+            } else {
+                return Ok(param_err("requires 'incident_id' or 'incident_ids'"));
+            };
 
         let from = match self.resolve_from(args) {
             Some(s) => s.to_string(),
@@ -425,7 +426,10 @@ impl PagerDutyTool {
             });
         }
         let body = json!({"note": {"content": content}});
-        let resp = match self.post(&format!("incidents/{id}/notes"), &from, body).await {
+        let resp = match self
+            .post(&format!("incidents/{id}/notes"), &from, body)
+            .await
+        {
             Ok(r) => r,
             Err(e) => return http_err(format!("{e}")),
         };
@@ -606,10 +610,7 @@ mod tests {
     async fn unknown_action_rejected() {
         let server = MockServer::start().await;
         let t = make_tool(&server, OpsClawAutonomy::Auto);
-        let r = t
-            .execute(json!({"action": "rm_rf"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"action": "rm_rf"})).await.unwrap();
         assert!(!r.success);
     }
 
@@ -617,10 +618,7 @@ mod tests {
     async fn acknowledge_requires_incident_id() {
         let server = MockServer::start().await;
         let t = make_tool(&server, OpsClawAutonomy::Auto);
-        let r = t
-            .execute(json!({"action": "acknowledge"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"action": "acknowledge"})).await.unwrap();
         assert!(!r.success);
     }
 }

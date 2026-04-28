@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
-use crate::tools::ssh_tool::{write_audit_entry, TargetEntry, RealSshExecutor, SshExecutor};
+use crate::tools::ssh_tool::{RealSshExecutor, SshExecutor, TargetEntry, write_audit_entry};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;
@@ -60,9 +60,9 @@ impl SystemdTool {
 pub fn is_valid_unit(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 255
-        && name.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-' | ':' | '\\')
-        })
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-' | ':' | '\\'))
 }
 
 fn is_safe_grep(pattern: &str) -> bool {
@@ -70,7 +70,9 @@ fn is_safe_grep(pattern: &str) -> bool {
     // that enable command injection.
     !pattern.is_empty()
         && pattern.len() <= 512
-        && !pattern.chars().any(|c| matches!(c, '`' | '$' | ';' | '|' | '&' | '>' | '<' | '\n'))
+        && !pattern
+            .chars()
+            .any(|c| matches!(c, '`' | '$' | ';' | '|' | '&' | '>' | '<' | '\n'))
 }
 
 fn shell_quote_double(s: &str) -> String {
@@ -144,7 +146,9 @@ fn build_command(args: &Value) -> Build {
             let props = args.get("properties").and_then(|v| v.as_str());
             let suffix = match props {
                 Some(p) => {
-                    if p.split(',').any(|part| !part.chars().all(|c| c.is_ascii_alphanumeric())) {
+                    if p.split(',')
+                        .any(|part| !part.chars().all(|c| c.is_ascii_alphanumeric()))
+                    {
                         return Build::Err(format!("invalid properties list '{p}'"));
                     }
                     format!(" -p {p}")
@@ -285,7 +289,10 @@ impl Tool for SystemdTool {
         }
 
         let start = std::time::Instant::now();
-        let result = self.executor.run(target, &command, self.timeout, false).await;
+        let result = self
+            .executor
+            .run(target, &command, self.timeout, false)
+            .await;
         let elapsed = start.elapsed().as_millis();
 
         match result {
@@ -322,13 +329,8 @@ impl Tool for SystemdTool {
                 })
             }
             Err(e) => {
-                let _ = write_audit_entry(
-                    target_name,
-                    &command,
-                    -1,
-                    elapsed,
-                    self.audit_dir.as_ref(),
-                );
+                let _ =
+                    write_audit_entry(target_name, &command, -1, elapsed, self.audit_dir.as_ref());
                 Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -375,9 +377,7 @@ mod tests {
         }
     }
 
-    fn tool_with(
-        autonomy: OpsClawAutonomy,
-    ) -> (SystemdTool, Arc<Mutex<Option<String>>>) {
+    fn tool_with(autonomy: OpsClawAutonomy) -> (SystemdTool, Arc<Mutex<Option<String>>>) {
         let last = Arc::new(Mutex::new(None));
         let dir = tempfile::tempdir().unwrap();
         let exec = RecordingExecutor {
@@ -453,7 +453,10 @@ mod tests {
             .unwrap();
         assert!(!r.success);
         assert!(r.error.unwrap().contains("dry-run"));
-        assert!(last.lock().unwrap().is_none(), "executor must not be called");
+        assert!(
+            last.lock().unwrap().is_none(),
+            "executor must not be called"
+        );
     }
 
     #[tokio::test]

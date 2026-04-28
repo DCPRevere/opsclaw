@@ -374,10 +374,7 @@ impl Tool for CertTool {
                         });
                     }
                 };
-                let port = args
-                    .get("port")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(443) as u16;
+                let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(443) as u16;
                 let sni = args
                     .get("sni")
                     .and_then(|v| v.as_str())

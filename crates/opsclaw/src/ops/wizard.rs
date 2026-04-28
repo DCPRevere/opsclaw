@@ -7,7 +7,7 @@
 //! Hierarchy: project > environment > target. Targets always live under
 //! an environment; environments always live under a project.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use console::style;
 use dialoguer::{Confirm, Input, Select};
 
@@ -48,11 +48,7 @@ fn pick_project_or_new(cfg: &OpsConfig, prompt: &str) -> Result<Option<String>> 
 /// Pick an existing environment under `project_name`, or signal "create
 /// new". Returns `None` for "create new" (or when the list is empty —
 /// in which case we announce that and fall through).
-fn pick_env_or_new(
-    cfg: &OpsConfig,
-    project_name: &str,
-    prompt: &str,
-) -> Result<Option<String>> {
+fn pick_env_or_new(cfg: &OpsConfig, project_name: &str, prompt: &str) -> Result<Option<String>> {
     let project = cfg
         .projects
         .iter()
@@ -65,7 +61,11 @@ fn pick_env_or_new(
         );
         return Ok(None);
     }
-    let mut items: Vec<String> = project.environments.iter().map(|e| e.name.clone()).collect();
+    let mut items: Vec<String> = project
+        .environments
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
     items.push(NEW_SENTINEL.into());
     let idx = Select::new()
         .with_prompt(prompt)
@@ -162,9 +162,7 @@ async fn prompt_new_target(
         .expect("env must exist by this point");
 
     if env.targets.iter().any(|t| t.name == target_name) {
-        bail!(
-            "A target named '{target_name}' already exists in {project_name}::{env_name}.",
-        );
+        bail!("A target named '{target_name}' already exists in {project_name}::{env_name}.",);
     }
 
     env.targets.push(target_result.config);

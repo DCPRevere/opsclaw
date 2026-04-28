@@ -198,9 +198,11 @@ mod tests {
         let ts = Utc::now();
         let q = build_query(&ts, 25);
         assert_eq!(q["size"], 25);
-        assert!(q["query"]["bool"]["must"][0]["range"]["@timestamp"]["gte"]
-            .as_str()
-            .is_some());
+        assert!(
+            q["query"]["bool"]["must"][0]["range"]["@timestamp"]["gte"]
+                .as_str()
+                .is_some()
+        );
         assert_eq!(q["query"]["bool"]["minimum_should_match"], 1);
     }
 

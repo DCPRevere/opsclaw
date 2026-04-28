@@ -2914,12 +2914,7 @@ mod tests {
         #[test]
         fn no_mention_rejects() {
             let bot = user_id!("@bot:example.org");
-            assert!(!is_mentioned(
-                bot,
-                Some("OpsClaw"),
-                None,
-                "no mention here"
-            ));
+            assert!(!is_mentioned(bot, Some("OpsClaw"), None, "no mention here"));
         }
     }
 

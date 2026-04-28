@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
-use futures_util::{future::FutureExt, stream::FuturesUnordered, StreamExt};
+use futures_util::{StreamExt, future::FutureExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 

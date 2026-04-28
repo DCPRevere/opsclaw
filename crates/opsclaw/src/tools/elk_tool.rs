@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
@@ -28,10 +28,7 @@ pub struct ElkTool {
 
 impl ElkTool {
     pub fn new(endpoints: Vec<ElkEndpoint>) -> Self {
-        let map = endpoints
-            .into_iter()
-            .map(|e| (e.name.clone(), e))
-            .collect();
+        let map = endpoints.into_iter().map(|e| (e.name.clone(), e)).collect();
         Self {
             endpoints: map,
             client: reqwest::Client::builder()
@@ -140,7 +137,11 @@ impl Tool for ElkTool {
                     .map(String::from)
                     .or_else(|| endpoint.default_index.clone())
                     .unwrap_or_else(|| "_all".into());
-                let suffix = if action == "search" { "_search" } else { "_count" };
+                let suffix = if action == "search" {
+                    "_search"
+                } else {
+                    "_count"
+                };
                 let url = format!("{base}/{index}/{suffix}");
 
                 let mut final_body = if let Some(b) = args.get("body") {
@@ -152,7 +153,11 @@ impl Tool for ElkTool {
                 };
 
                 if action == "search" {
-                    let size = args.get("size").and_then(|v| v.as_u64()).unwrap_or(20).min(500);
+                    let size = args
+                        .get("size")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(20)
+                        .min(500);
                     let from = args.get("from").and_then(|v| v.as_u64()).unwrap_or(0);
                     if let Some(obj) = final_body.as_object_mut() {
                         obj.entry("size").or_insert(json!(size));
@@ -180,10 +185,10 @@ impl Tool for ElkTool {
             }
             "indices" => {
                 let url = format!("{base}/_cat/indices");
-                let req = self
-                    .client
-                    .get(&url)
-                    .query(&[("format", "json"), ("h", "index,docs.count,store.size,health")]);
+                let req = self.client.get(&url).query(&[
+                    ("format", "json"),
+                    ("h", "index,docs.count,store.size,health"),
+                ]);
                 (self.apply_auth(req, endpoint), "indices")
             }
             "health" => {
@@ -214,7 +219,11 @@ impl Tool for ElkTool {
         let body_text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
             let snippet = &body_text[..body_text.len().min(500)];
-            let tag = if status == 401 || status == 403 { "auth" } else { "query" };
+            let tag = if status == 401 || status == 403 {
+                "auth"
+            } else {
+                "query"
+            };
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -247,7 +256,11 @@ fn render_search(body: &str) -> String {
     let total = v
         .get("hits")
         .and_then(|h| h.get("total"))
-        .and_then(|t| t.get("value").and_then(|x| x.as_u64()).or_else(|| t.as_u64()))
+        .and_then(|t| {
+            t.get("value")
+                .and_then(|x| x.as_u64())
+                .or_else(|| t.as_u64())
+        })
         .unwrap_or(0);
     writeln!(out, "total_hits: {total}").ok();
     if let Some(hits) = v
@@ -257,10 +270,7 @@ fn render_search(body: &str) -> String {
     {
         for h in hits {
             let src = h.get("_source").cloned().unwrap_or(Value::Null);
-            let ts = src
-                .get("@timestamp")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let ts = src.get("@timestamp").and_then(|v| v.as_str()).unwrap_or("");
             let compact = serde_json::to_string(&src).unwrap_or_default();
             let truncated: String = compact.chars().take(200).collect();
             writeln!(out, "  {ts} {truncated}").ok();

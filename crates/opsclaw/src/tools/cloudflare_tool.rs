@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
@@ -59,7 +59,11 @@ impl CloudflareTool {
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let url = format!("{}/client/v4/{}", self.config.api_base.trim_end_matches('/'), path);
+        let url = format!(
+            "{}/client/v4/{}",
+            self.config.api_base.trim_end_matches('/'),
+            path
+        );
         self.client
             .request(method, &url)
             .header("Authorization", format!("Bearer {}", self.config.api_token))
@@ -233,10 +237,7 @@ impl CloudflareTool {
                 let t = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 let name = r.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let content = r.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let proxied = r
-                    .get("proxied")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let proxied = r.get("proxied").and_then(|v| v.as_bool()).unwrap_or(false);
                 writeln!(out, "  {id} {t} {name} → {content} proxied={proxied}").ok();
             }
         }
@@ -414,7 +415,9 @@ impl CloudflareTool {
             None => return Ok(err("missing 'record_id'")),
         };
         if self.is_dry_run() {
-            return Ok(ok_res(format!("[dry-run] would update DNS {id} in zone {zone}")));
+            return Ok(ok_res(format!(
+                "[dry-run] would update DNS {id} in zone {zone}"
+            )));
         }
         let mut body = serde_json::Map::new();
         for k in ["type", "name", "content"] {
@@ -451,7 +454,9 @@ impl CloudflareTool {
             None => return Ok(err("missing 'record_id'")),
         };
         if self.is_dry_run() {
-            return Ok(ok_res(format!("[dry-run] would delete DNS {id} in zone {zone}")));
+            return Ok(ok_res(format!(
+                "[dry-run] would delete DNS {id} in zone {zone}"
+            )));
         }
         let path = format!("zones/{zone}/dns_records/{id}");
         let resp = self.req(reqwest::Method::DELETE, &path).send().await?;
@@ -474,10 +479,16 @@ impl CloudflareTool {
         let files: Vec<String> = args
             .get("files")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         if !purge_everything && files.is_empty() {
-            return Ok(err("purge_cache requires 'purge_everything' or non-empty 'files'"));
+            return Ok(err(
+                "purge_cache requires 'purge_everything' or non-empty 'files'",
+            ));
         }
         if self.is_dry_run() {
             return Ok(ok_res(format!(
@@ -527,8 +538,7 @@ impl CloudflareTool {
             )));
         }
         // PATCH the ruleset's rule.
-        let path =
-            format!("zones/{zone}/rulesets/phases/{phase}/entrypoint/rules/{rule_id}");
+        let path = format!("zones/{zone}/rulesets/phases/{phase}/entrypoint/rules/{rule_id}");
         let resp = self
             .req(reqwest::Method::PATCH, &path)
             .json(&json!({"enabled": enabled}))
@@ -679,10 +689,7 @@ mod tests {
     async fn purge_requires_files_or_all() {
         let server = MockServer::start().await;
         let t = tool(&server, OpsClawAutonomy::Auto);
-        let r = t
-            .execute(json!({"action": "purge_cache"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"action": "purge_cache"})).await.unwrap();
         assert!(!r.success);
     }
 

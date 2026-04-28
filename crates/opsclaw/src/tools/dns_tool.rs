@@ -7,12 +7,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hickory_resolver::config::{
-    ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts,
-};
+use hickory_resolver::Resolver;
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::{RData, RecordType};
-use hickory_resolver::Resolver;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroclaw::tools::traits::{Tool, ToolResult};
@@ -327,8 +325,7 @@ impl Tool for DnsTool {
         )
         .ok();
 
-        let lookup_res =
-            tokio::time::timeout(timeout, do_lookup(&resolver, record, &name)).await;
+        let lookup_res = tokio::time::timeout(timeout, do_lookup(&resolver, record, &name)).await;
         match lookup_res {
             Ok(Ok(records)) if records.is_empty() => {
                 writeln!(out, "(no records)").ok();
@@ -430,11 +427,13 @@ mod tests {
         assert!(!t.description().is_empty());
         let schema = t.parameters_schema();
         assert!(schema["properties"]["name"].is_object());
-        assert!(schema["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v == "name"));
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "name")
+        );
     }
 
     #[tokio::test]

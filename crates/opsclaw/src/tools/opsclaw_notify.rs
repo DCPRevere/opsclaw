@@ -14,7 +14,7 @@
 //! want to conflate operator chat with paging.
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsConfig;
@@ -179,9 +179,7 @@ impl Tool for OpsClawNotifyTool {
                     Ok(ToolResult {
                         success: false,
                         output: String::new(),
-                        error: Some(format!(
-                            "Webhook rejected alert: {status} {body}"
-                        )),
+                        error: Some(format!("Webhook rejected alert: {status} {body}")),
                     })
                 }
             }

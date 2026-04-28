@@ -13,8 +13,7 @@ use std::path::PathBuf;
 const DEFAULT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_RESPONSES_URL_ENV: &str = "OPSCLAW_CODEX_RESPONSES_URL";
 const CODEX_BASE_URL_ENV: &str = "OPSCLAW_CODEX_BASE_URL";
-const DEFAULT_CODEX_INSTRUCTIONS: &str =
-    "You are OpsClaw, a concise and helpful coding assistant.";
+const DEFAULT_CODEX_INSTRUCTIONS: &str = "You are OpsClaw, a concise and helpful coding assistant.";
 /// OpenAI Codex speaks the "responses" wire protocol, not chat_completions.
 const WIRE_API: &str = "responses";
 

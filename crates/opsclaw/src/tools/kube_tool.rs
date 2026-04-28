@@ -8,9 +8,9 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Event, Namespace, Node, Pod, Service};
+use kube::Client;
 use kube::api::{Api, ListParams, LogParams, Patch, PatchParams};
 use kube::config::KubeConfigOptions;
-use kube::Client;
 use serde::Serialize;
 use tracing::{debug, error};
 
@@ -98,7 +98,10 @@ impl KubeClient {
         };
         let namespaces = self.list_namespaces().await.context("list namespaces")?;
         let pods = self.list_pods(None).await.context("list pods")?;
-        let deployments = self.list_deployments(None).await.context("list deployments")?;
+        let deployments = self
+            .list_deployments(None)
+            .await
+            .context("list deployments")?;
         let services = self.list_services(None).await.context("list services")?;
         let nodes = self.list_nodes().await.context("list nodes")?;
         debug!(
@@ -196,12 +199,7 @@ impl KubeClient {
     }
 
     /// Scale a deployment to `replicas` by patching its `spec.replicas`.
-    pub async fn scale_deployment(
-        &self,
-        namespace: &str,
-        name: &str,
-        replicas: i32,
-    ) -> Result<()> {
+    pub async fn scale_deployment(&self, namespace: &str, name: &str, replicas: i32) -> Result<()> {
         let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
         let patch = serde_json::json!({ "spec": { "replicas": replicas } });
         deployments
@@ -287,7 +285,10 @@ impl KubeClient {
         Ok(list.items.into_iter().map(pod_to_snapshot).collect())
     }
 
-    pub(crate) async fn list_deployments(&self, namespace: Option<&str>) -> Result<Vec<K8sDeployment>> {
+    pub(crate) async fn list_deployments(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<Vec<K8sDeployment>> {
         let deps: Api<Deployment> = match namespace {
             Some(ns) => Api::namespaced(self.client.clone(), ns),
             None => Api::all(self.client.clone()),
@@ -645,7 +646,7 @@ mod tests {
 use crate::ops_config::{ConnectionType, OpsClawAutonomy, OpsConfig, TargetConfig};
 use crate::tools::ssh_tool::write_audit_entry;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use zeroclaw::tools::traits::{Tool, ToolResult};
@@ -802,7 +803,13 @@ impl Tool for KubeTool {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            self.audit(target_name, &format!("[blocked dry-run] {action}"), &detail, 0, -1);
+            self.audit(
+                target_name,
+                &format!("[blocked dry-run] {action}"),
+                &detail,
+                0,
+                -1,
+            );
             return Ok(kube_err(format!(
                 "dry-run mode: write action '{action}' rejected"
             )));
@@ -824,9 +831,7 @@ impl Tool for KubeTool {
             .or(ns_default);
 
         let start = std::time::Instant::now();
-        let result = self
-            .dispatch(&client, action, namespace, &args)
-            .await;
+        let result = self.dispatch(&client, action, namespace, &args).await;
         let elapsed = start.elapsed().as_millis();
         let exit = match &result {
             Ok(r) if r.success => 0,
@@ -1215,7 +1220,9 @@ name = "shopfront"
     }
 
     fn tool_with(target: KubeTarget) -> KubeTool {
-        KubeTool::new(KubeToolConfig { targets: vec![target] })
+        KubeTool::new(KubeToolConfig {
+            targets: vec![target],
+        })
     }
 
     #[tokio::test]

@@ -7,11 +7,11 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::signal;
 use tracing::info;
 
-use crate::ops_config::{TargetConfig, ConnectionType};
+use crate::ops_config::{ConnectionType, TargetConfig};
 
 // Re-import from the same crate tree the binary uses — discovery/monitoring
 // types are fine because they don't reference Config.
@@ -20,7 +20,7 @@ use crate::ops_config::{OpsClawAutonomy, OpsConfig};
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::kube_tool::KubeClient;
 use crate::tools::ssh_command_runner::{DryRunCommandRunner, LocalCommandRunner, SshCommandRunner};
-use crate::tools::ssh_tool::{TargetEntry, RealSshExecutor};
+use crate::tools::ssh_tool::{RealSshExecutor, TargetEntry};
 
 // ---------------------------------------------------------------------------
 // Runner factory
@@ -30,10 +30,7 @@ use crate::tools::ssh_tool::{TargetEntry, RealSshExecutor};
 ///
 /// In `DryRun` mode the runner is wrapped with [`DryRunCommandRunner`] so that
 /// write commands are logged instead of executed.
-async fn make_runner(
-    config: &OpsConfig,
-    project: &TargetConfig,
-) -> Result<Box<dyn CommandRunner>> {
+async fn make_runner(config: &OpsConfig, project: &TargetConfig) -> Result<Box<dyn CommandRunner>> {
     let runner: Box<dyn CommandRunner> = match project.connection_type {
         ConnectionType::Local => Box::new(LocalCommandRunner::new(
             project.autonomy,
@@ -92,7 +89,8 @@ fn opsclaw_dir() -> Result<std::path::PathBuf> {
 /// projects and a [`CommandRunner`] for everything else.
 pub async fn scan_target(config: &OpsConfig, project: &TargetConfig) -> Result<TargetSnapshot> {
     if project.connection_type == ConnectionType::Kubernetes {
-        let kube = KubeClient::new(project.kubeconfig.as_deref(), project.context.as_deref()).await?;
+        let kube =
+            KubeClient::new(project.kubeconfig.as_deref(), project.context.as_deref()).await?;
         return kube.discover_snapshot().await;
     }
     let runner = make_runner(config, project).await?;
@@ -236,7 +234,9 @@ pub fn handle_dry_run_log(tail: Option<usize>, clear: bool) -> Result<()> {
     }
 
     if !log_path.exists() {
-        println!("No dry-run log yet. Set a project's autonomy to 'dry-run' and run a scan or start the daemon.");
+        println!(
+            "No dry-run log yet. Set a project's autonomy to 'dry-run' and run a scan or start the daemon."
+        );
         return Ok(());
     }
 
@@ -352,7 +352,6 @@ fn print_probe_result(r: &probes::ProbeResult) {
         }
     }
 }
-
 
 pub async fn handle_sources(config: &OpsConfig, target: Option<String>, all: bool) -> Result<()> {
     let targets = resolve_targets(config, target.as_deref(), all)?;
@@ -853,9 +852,13 @@ pub fn handle_project_show(config: &OpsConfig, name: &str) -> Result<()> {
 /// from the input.
 fn parse_env_address(address: &str) -> Result<(&str, &str)> {
     let mut parts = address.splitn(2, "::");
-    let project = parts.next().filter(|s| !s.is_empty())
+    let project = parts
+        .next()
+        .filter(|s| !s.is_empty())
         .with_context(|| format!("invalid address '{address}': expected 'project::env'"))?;
-    let env = parts.next().filter(|s| !s.is_empty())
+    let env = parts
+        .next()
+        .filter(|s| !s.is_empty())
         .with_context(|| format!("invalid address '{address}': expected 'project::env'"))?;
     Ok((project, env))
 }
@@ -914,17 +917,16 @@ pub async fn handle_env_remove(address: &str) -> Result<()> {
 
 /// Testable core: remove the environment `project_name::env_name` from the
 /// config at `path`. Errors if the project or environment does not exist.
-async fn remove_env_at(
-    path: &std::path::Path,
-    project_name: &str,
-    env_name: &str,
-) -> Result<()> {
+async fn remove_env_at(path: &std::path::Path, project_name: &str, env_name: &str) -> Result<()> {
     use crate::ops::setup::load_existing_config;
 
     let mut cfg = load_existing_config(path);
     cfg.config_path = path.to_path_buf();
 
-    let project = cfg.projects.iter_mut().find(|p| p.name == project_name)
+    let project = cfg
+        .projects
+        .iter_mut()
+        .find(|p| p.name == project_name)
         .with_context(|| format!("Project '{project_name}' not found."))?;
     let before = project.environments.len();
     project.environments.retain(|e| e.name != env_name);
@@ -939,13 +941,25 @@ pub fn handle_env_show(config: &OpsConfig, address: &str) -> Result<()> {
 
     let (project_name, env_name) = parse_env_address(address)?;
 
-    let project = config.projects.iter().find(|p| p.name == project_name)
+    let project = config
+        .projects
+        .iter()
+        .find(|p| p.name == project_name)
         .with_context(|| format!("Project '{project_name}' not found"))?;
-    let env = project.environments.iter().find(|e| e.name == env_name)
-        .with_context(|| format!("Environment '{env_name}' not found in project '{project_name}'"))?;
+    let env = project
+        .environments
+        .iter()
+        .find(|e| e.name == env_name)
+        .with_context(|| {
+            format!("Environment '{env_name}' not found in project '{project_name}'")
+        })?;
 
     println!();
-    println!("  {}::{}", style(&project.name).white().bold(), style(&env.name).white().bold());
+    println!(
+        "  {}::{}",
+        style(&project.name).white().bold(),
+        style(&env.name).white().bold()
+    );
     if let Some(autonomy) = env.autonomy {
         println!(
             "  {} default autonomy: {}",
@@ -1058,10 +1072,16 @@ mod tests {
         });
         let path = write_config(tmp.path(), &cfg).await;
 
-        remove_env_at(&path, "shopfront", "dev").await.expect("remove");
+        remove_env_at(&path, "shopfront", "dev")
+            .await
+            .expect("remove");
 
         let reloaded = crate::ops::setup::load_existing_config(&path);
-        let shopfront = reloaded.projects.iter().find(|p| p.name == "shopfront").unwrap();
+        let shopfront = reloaded
+            .projects
+            .iter()
+            .find(|p| p.name == "shopfront")
+            .unwrap();
         assert_eq!(shopfront.environments.len(), 1);
         assert_eq!(shopfront.environments[0].name, "prod");
     }
@@ -1082,7 +1102,9 @@ mod tests {
         let cfg = two_project_config(tmp.path().join("config.toml"));
         let path = write_config(tmp.path(), &cfg).await;
 
-        let err = remove_env_at(&path, "shopfront", "ghost").await.unwrap_err();
+        let err = remove_env_at(&path, "shopfront", "ghost")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("No environment named 'ghost'"));
     }
 

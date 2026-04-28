@@ -32,14 +32,14 @@
     clippy::unnecessary_wraps
 )]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use dialoguer::{Password, Select};
 use serde::{Deserialize, Serialize};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use tracing::{info, warn};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     let t: f64 = s.parse().map_err(|e| format!("{e}"))?;
@@ -930,7 +930,9 @@ async fn main() -> Result<()> {
             bail!("--config-dir cannot be empty");
         }
         // SAFETY: called during startup before async runtime / threads spin up.
-        unsafe { std::env::set_var("OPSCLAW_CONFIG_DIR", config_dir); }
+        unsafe {
+            std::env::set_var("OPSCLAW_CONFIG_DIR", config_dir);
+        }
     }
 
     // Completions must remain stdout-only and should not load config or initialize logging.
@@ -1211,8 +1213,12 @@ async fn main() -> Result<()> {
                         }
                         Ok(None) => {
                             if config.gateway.require_pairing {
-                                println!("🔐 Gateway pairing is enabled, but no active pairing code available.");
-                                println!("   The gateway may already be paired, or the code has been used.");
+                                println!(
+                                    "🔐 Gateway pairing is enabled, but no active pairing code available."
+                                );
+                                println!(
+                                    "   The gateway may already be paired, or the code has been used."
+                                );
                                 println!("   Restart the gateway to generate a new pairing code.");
                             } else {
                                 println!("⚠️  Gateway pairing is disabled in config.");
@@ -1283,7 +1289,10 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    info!("Starting A2A server on {}:{}", server_cfg.bind, server_cfg.port);
+                    info!(
+                        "Starting A2A server on {}:{}",
+                        server_cfg.bind, server_cfg.port
+                    );
                     tokio::spawn(async move {
                         if let Err(e) = tools::a2a_server::run_a2a_server(server_cfg).await {
                             tracing::error!(error = %e, "A2A server exited with error");
@@ -1890,16 +1899,12 @@ async fn main() -> Result<()> {
                 ProjectCommands::Remove { name } => {
                     Box::pin(ops_cli::handle_project_remove(&name)).await
                 }
-                ProjectCommands::Show { name } => {
-                    ops_cli::handle_project_show(&ops_config, &name)
-                }
+                ProjectCommands::Show { name } => ops_cli::handle_project_show(&ops_config, &name),
             },
             ConfigCommands::Env { env_command } => match env_command {
                 EnvCommands::Add => Box::pin(ops_cli::handle_env_add()).await,
                 EnvCommands::List => ops_cli::handle_env_list(&ops_config),
-                EnvCommands::Remove { name } => {
-                    Box::pin(ops_cli::handle_env_remove(&name)).await
-                }
+                EnvCommands::Remove { name } => Box::pin(ops_cli::handle_env_remove(&name)).await,
                 EnvCommands::Show { name } => ops_cli::handle_env_show(&ops_config, &name),
             },
         },

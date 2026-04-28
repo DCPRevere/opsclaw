@@ -64,12 +64,7 @@ pub async fn emit_audit_event(ctx: &OpenShellContext, event: &AuditEvent) {
             matches!(event.outcome.as_str(), "approved" | "executed"),
             !matches!(event.outcome.as_str(), "denied"),
         )
-        .with_result(
-            !matches!(event.outcome.as_str(), "denied"),
-            None,
-            0,
-            None,
-        )
+        .with_result(!matches!(event.outcome.as_str(), "denied"), None, 0, None)
         .with_security(Some(format!(
             "openshell:{}:{}:{}",
             event.target, event.outcome, event.details
@@ -97,8 +92,12 @@ mod tests {
     async fn emit_tolerates_missing_opsclaw_dir() {
         let saved_home = std::env::var("HOME").ok();
         let saved_dir = std::env::var("OPSCLAW_CONFIG_DIR").ok();
-        unsafe { std::env::remove_var("HOME"); }
-        unsafe { std::env::remove_var("OPSCLAW_CONFIG_DIR"); }
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        unsafe {
+            std::env::remove_var("OPSCLAW_CONFIG_DIR");
+        }
 
         let ctx = OpenShellContext {
             active: true,
@@ -117,10 +116,14 @@ mod tests {
         emit_audit_event(&ctx, &event).await;
 
         if let Some(v) = saved_home {
-            unsafe { std::env::set_var("HOME", v); }
+            unsafe {
+                std::env::set_var("HOME", v);
+            }
         }
         if let Some(v) = saved_dir {
-            unsafe { std::env::set_var("OPSCLAW_CONFIG_DIR", v); }
+            unsafe {
+                std::env::set_var("OPSCLAW_CONFIG_DIR", v);
+            }
         }
     }
 
@@ -128,7 +131,9 @@ mod tests {
     async fn emit_writes_to_temp_audit_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let saved = std::env::var("OPSCLAW_CONFIG_DIR").ok();
-        unsafe { std::env::set_var("OPSCLAW_CONFIG_DIR", tmp.path()); }
+        unsafe {
+            std::env::set_var("OPSCLAW_CONFIG_DIR", tmp.path());
+        }
 
         let ctx = OpenShellContext {
             active: true,

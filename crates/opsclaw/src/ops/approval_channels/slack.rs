@@ -45,7 +45,11 @@ impl ApprovalChannel for SlackApprovalChannel {
             arguments_summary: req.action_description.clone(),
         };
 
-        match self.channel.request_approval(&self.recipient, &upstream_req).await {
+        match self
+            .channel
+            .request_approval(&self.recipient, &upstream_req)
+            .await
+        {
             Ok(Some(ChannelApprovalResponse::Approve))
             | Ok(Some(ChannelApprovalResponse::AlwaysApprove)) => Ok(ApprovalOutcome::Approved),
             Ok(Some(ChannelApprovalResponse::Deny)) => Ok(ApprovalOutcome::Rejected),
@@ -97,12 +101,13 @@ mod tests {
     #[tokio::test]
     async fn upstream_none_reports_failed_today() {
         // Default Channel impl (what upstream SlackChannel has today) returns None.
-        let ch = SlackApprovalChannel::new(
-            Arc::new(FakeChannel { response: None }),
-            "C123".into(),
-        );
+        let ch = SlackApprovalChannel::new(Arc::new(FakeChannel { response: None }), "C123".into());
         let req = ApprovalRequest::new("web-1", "restart");
-        match ch.request(&req, "web-1", Duration::from_secs(1)).await.unwrap() {
+        match ch
+            .request(&req, "web-1", Duration::from_secs(1))
+            .await
+            .unwrap()
+        {
             ApprovalOutcome::Failed(msg) => assert!(msg.contains("slack")),
             other => panic!("expected Failed, got {other:?}"),
         }
@@ -117,7 +122,10 @@ mod tests {
             "C123".into(),
         );
         let req = ApprovalRequest::new("web-1", "restart");
-        let out = ch.request(&req, "web-1", Duration::from_secs(1)).await.unwrap();
+        let out = ch
+            .request(&req, "web-1", Duration::from_secs(1))
+            .await
+            .unwrap();
         assert_eq!(out, ApprovalOutcome::Approved);
     }
 
@@ -130,7 +138,10 @@ mod tests {
             "C123".into(),
         );
         let req = ApprovalRequest::new("web-1", "restart");
-        let out = ch.request(&req, "web-1", Duration::from_secs(1)).await.unwrap();
+        let out = ch
+            .request(&req, "web-1", Duration::from_secs(1))
+            .await
+            .unwrap();
         assert_eq!(out, ApprovalOutcome::Rejected);
     }
 }

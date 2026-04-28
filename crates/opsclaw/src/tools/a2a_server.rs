@@ -5,16 +5,16 @@
 //! - `POST /a2a` — JSON-RPC 2.0 endpoint for task lifecycle
 
 use super::a2a_types::{
-    A2aRequest, A2aResponse, AgentAuth, AgentCard, AgentSkill, Task, TaskStatus,
-    A2A_TASK_NOT_FOUND, A2A_UNAUTHORIZED, JSONRPC_INVALID_PARAMS, JSONRPC_METHOD_NOT_FOUND,
+    A2A_TASK_NOT_FOUND, A2A_UNAUTHORIZED, A2aRequest, A2aResponse, AgentAuth, AgentCard,
+    AgentSkill, JSONRPC_INVALID_PARAMS, JSONRPC_METHOD_NOT_FOUND, Task, TaskStatus,
 };
 use anyhow::{Context, Result};
 use axum::{
+    Router,
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Json},
     routing::{get, post},
-    Router,
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;

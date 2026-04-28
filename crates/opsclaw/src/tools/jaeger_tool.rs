@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
@@ -26,10 +26,7 @@ pub struct JaegerTool {
 
 impl JaegerTool {
     pub fn new(endpoints: Vec<JaegerEndpoint>) -> Self {
-        let map = endpoints
-            .into_iter()
-            .map(|e| (e.name.clone(), e))
-            .collect();
+        let map = endpoints.into_iter().map(|e| (e.name.clone(), e)).collect();
         Self {
             endpoints: map,
             client: reqwest::Client::builder()
@@ -171,11 +168,7 @@ impl JaegerTool {
         Ok(ok_res(out))
     }
 
-    async fn search_traces(
-        &self,
-        ep: &JaegerEndpoint,
-        args: &Value,
-    ) -> anyhow::Result<ToolResult> {
+    async fn search_traces(&self, ep: &JaegerEndpoint, args: &Value) -> anyhow::Result<ToolResult> {
         let service = match args.get("service").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s,
             _ => return Ok(err("search_traces requires 'service'")),
@@ -201,11 +194,7 @@ impl JaegerTool {
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20);
         params.push(("limit", limit.to_string()));
 
-        let resp = self
-            .get(ep, "api/traces")
-            .query(&params)
-            .send()
-            .await?;
+        let resp = self.get(ep, "api/traces").query(&params).send().await?;
         let (ok, status, body) = consume(resp).await;
         if !ok {
             return Ok(err(format!("{status}: {}", snippet(&body))));
@@ -287,15 +276,17 @@ impl JaegerTool {
 
         // Top N slowest spans.
         let mut sorted: Vec<&Value> = spans.iter().collect();
-        sorted.sort_by_key(|s| std::cmp::Reverse(s.get("duration").and_then(|v| v.as_i64()).unwrap_or(0)));
+        sorted.sort_by_key(|s| {
+            std::cmp::Reverse(s.get("duration").and_then(|v| v.as_i64()).unwrap_or(0))
+        });
         writeln!(out, "slowest spans:").ok();
         for s in sorted.iter().take(10) {
-            let op = s.get("operationName").and_then(|v| v.as_str()).unwrap_or("");
-            let dur = s.get("duration").and_then(|v| v.as_i64()).unwrap_or(0);
-            let pid = s
-                .get("processID")
+            let op = s
+                .get("operationName")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let dur = s.get("duration").and_then(|v| v.as_i64()).unwrap_or(0);
+            let pid = s.get("processID").and_then(|v| v.as_str()).unwrap_or("");
             let svc = service_of(pid);
             let has_error = has_error_tag(s);
             let marker = if has_error { " [error]" } else { "" };
@@ -307,7 +298,9 @@ impl JaegerTool {
     async fn dependencies(&self, ep: &JaegerEndpoint, args: &Value) -> anyhow::Result<ToolResult> {
         // Jaeger wants an endTs (ms) + lookback (ms). Default: now, 1h.
         let lookback_ms: u64 = parse_duration_to_ms(
-            args.get("lookback").and_then(|v| v.as_str()).unwrap_or("1h"),
+            args.get("lookback")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1h"),
         )
         .unwrap_or(3_600_000);
         let end_ts_ms = std::time::SystemTime::now()
@@ -359,9 +352,10 @@ fn summarise_trace(trace: &Value) -> (String, String, String, i64, u64) {
     let root = spans.iter().find(|s| {
         s.get("references")
             .and_then(|r| r.as_array())
-            .map(|a| !a.iter().any(|ref_| {
-                ref_.get("refType").and_then(|v| v.as_str()) == Some("CHILD_OF")
-            }))
+            .map(|a| {
+                !a.iter()
+                    .any(|ref_| ref_.get("refType").and_then(|v| v.as_str()) == Some("CHILD_OF"))
+            })
             .unwrap_or(true)
     });
 

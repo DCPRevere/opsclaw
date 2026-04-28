@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_postgres::types::{FromSql, Type};
 use tokio_postgres::{Client, NoTls, Row};
 use zeroclaw::tools::traits::{Tool, ToolResult};
@@ -100,7 +100,9 @@ async fn connect(dsn: &str, timeout_ms: u64) -> anyhow::Result<Client> {
 /// Safety guard for `query` action: refuse anything that doesn't start with
 /// SELECT, WITH, SHOW, or EXPLAIN. Strips comments/whitespace first.
 fn is_read_only_sql(sql: &str) -> bool {
-    let trimmed = strip_leading_comments(sql).trim_start().to_ascii_uppercase();
+    let trimmed = strip_leading_comments(sql)
+        .trim_start()
+        .to_ascii_uppercase();
     trimmed.starts_with("SELECT")
         || trimmed.starts_with("WITH")
         || trimmed.starts_with("SHOW")
@@ -246,18 +248,9 @@ impl Tool for PostgresTool {
             None => return Ok(pg_err("missing 'action'")),
         };
 
-        let is_write = matches!(
-            action.as_str(),
-            "exec" | "analyze" | "vacuum" | "reindex"
-        );
+        let is_write = matches!(action.as_str(), "exec" | "analyze" | "vacuum" | "reindex");
         if is_write && instance.autonomy == OpsClawAutonomy::DryRun {
-            self.audit(
-                name,
-                &format!("[blocked dry-run] {action}"),
-                "",
-                0,
-                -1,
-            );
+            self.audit(name, &format!("[blocked dry-run] {action}"), "", 0, -1);
             return Ok(pg_err(format!(
                 "dry-run mode: write action '{action}' rejected"
             )));
@@ -499,9 +492,7 @@ mod tests {
 
     #[test]
     fn tool_metadata() {
-        let t = PostgresTool::new(PostgresToolConfig {
-            instances: vec![],
-        });
+        let t = PostgresTool::new(PostgresToolConfig { instances: vec![] });
         assert_eq!(t.name(), "postgres");
         assert!(!t.description().is_empty());
         let schema = t.parameters_schema();
@@ -569,10 +560,7 @@ mod tests {
     #[tokio::test]
     async fn missing_instance_arg() {
         let t = PostgresTool::new(PostgresToolConfig { instances: vec![] });
-        let r = t
-            .execute(json!({"action": "connections"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"action": "connections"})).await.unwrap();
         assert!(!r.success);
         assert!(r.error.is_some());
     }
@@ -586,10 +574,7 @@ mod tests {
                 autonomy: OpsClawAutonomy::Auto,
             }],
         });
-        let r = t
-            .execute(json!({"instance": "dev"}))
-            .await
-            .unwrap();
+        let r = t.execute(json!({"instance": "dev"})).await.unwrap();
         assert!(!r.success);
         assert!(r.error.is_some());
     }

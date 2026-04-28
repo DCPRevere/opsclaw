@@ -11,25 +11,27 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::ops_config::{OpsConfig, ConnectionType};
+use crate::ops_config::{ConnectionType, OpsConfig};
 use crate::tools::registry::create_opsclaw_tools;
 
 /// Register the opsclaw SRE tools with the runtime via the existing
 /// peripheral-tools factory slot. Safe to call once at daemon startup.
 /// OpsClaw does not use hardware peripherals, so the slot is free.
 pub fn register_sre_tools(ops_config: OpsConfig) {
-    zeroclaw_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(move |_peripherals_cfg| {
-        let ops = ops_config.clone();
-        Box::pin(async move {
-            create_opsclaw_tools(&ops).await.map_err(|e| {
+    zeroclaw_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(
+        move |_peripherals_cfg| {
+            let ops = ops_config.clone();
+            Box::pin(async move {
+                create_opsclaw_tools(&ops).await.map_err(|e| {
                 tracing::error!(
                     error = %e,
                     "Failed to build opsclaw SRE tools for agent run — aborting so the agent does not run without its SRE toolset",
                 );
                 e
             })
-        })
-    }));
+            })
+        },
+    ));
 }
 
 /// Seed HEARTBEAT.md with one scan task per configured project, but only
@@ -217,10 +219,16 @@ user = "ops"
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg = OpsConfig::default();
         cfg.targets = Some(vec![
-            toml::from_str(r#"name = "k8s"
-type = "kubernetes""#).unwrap(),
-            toml::from_str(r#"name = "local-only"
-type = "local""#).unwrap(),
+            toml::from_str(
+                r#"name = "k8s"
+type = "kubernetes""#,
+            )
+            .unwrap(),
+            toml::from_str(
+                r#"name = "local-only"
+type = "local""#,
+            )
+            .unwrap(),
         ]);
 
         seed_heartbeat_file(tmp.path(), &cfg).await.expect("seed");

@@ -1542,7 +1542,7 @@ async fn main() -> Result<()> {
                 contains.as_deref(),
                 limit,
             ),
-            None => doctor::run(&config),
+            None => doctor::run(&config).await,
         },
 
         Commands::Channel { channel_command } => match channel_command {

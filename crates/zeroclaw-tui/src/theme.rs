@@ -34,10 +34,6 @@ pub fn accent_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-pub fn success_style() -> Style {
-    Style::default().fg(SUCCESS_GREEN)
-}
-
 pub fn warn_style() -> Style {
     Style::default().fg(WARN_YELLOW)
 }
@@ -47,14 +43,6 @@ pub fn selected_style() -> Style {
         .fg(ICY_BLUE)
         .bg(SELECTION_BG)
         .add_modifier(Modifier::BOLD)
-}
-
-pub fn unselected_style() -> Style {
-    Style::default().fg(FROST_DIM)
-}
-
-pub fn border_style() -> Style {
-    Style::default().fg(ICY_BLUE)
 }
 
 pub fn input_style() -> Style {

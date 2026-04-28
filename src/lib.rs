@@ -80,8 +80,6 @@ pub mod nodes;
 #[cfg(feature = "agent-runtime")]
 pub mod observability;
 #[cfg(feature = "agent-runtime")]
-pub mod onboard;
-#[cfg(feature = "agent-runtime")]
 pub mod peripherals;
 #[cfg(feature = "agent-runtime")]
 pub mod platform;
@@ -101,9 +99,7 @@ pub mod sop;
 #[cfg(feature = "agent-runtime")]
 pub mod tools;
 #[cfg(feature = "agent-runtime")]
-pub mod trust;
-#[cfg(feature = "tui-onboarding")]
-pub mod tui;
+pub(crate) mod trust;
 #[cfg(feature = "agent-runtime")]
 pub(crate) mod tunnel;
 #[cfg(feature = "agent-runtime")]
@@ -434,9 +430,9 @@ Update one or more fields of an existing scheduled task.
 Only the fields you specify are changed; others remain unchanged.
 
 Examples:
-  zeroclaw cron update <task-id> --expression '0 8 * * *'
-  zeroclaw cron update <task-id> --tz Europe/London --name 'Morning check'
-  zeroclaw cron update <task-id> --command 'Updated message'")]
+  zeroclaw cron update TASK_ID --expression '0 8 * * *'
+  zeroclaw cron update TASK_ID --tz Europe/London --name 'Morning check'
+  zeroclaw cron update TASK_ID --command 'Updated message'")]
     Update {
         /// Task ID
         id: String,

@@ -128,6 +128,7 @@ opsclaw reads `~/.opsclaw/config.toml`. The file is created and managed by `opsc
 A minimal hierarchy looks like this:
 
 ```toml
+# Project: acme
 [[projects]]
 name = "acme"
 
@@ -141,7 +142,42 @@ host = "web-1.example.com"
 user = "root"
 key_secret = "enc2:..."          # encrypted; reference by name in your store
 autonomy = "suggest"
+
+[[projects.environments.targets]]
+name = "web-2"
+type = "ssh"
+host = "web-2.example.com"
+user = "root"
+key_secret = "enc2:..."
+autonomy = "suggest"
+
+[[projects.environments]]
+name = "staging"
+
+[[projects.environments.targets]]
+name = "web-staging"
+type = "ssh"
+host = "web-staging.example.com"
+user = "root"
+key_secret = "enc2:..."
+autonomy = "act_on_known"
+
+# Project: cluster
+[[projects]]
+name = "cluster"
+
+[[projects.environments]]
+name = "prod"
+
+[[projects.environments.targets]]
+name = "k8s-prod"
+type = "kubernetes"
+kubeconfig = "~/.kube/config"
+context = "prod-cluster"
+autonomy = "observe"
 ```
+
+TOML's `[[a.b.c]]` syntax attaches each child to the **most recent** parent that came before it in the file. So the first `[[projects.environments]] name = "prod"` belongs to `acme`; the second `[[projects.environments]] name = "prod"` (further down) belongs to `cluster`. The same env name can repeat across projects without collision.
 
 Secrets (SSH keys, API tokens) are referenced by name; the values live encrypted at rest and are never written to logs.
 
@@ -194,9 +230,7 @@ For tier-1/2/3 production-readiness testing, see [`docs/testing.md`](docs/testin
 
 ## Upstream
 
-opsclaw tracks [zeroclaw-labs/zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) as `upstream`. We maintain a deliberate fork: branding, paths, env-var names, and a handful of bug fixes (notably the `HOST`/`PORT` env-var collision) live downstream; everything else flows from upstream.
-
-The merge playbook — conflict resolution policy, the dangerous sed patterns to avoid, the abort criteria — lives in [`docs/merging.md`](docs/merging.md).
+opsclaw tracks [zeroclaw-labs/zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) as `upstream` for the agent runtime, providers, channels, memory, and gateway. The SRE-specific surface — the SSH/k8s/observability tools, the project/env/target hierarchy, the configuration wizards, the daemon hooks — lives in its own crate at `crates/opsclaw`, kept deliberately separate so upstream improvements continue to flow through.
 
 ## Documentation
 
@@ -209,7 +243,6 @@ Full documentation lives under [`docs/`](docs/):
 - [`channels.md`](docs/channels.md) — wiring up notifications.
 - [`memory.md`](docs/memory.md) — how the agent remembers.
 - [`SECURITY.md`](SECURITY.md) — the threat model and the audit chain.
-- [`merging.md`](docs/merging.md) — pulling from upstream.
 
 ## License
 

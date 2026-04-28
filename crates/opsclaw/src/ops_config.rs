@@ -637,6 +637,32 @@ pub struct EndpointsConfig {
     pub rabbitmq: Option<RabbitMqConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure_service_bus: Option<AzureServiceBusConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posthog: Option<PostHogConfig>,
+}
+
+/// PostHog endpoint configuration. Per-environment, since teams typically
+/// run separate PostHog projects (or projects tagged by environment) for
+/// prod/staging.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PostHogConfig {
+    /// Personal API key for the PostHog project. Stored as `enc2:` /
+    /// `env:` / `k8s:` reference; resolved at tool-build time.
+    pub api_key: String,
+    /// Numeric PostHog project id (e.g. `"12345"`).
+    pub project_id: String,
+    /// Base URL of the PostHog instance. Defaults to PostHog Cloud (US).
+    /// Override for self-hosted or EU cloud (`https://eu.posthog.com`).
+    #[serde(default = "default_posthog_host")]
+    pub host: String,
+    /// Reserved for v2 (write actions like flag toggles). v1 is read-only;
+    /// this field is parsed but ignored for now.
+    #[serde(default)]
+    pub autonomy: OpsClawAutonomy,
+}
+
+fn default_posthog_host() -> String {
+    "https://app.posthog.com".to_string()
 }
 
 /// Result of resolving a `project::environment::target` address. Autonomy

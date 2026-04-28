@@ -93,7 +93,7 @@ opsclaw ships SRE-shaped tools on top of the zeroclaw default set:
 
 - **diagnostic** — `monitor`, `ssh`, `kube`, `systemd`, `docker`, `dns`, `cert`, `firewall`
 - **observability** — `prometheus`, `loki`, `elk`, `jaeger`
-- **provider/infra** — `pagerduty`, `cloudflare`, `github`, `azure_service_bus`, `rabbitmq`, `postgres`
+- **provider/infra** — `pagerduty`, `cloudflare`, `github`, `azure_service_bus`, `rabbitmq`, `postgres`, `posthog`
 - **escalation** — `opsclaw_notify`
 - **upstream zeroclaw** — `shell`, `file_read`, `file_write`, `memory_recall`, `memory_store`, `web_search`, `web_fetch`, and friends
 

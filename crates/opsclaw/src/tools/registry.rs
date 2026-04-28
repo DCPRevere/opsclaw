@@ -12,8 +12,8 @@ use zeroclaw::tools::Tool;
 
 use crate::ops_config::{
     AzureServiceBusConfig, CloudflareConfig, ConnectionType, ElkEndpointConfig, GithubConfig,
-    JaegerEndpointConfig, LokiEndpointConfig, OpsConfig, PagerDutyConfig, PrometheusEndpointConfig,
-    RabbitMqConfig,
+    JaegerEndpointConfig, LokiEndpointConfig, OpsConfig, PagerDutyConfig, PostHogConfig,
+    PrometheusEndpointConfig, RabbitMqConfig,
 };
 use crate::tools::a2a_tool::A2aTool;
 use crate::tools::azure_service_bus_tool::{AzureServiceBusTool, AzureServiceBusToolConfig};
@@ -30,6 +30,7 @@ use crate::tools::loki_tool::{LokiEndpoint, LokiTool};
 use crate::tools::monitor_tool::MonitorTool;
 use crate::tools::pagerduty_tool::{PagerDutyTool, PagerDutyToolConfig};
 use crate::tools::postgres_tool::{PostgresInstance, PostgresTool, PostgresToolConfig};
+use crate::tools::posthog_tool::{PostHogTool, PostHogToolConfig};
 use crate::tools::prometheus_tool::{PrometheusEndpoint, PrometheusTool};
 use crate::tools::rabbitmq_tool::{RabbitMqTool, RabbitMqToolConfig};
 use crate::tools::ssh_tool::{SshTool, SshToolConfig, TargetEntry};
@@ -183,6 +184,17 @@ pub async fn create_opsclaw_tools(config: &OpsConfig) -> Result<Vec<Box<dyn Tool
         tools.push(Box::new(CloudflareTool::new(cfg)));
     }
 
+    // PostHog.
+    if let Some(ph) = pools.posthog.as_ref() {
+        let api_key = config
+            .decrypt_secret(&ph.api_key)
+            .await
+            .context("Failed to resolve PostHog api_key")?;
+        let mut cfg = PostHogToolConfig::new(api_key, ph.project_id.clone(), ph.host.clone());
+        cfg.autonomy = ph.autonomy;
+        tools.push(Box::new(PostHogTool::new(cfg)));
+    }
+
     // RabbitMQ.
     if let Some(rmq) = pools.rabbitmq.as_ref() {
         let password = config
@@ -279,6 +291,7 @@ struct GatheredEndpoints<'a> {
     cloudflare: Option<&'a CloudflareConfig>,
     rabbitmq: Option<&'a RabbitMqConfig>,
     azure_service_bus: Option<&'a AzureServiceBusConfig>,
+    posthog: Option<&'a PostHogConfig>,
 }
 
 /// Walk every environment and collect endpoint pools. `Vec<T>` pools merge
@@ -295,6 +308,7 @@ fn gather_endpoints(config: &OpsConfig) -> Result<GatheredEndpoints<'_>> {
     let mut cloudflare_origin: Option<String> = None;
     let mut rabbitmq_origin: Option<String> = None;
     let mut asb_origin: Option<String> = None;
+    let mut posthog_origin: Option<String> = None;
 
     for project in &config.projects {
         for env in &project.environments {
@@ -380,6 +394,13 @@ fn gather_endpoints(config: &OpsConfig) -> Result<GatheredEndpoints<'_>> {
                 &mut asb_origin,
                 &origin,
                 "azure_service_bus",
+            )?;
+            set_singleton(
+                &mut out.posthog,
+                eps.posthog.as_ref(),
+                &mut posthog_origin,
+                &origin,
+                "posthog",
             )?;
         }
     }

@@ -20,9 +20,15 @@ use crate::ops_config::{ConnectionType, EnvironmentConfig, OpsConfig, ProjectCon
 const NEW_SENTINEL: &str = "+ Create new";
 
 /// Pick an existing project by name, or signal that the user wants
-/// to create one inline. Returns `None` for "create new".
+/// to create one inline. Returns `None` for "create new" (or when
+/// the list is empty — in which case we announce that and fall
+/// through to the create-new path).
 fn pick_project_or_new(cfg: &OpsConfig, prompt: &str) -> Result<Option<String>> {
     if cfg.projects.is_empty() {
+        println!(
+            "  {} No projects configured yet — let's create one first.",
+            style("›").cyan()
+        );
         return Ok(None);
     }
     let mut items: Vec<String> = cfg.projects.iter().map(|p| p.name.clone()).collect();
@@ -40,7 +46,8 @@ fn pick_project_or_new(cfg: &OpsConfig, prompt: &str) -> Result<Option<String>> 
 }
 
 /// Pick an existing environment under `project_name`, or signal "create
-/// new". Returns `None` for "create new".
+/// new". Returns `None` for "create new" (or when the list is empty —
+/// in which case we announce that and fall through).
 fn pick_env_or_new(
     cfg: &OpsConfig,
     project_name: &str,
@@ -52,6 +59,10 @@ fn pick_env_or_new(
         .find(|p| p.name == project_name)
         .with_context(|| format!("project '{project_name}' not found"))?;
     if project.environments.is_empty() {
+        println!(
+            "  {} Project '{project_name}' has no environments yet — let's create one.",
+            style("›").cyan()
+        );
         return Ok(None);
     }
     let mut items: Vec<String> = project.environments.iter().map(|e| e.name.clone()).collect();
@@ -95,14 +106,14 @@ fn prompt_new_project(cfg: &mut OpsConfig) -> Result<String> {
     Ok(name)
 }
 
-/// Prompt for an environment name (with sensible default `prod`) and
-/// push a new `EnvironmentConfig` under `project_name`. Does not save.
+/// Prompt for an environment name (with default `default`) and push a
+/// new `EnvironmentConfig` under `project_name`. Does not save.
 fn prompt_new_env(cfg: &mut OpsConfig, project_name: &str) -> Result<String> {
     println!();
     println!("  {}", style("Add Environment").cyan().bold());
     let name: String = Input::new()
         .with_prompt("Environment name")
-        .default("prod".into())
+        .default("default".into())
         .interact_text()?;
     let project = cfg
         .projects

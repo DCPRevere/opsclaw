@@ -159,7 +159,7 @@ pub async fn step_ssh_target() -> Result<TargetResult> {
         .default("~/.ssh/id_rsa".into())
         .interact_text()?;
 
-    let name: String = Input::new().with_prompt("Project name").interact_text()?;
+    let name: String = Input::new().with_prompt("Target name").interact_text()?;
 
     // Test connection
     print_bullet(&format!(
@@ -247,7 +247,7 @@ pub async fn step_ssh_target() -> Result<TargetResult> {
 
 pub fn step_local_target() -> Result<TargetResult> {
     let name: String = Input::new()
-        .with_prompt("Project name")
+        .with_prompt("Target name")
         .default("this-box".into())
         .interact_text()?;
 
@@ -281,7 +281,7 @@ pub fn step_local_target() -> Result<TargetResult> {
 
 pub fn step_kubernetes_target() -> Result<TargetResult> {
     let name: String = Input::new()
-        .with_prompt("Project name")
+        .with_prompt("Target name")
         .default("k8s-cluster".into())
         .interact_text()?;
 
@@ -333,7 +333,7 @@ pub fn step_target_context(target_name: &str) -> Result<Option<String>> {
     println!();
     println!(
         "  {}",
-        style("Optionally describe this project for OpsClaw (things the scan can't infer).").dim()
+        style("Optionally describe this target for OpsClaw (things the scan can't infer).").dim()
     );
     println!(
         "  {}",
@@ -341,7 +341,7 @@ pub fn step_target_context(target_name: &str) -> Result<Option<String>> {
     );
 
     let context_input: String = Input::new()
-        .with_prompt("  Project context (Enter to skip)")
+        .with_prompt("  Target context (Enter to skip)")
         .allow_empty(true)
         .interact_text()?;
 
@@ -381,7 +381,7 @@ pub fn step_autonomy() -> Result<OpsClawAutonomy> {
         "Auto     — fix things automatically (I trust OpsClaw)",
     ];
     let selection = Select::new()
-        .with_prompt("Autonomy level for this project")
+        .with_prompt("Autonomy level for this target")
         .items(items)
         .default(1)
         .interact()?;

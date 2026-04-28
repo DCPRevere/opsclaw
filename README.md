@@ -1,124 +1,183 @@
-<h1 align="center">OpsClaw — Autonomous SRE Agent</h1>
+<pre align="center">
+ ░▒▓██████▓▒░░▒▓███████▓▒░ ░▒▓███████▓▒░░▒▓██████▓▒░░▒▓█▓▒░       ░▒▓██████▓▒░░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░
+░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░
+░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░      ░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░
+░▒▓█▓▒░░▒▓█▓▒░▒▓███████▓▒░ ░▒▓██████▓▒░░▒▓█▓▒░      ░▒▓█▓▒░      ░▒▓████████▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░
+░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░             ░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░
+░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░             ░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░
+ ░▒▓██████▓▒░░▒▓█▓▒░      ░▒▓███████▓▒░ ░▒▓██████▓▒░░▒▓████████▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓█████████████▓▒░
+</pre>
 
 <p align="center">
-  <strong>Monitors your servers and fixes them while you sleep.</strong><br>
-  Built on <a href="https://github.com/zeroclaw-labs/zeroclaw">ZeroClaw</a>. 100% Rust. Single binary.
+  <strong>📟 Autonomous SRE. Watches your servers whilst you sleep.</strong><br>
+  Built on the <a href="https://github.com/zeroclaw-labs/zeroclaw">zeroclaw</a> runtime. 100% Rust. Single binary.
 </p>
 
 <p align="center">
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-edition%202021-orange?logo=rust" alt="Rust Edition 2021" /></a>
-
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-edition%202024-orange?logo=rust" alt="Rust edition 2024" /></a>
   <a href="https://github.com/dcprevere/opsclaw/releases/latest"><img src="https://img.shields.io/badge/opsclaw-v0.6.2-blue" alt="opsclaw v0.6.2" /></a>
 </p>
 
-OpsClaw is an autonomous SRE agent that SSHes into your servers, inspects Kubernetes clusters, runs diagnostics, remembers past incidents, and follows your runbooks — all without waking you up. It uses the [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) runtime for LLM providers, channels, scheduling, and memory, and adds SRE-specific tooling on top.
+opsclaw is an autonomous SRE agent. It SSHes into your servers and Kubernetes clusters, runs diagnostics, escalates real problems, follows your runbooks, and remembers what worked. It runs as a daemon that wakes on a heartbeat, ticks through the work, and pages you only when it actually matters.
 
-## Highlights
+It's a fork of the [zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) runtime — which provides the agent loop, tool dispatch, channels, memory, gateway, and scheduler — with SRE-specific tools and conventions layered on top.
 
-- **SSH access** — connects to hosts via `russh`, runs commands, tails logs, and applies fixes.
-- **Kubernetes native** — inspects pods, deployments, services, and events via the `kube` crate.
-- **Incident memory** — remembers what broke, what fixed it, and how to prevent it next time.
-- **Runbooks** — codified SOPs that the agent follows when it detects known failure modes.
-- **Setup wizard** — guided onboarding to configure targets, credentials, and alerting.
-- **Single binary** — small Rust binary, fast startup, low memory footprint. Runs on a $10 board.
-- **Multi-channel alerts** — reports to Slack, Discord, Telegram, Email, or any ZeroClaw channel.
-- **Autonomy levels** — ReadOnly (observe only), Supervised (act with approval), Full (autonomous within policy).
+## Why
+
+Most monitoring stacks tell you something is wrong and stop there. opsclaw goes further:
+
+- it picks the right diagnostic tool to confirm the alert,
+- it connects observed signals into a hypothesis,
+- it acts within a policy you set, or escalates with a payload that lets a human triage in ten seconds.
+
+You configure once. It runs in the background.
 
 ## Quick start
 
 ```bash
-# Clone and build
-git clone https://github.com/dcprevere/opsclaw.git
-cd opsclaw
+# Build
 cargo build --release --locked
 
-# Run the setup wizard
-cargo run --release -- onboard
+# Set your provider key (interactive — onboard encrypts it at rest)
+./target/release/opsclaw onboard
 
-# Start the agent
-cargo run --release -- daemon
+# Add a project, environment, and first target in one flow
+./target/release/opsclaw config project add
+
+# Confirm setup
+./target/release/opsclaw doctor
+
+# Start the autonomous loop
+./target/release/opsclaw daemon
 ```
 
-### From a release binary
+Need a binary? `./install.sh` after building, or grab a release.
+
+## Glossary
+
+opsclaw uses a three-level hierarchy you'll see throughout the CLI and config:
+
+- **target** — a concrete machine or cluster opsclaw can act on (`ssh`, `local`, or `kubernetes`).
+- **project** — a logical grouping of targets (one app, one service line).
+- **environment** — the blast-radius boundary above project (`prod`, `staging`, `default`).
+
+Every target has an **autonomy level** that controls how much opsclaw acts on its own:
+
+| Level | Behaviour |
+|---|---|
+| `observe` | Read-only. Monitor and report; never act. |
+| `suggest` | Propose fixes; wait for human approval. Default for new targets. |
+| `act_on_known` | Auto-apply runbook remediations; ask for the rest. |
+| `auto` | Act and log everything. For trusted, well-runbooked workloads. |
+
+Escalations go out through `opsclaw_notify` — a structured payload (severity, target, signals, hypothesis, recommendation) routed to whichever channels you configured (Telegram, Slack, PagerDuty, etc).
+
+## How the agent runs
+
+The runtime owns four concurrent subsystems:
+
+- **Heartbeat** — the autonomous loop. Reads tasks from `HEARTBEAT.md`, ticks on an adaptive interval, decides what to run, runs it, and consolidates memory across ticks.
+- **Channels** — inbound messaging and outbound notifications.
+- **Gateway** — HTTP / WebSocket API for webhooks and the dashboard.
+- **Scheduler** — cron-driven jobs.
+
+Workspace files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `MEMORY.md`) under `~/.opsclaw/workspace/` are how the agent persists across restarts. They're injected into the system prompt every session, so the agent wakes up knowing who it is, what it's monitoring, and what it learned last time.
+
+## Tools
+
+opsclaw ships SRE-shaped tools on top of the zeroclaw default set:
+
+- **diagnostic** — `monitor`, `ssh`, `kube`, `systemd`, `docker`, `dns`, `cert`, `firewall`
+- **observability** — `prometheus`, `loki`, `elk`, `jaeger`
+- **provider/infra** — `pagerduty`, `cloudflare`, `github`, `azure_service_bus`, `rabbitmq`, `postgres`
+- **escalation** — `opsclaw_notify`
+- **upstream zeroclaw** — `shell`, `file_read`, `file_write`, `memory_recall`, `memory_store`, `web_search`, `web_fetch`, and friends
+
+## CLI
 
 ```bash
-# Install and onboard
-./install.sh
+# First-run setup (provider, channels, memory, gateway)
 opsclaw onboard
-opsclaw daemon
+
+# Composable hierarchy wizards (any of these chains into the next steps)
+opsclaw config project add        # project → optional env → optional target
+opsclaw config env add            # env under existing project → optional target
+opsclaw config target add         # target under existing project + env
+
+opsclaw config project list
+opsclaw config env list
+opsclaw config target list
+
+# Run things
+opsclaw daemon                    # the autonomous loop
+opsclaw gateway start             # HTTP/WebSocket API + dashboard
+opsclaw agent                     # interactive chat
+opsclaw agent -m "why is vega slow?"
+
+# Inspect state
+opsclaw status                    # daemon + agent status
+opsclaw doctor                    # diagnostics
+opsclaw scan <target>             # one-off discovery scan
+opsclaw memory list               # past incidents and notes
 ```
-
-## Architecture
-
-OpsClaw is a Cargo workspace. The SRE agent lives in `crates/opsclaw`; the rest is upstream ZeroClaw plus a few independent toolkits.
-
-| Area | Crates |
-|------|--------|
-| OpsClaw SRE agent | `crates/opsclaw` — SSH tools, k8s, incident memory, runbooks, setup wizard. |
-| ZeroClaw runtime (upstream) | `crates/zeroclaw-*` — runtime, providers, channels, config, memory, gateway, tools, TUI, and supporting crates. |
-| Independent | `crates/robot-kit`, `crates/aardvark-sys` — robotics/embedded toolkits, unrelated to the SRE agent. |
-
-The `zeroclawlabs` root package is an umbrella facade that re-exports the upstream crates so opsclaw can depend on them by a single name.
 
 ## Configuration
 
-Minimal `~/.zeroclaw/config.toml`:
+opsclaw reads `~/.opsclaw/config.toml`. The file is created and managed by `opsclaw onboard` and the `config` subcommands — most users never edit it by hand.
+
+A minimal hierarchy looks like this:
 
 ```toml
-default_provider = "anthropic"
-api_key = "sk-ant-..."
+[[projects]]
+name = "sacra"
+
+[[projects.environments]]
+name = "prod"
+
+[[projects.environments.targets]]
+name = "vega"
+type = "ssh"
+host = "vega"
+user = "root"
+key_secret = "enc2:..."          # encrypted; reference by name in your store
+autonomy = "suggest"
 ```
 
-OpsClaw inherits ZeroClaw's full configuration system. See the upstream [config reference](docs/reference/api/config-reference.md) for all options.
+Secrets (SSH keys, API tokens) are referenced by name; the values live encrypted at rest and are never written to logs.
 
-### SSH targets
+Override paths and behaviour with environment variables:
 
-Configure hosts the agent can reach in your workspace config or via the setup wizard (`opsclaw onboard`).
+| Var | Purpose |
+|---|---|
+| `OPSCLAW_CONFIG_DIR` | Override config dir (default `~/.opsclaw/`) |
+| `OPSCLAW_GATEWAY_HOST` | Gateway bind address (default `127.0.0.1`) |
+| `OPSCLAW_GATEWAY_PORT` | Gateway bind port |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | Provider credentials |
+| `RUST_LOG` | Log level (default `info`) |
 
-### Kubernetes
+## Architecture
 
-OpsClaw uses your local kubeconfig by default. No extra configuration needed if `kubectl` already works.
+opsclaw is a Cargo workspace. The SRE agent lives in `crates/opsclaw`; the rest is the upstream zeroclaw runtime plus a few independent toolkits.
 
-## CLI commands
+| Area | Crates |
+|---|---|
+| opsclaw SRE agent | `crates/opsclaw` — SSH/k8s/observability tools, hierarchy CLI, daemon hooks, runbooks. |
+| zeroclaw runtime | `crates/zeroclaw-*` — runtime, providers, channels, config, memory, gateway, tools, TUI. |
+| Independent | `crates/robot-kit`, `crates/aardvark-sys` — robotics/embedded toolkits, unrelated to the SRE agent. |
 
-```bash
-# Setup and status
-opsclaw onboard              # Guided setup wizard
-opsclaw status               # Show daemon/agent status
-opsclaw doctor               # Run system diagnostics
-
-# Gateway + daemon
-opsclaw gateway              # Start gateway server
-opsclaw daemon               # Start full autonomous runtime
-
-# Agent
-opsclaw agent                # Interactive chat mode
-opsclaw agent -m "message"   # Single message mode
-
-# Memory
-opsclaw memory list          # List memory entries (including incidents)
-opsclaw memory stats         # Memory statistics
-```
-
-## Autonomy levels
-
-| Level | Behavior |
-|-------|----------|
-| `ReadOnly` | Agent can observe but not act |
-| `Supervised` (default) | Agent acts with approval for medium/high risk operations |
-| `Full` | Agent acts autonomously within policy bounds |
+The `zeroclawlabs` umbrella crate at the workspace root re-exports the upstream crates so dependents can pull them in by a single name.
 
 ## Security
 
-OpsClaw connects to real infrastructure. Treat it seriously.
+opsclaw connects to real infrastructure. Treat it accordingly.
 
-- **Sandboxing** — workspace isolation, path traversal blocking, command allowlists, forbidden paths.
-- **Approval gating** — interactive approval for medium/high risk operations in Supervised mode.
-- **Audit log** — every command that touches a remote system is logged. The log is hash-chained and append-only.
-- **Secrets** — referenced by name in config; values live in the encrypted store. Never written to config files or logs.
+- **Sandboxing** — workspace isolation, path-traversal guards, command allowlists, forbidden paths.
+- **Approval gating** — interactive approval for medium/high-risk operations under `suggest` autonomy.
+- **Audit log** — every remote command is hash-chained and append-only.
+- **Secrets** — referenced by name; values live encrypted at rest, never written to config files or logs.
 - **E-stop** — emergency shutdown capability.
 
-See [SECURITY.md](SECURITY.md) for the full security policy.
+See [SECURITY.md](SECURITY.md) for the full policy.
 
 ## Build and test
 
@@ -129,11 +188,28 @@ cargo build --profile release-fast   # faster local release builds
 cargo test --workspace               # run all tests
 ```
 
-Feature flags gate optional capabilities. Check `Cargo.toml` before assuming a dependency is available.
+Optional capabilities (Prometheus, Matrix, WhatsApp, OpenTelemetry, etc.) are gated behind feature flags. Check `Cargo.toml` before assuming a dependency is available.
+
+For tier-1/2/3 production-readiness testing, see [`docs/testing.md`](docs/testing.md).
 
 ## Upstream
 
-OpsClaw is a fork of [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw). The `crates/zeroclawlabs` crate tracks upstream. SRE-specific logic lives in `crates/opsclaw` to keep the boundary clean and make future upstream pulls straightforward.
+opsclaw tracks [zeroclaw-labs/zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) as `upstream`. We maintain a deliberate fork: branding, paths, env-var names, and a handful of bug fixes (notably the `HOST`/`PORT` env-var collision) live downstream; everything else flows from upstream.
+
+The merge playbook — conflict resolution policy, the dangerous sed patterns to avoid, the abort criteria — lives in [`docs/merging.md`](docs/merging.md).
+
+## Documentation
+
+Full documentation lives under [`docs/`](docs/):
+
+- [`getting-started.md`](docs/getting-started.md) — first install through first scan.
+- [`hierarchy.md`](docs/hierarchy.md), [`projects.md`](docs/projects.md), [`environments.md`](docs/environments.md), [`targets.md`](docs/targets.md) — the configuration model.
+- [`autonomy.md`](docs/autonomy.md) — what the agent will and won't do at each level.
+- [`runbooks.md`](docs/runbooks.md) — codifying remediations the agent can execute.
+- [`channels.md`](docs/channels.md) — wiring up notifications.
+- [`memory.md`](docs/memory.md) — how the agent remembers.
+- [`SECURITY.md`](SECURITY.md) — the threat model and the audit chain.
+- [`merging.md`](docs/merging.md) — pulling from upstream.
 
 ## License
 

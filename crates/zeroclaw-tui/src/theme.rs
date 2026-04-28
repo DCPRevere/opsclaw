@@ -5,11 +5,8 @@ pub const ICY_BLUE: Color = Color::Rgb(100, 200, 255);
 pub const ICY_CYAN: Color = Color::Rgb(140, 230, 255);
 pub const ICY_WHITE: Color = Color::Rgb(220, 240, 255);
 pub const FROST_DIM: Color = Color::Rgb(80, 130, 170);
-pub const FROST_BG: Color = Color::Rgb(10, 15, 30);
 pub const CRAB_ACCENT: Color = Color::Rgb(255, 100, 80);
-pub const SUCCESS_GREEN: Color = Color::Rgb(80, 220, 120);
 pub const WARN_YELLOW: Color = Color::Rgb(255, 220, 80);
-pub const ERR_RED: Color = Color::Rgb(255, 80, 80);
 pub const SELECTION_BG: Color = Color::Rgb(30, 60, 100);
 
 pub fn title_style() -> Style {

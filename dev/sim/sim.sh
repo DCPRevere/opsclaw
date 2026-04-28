@@ -139,6 +139,15 @@ send_method = "POST"
 webhook_url = "http://127.0.0.1:$WEBHOOK_PORT/alerts"
 min_severity = "warning"
 
+# Capture every tool call, model reply, and turn boundary as JSONL so
+# you can replay the agent's decisions after a sim run.
+# `tail -f $STATEDIR/runtime-trace.jsonl` to watch live.
+[observability]
+backend = "log"
+runtime_trace_mode = "rolling"
+runtime_trace_max_entries = 5000
+runtime_trace_path = "$STATEDIR/runtime-trace.jsonl"
+
 [[targets]]
 name = "sim-target"
 type = "ssh"

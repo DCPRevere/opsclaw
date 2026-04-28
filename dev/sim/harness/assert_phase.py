@@ -93,6 +93,31 @@ def check_notify_payload(alert: dict[str, Any], spec: dict[str, Any]) -> list[st
     return failures
 
 
+def load_trace_summary(path: Path | None) -> dict[str, Any]:
+    """Tally event types from the runtime trace JSONL for diagnostic
+    output. Each line is a `RuntimeTraceEvent` from upstream zeroclaw."""
+    if not path or not path.exists():
+        return {"present": False}
+    by_type: dict[str, int] = {}
+    tools: dict[str, int] = {}
+    total = 0
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        total += 1
+        et = str(ev.get("event_type", "?"))
+        by_type[et] = by_type.get(et, 0) + 1
+        if et == "tool_call":
+            tool = str(ev.get("payload", {}).get("tool", "?"))
+            tools[tool] = tools.get(tool, 0) + 1
+    return {"present": True, "total": total, "by_type": by_type, "tools": tools}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("expected_path", type=Path)
@@ -103,6 +128,14 @@ def main() -> int:
         type=int,
         default=0,
         help="Alerts already seen before this phase; used for dedup/disarm.",
+    )
+    ap.add_argument(
+        "--trace",
+        type=Path,
+        default=None,
+        help="Path to the runtime-trace.jsonl emitted by the daemon. "
+             "When present, a tally of event types is included in the verdict "
+             "for post-mortem diagnostics.",
     )
     args = ap.parse_args()
 
@@ -168,14 +201,16 @@ def main() -> int:
         return 2
 
     verdict = "FAIL" if failures else "PASS"
-    _emit(
-        {
-            "phase": args.phase,
-            "verdict": verdict,
-            "new_alerts": len(new_alerts),
-            "failures": failures,
-        }
-    )
+    out: dict[str, Any] = {
+        "phase": args.phase,
+        "verdict": verdict,
+        "new_alerts": len(new_alerts),
+        "failures": failures,
+    }
+    trace_summary = load_trace_summary(args.trace)
+    if trace_summary.get("present"):
+        out["trace"] = trace_summary
+    _emit(out)
     return 0 if verdict == "PASS" else 1
 
 

@@ -79,10 +79,13 @@ print(n)
 }
 
 assert_phase() {
-    local scenario_dir="$1" phase="$2" baseline="$3" req="$4"
+    local scenario_dir="$1" phase="$2" baseline="$3" req="$4" trace="$5"
+    local trace_arg=()
+    [ -n "$trace" ] && [ -f "$trace" ] && trace_arg=(--trace "$trace")
     python3 "$ASSERT" \
         "$scenario_dir/expected.json" "$req" "$phase" \
-        --baseline-count "$baseline"
+        --baseline-count "$baseline" \
+        "${trace_arg[@]}"
 }
 
 expected_int() {
@@ -105,6 +108,7 @@ run_scenario() {
     local name="$1" slot="$2"
     local sd; sd=$("$SLOT_SH" state-dir "$slot")
     local req="$sd/requests.jsonl"
+    local trace="$sd/runtime-trace.jsonl"
     local scenario_dir="$SIMDIR/scenarios/$name"
 
     log "[$name] slot=$slot starting"
@@ -130,7 +134,7 @@ run_scenario() {
             sleep 1
         done
         local j
-        j=$(assert_phase "$scenario_dir" phase_arm "$baseline_before" "$req")
+        j=$(assert_phase "$scenario_dir" phase_arm "$baseline_before" "$req" "$trace")
         local rc=$?
         verdicts+=("\"arm\":$j")
         [ $rc -ne 0 ] && scenario_pass=false
@@ -143,7 +147,7 @@ run_scenario() {
         local baseline_after_arm; baseline_after_arm=$(count_alerts "$req")
         sleep "$dedup_wait"
         local j
-        j=$(assert_phase "$scenario_dir" phase_dedup "$baseline_after_arm" "$req")
+        j=$(assert_phase "$scenario_dir" phase_dedup "$baseline_after_arm" "$req" "$trace")
         local rc=$?
         verdicts+=("\"dedup\":$j")
         [ $rc -ne 0 ] && scenario_pass=false
@@ -159,7 +163,7 @@ run_scenario() {
         fi
         sleep "$disarm_window"
         local j
-        j=$(assert_phase "$scenario_dir" phase_disarm "$baseline_after_dedup" "$req")
+        j=$(assert_phase "$scenario_dir" phase_disarm "$baseline_after_dedup" "$req" "$trace")
         local rc=$?
         verdicts+=("\"disarm\":$j")
         [ $rc -ne 0 ] && scenario_pass=false

@@ -74,8 +74,13 @@ cmd_up() {
     local sink_name="opsclaw-sim-sink-$n"
     local sd; sd=$(state_dir "$n")
 
-    if [ -z "${OPENAI_API_KEY:-}" ]; then
-        echo "OPENAI_API_KEY not set (dev/sim/.env or export)" >&2
+    # When OPSCLAW_REPLAY_LLM_URL is set, the daemon talks to the local
+    # replay-llm scaffold (dev/sim/replay-llm/server.py) instead of
+    # OpenAI. The API key check is then optional — the replay server
+    # ignores it. See dev/sim/replay-llm/README.md for status.
+    if [ -z "${OPSCLAW_REPLAY_LLM_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+        echo "OPENAI_API_KEY not set (dev/sim/.env or export); " \
+             "or set OPSCLAW_REPLAY_LLM_URL to use the local replay LLM" >&2
         return 1
     fi
 
@@ -132,6 +137,10 @@ cmd_up() {
 
     # Config — same shape as sim.sh, but slot-specific ports + paths.
     local key_content; key_content=$(cat "$ssh_key")
+    local provider_extra=""
+    if [ -n "${OPSCLAW_REPLAY_LLM_URL:-}" ]; then
+        provider_extra="base_url = \"$OPSCLAW_REPLAY_LLM_URL\""
+    fi
     cat > "$sd/.opsclaw/config.toml" <<TOML
 schema_version = 2
 
@@ -154,6 +163,7 @@ fallback = "openai"
 [providers.models.openai]
 name = "openai"
 model = "gpt-5.4"
+$provider_extra
 
 [channels.webhook]
 enabled = true
@@ -164,6 +174,14 @@ send_method = "POST"
 [notifications]
 webhook_url = "http://127.0.0.1:$webhook_port/alerts"
 min_severity = "warning"
+
+[observability]
+backend = "log"
+# Tier 2 reads this JSONL stream for richer assertions (tool calls,
+# model replies, turn boundaries) — beyond what the webhook sink sees.
+runtime_trace_mode = "rolling"
+runtime_trace_max_entries = 5000
+runtime_trace_path = "$sd/runtime-trace.jsonl"
 
 [[targets]]
 name = "sim-target"

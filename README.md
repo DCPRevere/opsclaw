@@ -112,7 +112,7 @@ opsclaw config target list
 opsclaw daemon                    # the autonomous loop
 opsclaw gateway start             # HTTP/WebSocket API + dashboard
 opsclaw agent                     # interactive chat
-opsclaw agent -m "why is vega slow?"
+opsclaw agent -m "why is web-1 slow?"
 
 # Inspect state
 opsclaw status                    # daemon + agent status
@@ -129,15 +129,15 @@ A minimal hierarchy looks like this:
 
 ```toml
 [[projects]]
-name = "sacra"
+name = "acme"
 
 [[projects.environments]]
 name = "prod"
 
 [[projects.environments.targets]]
-name = "vega"
+name = "web-1"
 type = "ssh"
-host = "vega"
+host = "web-1.example.com"
 user = "root"
 key_secret = "enc2:..."          # encrypted; reference by name in your store
 autonomy = "suggest"

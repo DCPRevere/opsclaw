@@ -301,11 +301,89 @@ impl OpsConfig {
             }
         }
 
+        // Encrypt secret fields under projects[*].environments[*].endpoints.
+        // The legacy flat-targets pass above doesn't walk the hierarchy, so
+        // every endpoint pool — pagerduty.api_key, github.token,
+        // cloudflare.api_token, rabbitmq.password, azure_service_bus.*,
+        // posthog.api_key, prometheus[*].bearer_token, loki[*].bearer_token,
+        // elk[*].password / .api_key — needs encrypting here.
+        {
+            let store = zeroclaw::security::SecretStore::new(
+                config_path.parent().context("config path has no parent")?,
+                self.inner.secrets.encrypt,
+            );
+            for project in &mut to_save.projects {
+                for env in &mut project.environments {
+                    let eps = &mut env.endpoints;
+                    if let Some(list) = eps.prometheus.as_mut() {
+                        for e in list.iter_mut() {
+                            encrypt_in_place(&mut e.bearer_token, &store)?;
+                        }
+                    }
+                    if let Some(list) = eps.loki.as_mut() {
+                        for e in list.iter_mut() {
+                            encrypt_in_place(&mut e.bearer_token, &store)?;
+                        }
+                    }
+                    if let Some(list) = eps.elk.as_mut() {
+                        for e in list.iter_mut() {
+                            encrypt_in_place(&mut e.password, &store)?;
+                            encrypt_in_place(&mut e.api_key, &store)?;
+                        }
+                    }
+                    if let Some(pd) = eps.pagerduty.as_mut()
+                        && !crate::secrets::is_reference(&pd.api_key)
+                    {
+                        pd.api_key = store.encrypt(&pd.api_key)?;
+                    }
+                    if let Some(gh) = eps.github.as_mut()
+                        && !crate::secrets::is_reference(&gh.token)
+                    {
+                        gh.token = store.encrypt(&gh.token)?;
+                    }
+                    if let Some(cf) = eps.cloudflare.as_mut()
+                        && !crate::secrets::is_reference(&cf.api_token)
+                    {
+                        cf.api_token = store.encrypt(&cf.api_token)?;
+                    }
+                    if let Some(rmq) = eps.rabbitmq.as_mut()
+                        && !crate::secrets::is_reference(&rmq.password)
+                    {
+                        rmq.password = store.encrypt(&rmq.password)?;
+                    }
+                    if let Some(asb) = eps.azure_service_bus.as_mut()
+                        && !crate::secrets::is_reference(&asb.sas_key)
+                    {
+                        asb.sas_key = store.encrypt(&asb.sas_key)?;
+                    }
+                    if let Some(ph) = eps.posthog.as_mut()
+                        && !crate::secrets::is_reference(&ph.api_key)
+                    {
+                        ph.api_key = store.encrypt(&ph.api_key)?;
+                    }
+                }
+            }
+        }
+
         let toml_str = toml::to_string_pretty(&to_save).context("Failed to serialize OpsConfig")?;
         tokio::fs::write(config_path, toml_str)
             .await
             .with_context(|| format!("Failed to write config to {}", config_path.display()))
     }
+}
+
+/// Encrypt an `Option<String>` secret in place, skipping when it's already
+/// a reference (`enc2:` / `env:` / `k8s:`) or absent.
+fn encrypt_in_place(
+    slot: &mut Option<String>,
+    store: &zeroclaw::security::SecretStore,
+) -> Result<()> {
+    if let Some(val) = slot.as_ref()
+        && !crate::secrets::is_reference(val)
+    {
+        *slot = Some(store.encrypt(val)?);
+    }
+    Ok(())
 }
 
 /// Three user-facing modes: `dry-run`, `approve`, `auto`.

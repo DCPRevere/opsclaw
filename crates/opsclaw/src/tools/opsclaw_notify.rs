@@ -51,7 +51,11 @@ impl Tool for OpsClawNotifyTool {
          summary (one-line), severity (info|warning|critical), category \
          (e.g. HighMemory, DiskFull, ServiceStopped, PortClosed, \
          ContainerDown, Unreachable). Optional: details (multi-line \
-         context), target (which project the alert is about)."
+         context), target (which project the alert is about), links \
+         (array of {name,url} for handoff: e.g. a PostHog session replay \
+         URL when a user-reported issue triggered this, a Grafana panel \
+         that shows the spike, a recent commit URL — anything the human \
+         on the other end can click to triage faster)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -78,6 +82,18 @@ impl Tool for OpsClawNotifyTool {
                 "target": {
                     "type": "string",
                     "description": "Project name the alert is about"
+                },
+                "links": {
+                    "type": "array",
+                    "description": "Handoff URLs: session replays, dashboards, commits — each {name, url}",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "url":  {"type": "string"}
+                        },
+                        "required": ["name", "url"]
+                    }
                 }
             },
             "required": ["summary", "severity", "category"]
@@ -143,6 +159,25 @@ impl Tool for OpsClawNotifyTool {
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
+        // links is a passthrough — only well-formed {name, url} entries
+        // make it into the payload. Anything else is silently dropped.
+        let links: Vec<Value> = args
+            .get("links")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|entry| {
+                        let name = entry.get("name").and_then(|v| v.as_str())?;
+                        let url = entry.get("url").and_then(|v| v.as_str())?;
+                        if name.is_empty() || url.is_empty() {
+                            return None;
+                        }
+                        Some(json!({"name": name, "url": url}))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let payload = json!({
             "type": "opsclaw.alert",
             "summary": summary,
@@ -150,6 +185,7 @@ impl Tool for OpsClawNotifyTool {
             "category": category,
             "details": details,
             "target": target,
+            "links": links,
             // Cheap client-side timestamp; the sink also records its own.
             "sent_at": chrono::Utc::now().to_rfc3339(),
         });

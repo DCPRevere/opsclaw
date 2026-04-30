@@ -67,15 +67,31 @@ Common optional args:
 ## Safety
 
 - **Read-only in v1.** No flag toggles, no event ingestion, no writes.
+- **HogQL escape hatch is SELECT/WITH only.** Anything starting with `INSERT`/`UPDATE`/`DELETE`/`DROP`/`ALTER`/`TRUNCATE`/etc. is rejected before it reaches PostHog. Comments are stripped before the check.
 - **Audited** — every call writes to the opsclaw audit log.
 - **Output capped** at 16 KiB; large queries are truncated with a `[truncated]` marker.
 - **Limit clamp** caps result rows at 5000 even if the agent asks for more, to keep PostHog API costs bounded.
+- **`api_key` is encrypted at rest.** Plaintext values in `config.toml` are encrypted on the next `cfg.save()` (the wizard saves after every change). Resolve via `enc2:` / `env:` / `k8s:` references for live deployments.
+
+## Doctor
+
+`opsclaw doctor` probes each configured PostHog endpoint with an authenticated `GET /feature_flags`. Surfaces three failure modes distinctly:
+
+- `401 Unauthorized` — the api_key is wrong.
+- `404 Not Found` — the project_id doesn't exist on this host.
+- transport error — the host is unreachable.
+
+## Escalation handoff
+
+When the agent calls `opsclaw_notify`, it can include a `links` array. PostHog session replay URLs are the canonical use case: agent looks up `session_replay_url` for the affected user, then passes the URL to `opsclaw_notify` as a link. Human triages from the replay in the alert payload.
 
 ## Roadmap
 
 v2 candidates, when there's a real use case:
 
-- **Webhook ingress** — let PostHog alerts/flag-change events POST to opsclaw's gateway, kick off an agent run with the alert as starting context.
+- **Webhook ingress** — let PostHog alerts/flag-change events POST to opsclaw's gateway, kick off an agent run with the alert as starting context. The biggest v2 lift; needs gateway routing.
 - **Funnel queries** — by funnel id.
 - **`correlate`** — composite "in this time window, here's what flags changed and which events spiked," so the agent doesn't have to compose three calls itself.
 - **Write actions** — kill a flag, after autonomy gating. High blast radius; needs careful design.
+- **CLI wizard step** — `opsclaw config target add` doesn't yet offer to configure PostHog. For now, hand-edit `config.toml` after the wizard exits.
+- **Live test against PostHog** — every action is wiremock-backed; the first real-API call may surface a field-mapping issue worth fixing.

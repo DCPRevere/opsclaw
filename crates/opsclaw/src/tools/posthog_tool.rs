@@ -116,12 +116,18 @@ impl Tool for PostHogTool {
     }
 
     fn description(&self) -> &str {
-        "PostHog tool. Read-only product-analytics queries to enrich an SRE \
-         alert with user-facing signal: event spikes, recent feature-flag \
-         rollouts, per-user activity, session replays. Actions: \
-         query_events, recent_flag_changes, flag_status, events_for_user, \
-         session_replay_url, hogql. Use when an alert points at user-facing \
-         behaviour and the infra-side tools (logs/traces) don't explain it."
+        "Query PostHog for user-facing signal that explains an SRE alert. \
+         Read-only. Reach for this when:\n\
+         - the alert is about a user flow ('checkout 5xx up', 'signup errors') \
+           and you need to confirm scope ('how many users hit this in the last hour?');\n\
+         - infra metrics moved with no obvious cause and you want to check whether \
+           a feature flag rolled out in the same window;\n\
+         - a customer reported a bug and you need their session replay or recent \
+           events to hand to a human;\n\
+         - you're correlating a deploy with a behaviour change.\n\
+         Actions: query_events, recent_flag_changes, flag_status, \
+         events_for_user, session_replay_url, hogql. Output is capped at \
+         16 KiB; row limits are clamped at 5000."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -458,11 +464,21 @@ impl PostHogTool {
 
     /// Run a raw HogQL query. Power-user escape hatch; the agent should
     /// reach for the structured actions first.
+    ///
+    /// Guarded: only SELECT/WITH queries are accepted. PostHog's HogQL is
+    /// read-only by design today, but the guard keeps us safe against future
+    /// surface expansion (e.g. INSERT INTO events) and against accidental
+    /// foot-guns from the agent.
     async fn hogql_query(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let query = match args.get("query").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => return Ok(err("missing 'query'")),
         };
+        if let Err(reason) = ensure_select_only(&query) {
+            return Ok(err(format!(
+                "hogql query rejected: {reason}. Only SELECT/WITH queries are allowed."
+            )));
+        }
         let result = self.run_hogql(&query).await?;
         let pretty = serde_json::to_string_pretty(&result).unwrap_or_default();
         Ok(ok_res(pretty))
@@ -546,6 +562,75 @@ fn clamp_limit(args: &Value) -> u64 {
 /// structured actions.
 fn escape_sql(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+/// Enforce that a HogQL query is read-only. Strips comments, lowercases,
+/// then checks the first non-whitespace token is `select` or `with`, and
+/// that no DML/DDL keyword appears as a standalone token elsewhere.
+///
+/// PostHog's HogQL is read-only by design today, but this guard means we
+/// don't have to revisit it if that ever changes. False positives are
+/// possible on contrived strings (e.g. a column literally named `delete`)
+/// but the structured actions cover the common cases — `hogql` is the
+/// power-user escape hatch and a strict guard is appropriate.
+fn ensure_select_only(query: &str) -> Result<(), &'static str> {
+    let lower = strip_sql_comments(query).to_ascii_lowercase();
+    let trimmed = lower.trim();
+    if trimmed.is_empty() {
+        return Err("empty query");
+    }
+    let first_token = trimmed
+        .split(|c: char| c.is_whitespace() || c == '(')
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
+    if !matches!(first_token, "select" | "with") {
+        return Err("query must start with SELECT or WITH");
+    }
+    const FORBIDDEN: &[&str] = &[
+        "insert", "update", "delete", "drop", "alter", "truncate", "create", "replace", "grant",
+        "revoke", "attach", "detach", "rename", "optimize",
+    ];
+    for word in FORBIDDEN {
+        // Word-boundary scan: needle must be surrounded by non-word chars.
+        let needle = format!(" {word} ");
+        let padded = format!(" {trimmed} ");
+        if padded.contains(&needle) {
+            return Err("contains forbidden DML/DDL keyword");
+        }
+    }
+    Ok(())
+}
+
+fn strip_sql_comments(s: &str) -> String {
+    // Drop everything from `--` to end-of-line and `/* ... */` blocks. Naive
+    // but adequate for a guard — the worst case is we leave a comment in,
+    // which only widens what we accept (still read-only).
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '-' if chars.peek() == Some(&'-') => {
+                while let Some(&n) = chars.peek() {
+                    chars.next();
+                    if n == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                while let Some(n) = chars.next() {
+                    if n == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn indent(s: &str, n: usize) -> String {
@@ -773,5 +858,45 @@ mod tests {
         assert_eq!(clamp_limit(&json!({"limit": 50})), 50);
         assert_eq!(clamp_limit(&json!({"limit": 99999})), MAX_LIMIT);
         assert_eq!(clamp_limit(&json!({"limit": 0})), 1);
+    }
+
+    #[test]
+    fn ensure_select_only_accepts_select_and_with() {
+        assert!(ensure_select_only("SELECT count() FROM events").is_ok());
+        assert!(ensure_select_only("  select * from events limit 10").is_ok());
+        assert!(ensure_select_only("WITH x AS (SELECT 1) SELECT x").is_ok());
+        // Comments don't trip the parser.
+        assert!(ensure_select_only("-- harmless\nSELECT 1").is_ok());
+        assert!(ensure_select_only("/* block */ SELECT 1").is_ok());
+    }
+
+    #[test]
+    fn ensure_select_only_rejects_dml_and_ddl() {
+        assert!(ensure_select_only("DELETE FROM events").is_err());
+        assert!(ensure_select_only("INSERT INTO events VALUES (1)").is_err());
+        assert!(ensure_select_only("DROP TABLE events").is_err());
+        assert!(ensure_select_only("UPDATE events SET x = 1").is_err());
+        assert!(ensure_select_only("TRUNCATE events").is_err());
+        assert!(ensure_select_only("").is_err());
+        assert!(ensure_select_only("   ").is_err());
+        // Embedded keyword in a SELECT — guard catches it. False positive is
+        // acceptable for the escape hatch; structured actions cover the
+        // common cases.
+        assert!(ensure_select_only("SELECT 1; DROP TABLE events").is_err());
+    }
+
+    #[tokio::test]
+    async fn hogql_action_rejects_non_select() {
+        let server = MockServer::start().await;
+        let tool = tool_for(&server);
+        let out = tool
+            .execute(json!({
+                "action": "hogql",
+                "query": "DELETE FROM events"
+            }))
+            .await
+            .unwrap();
+        assert!(!out.success);
+        assert!(out.error.unwrap().contains("rejected"));
     }
 }

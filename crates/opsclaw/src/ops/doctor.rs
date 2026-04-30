@@ -90,6 +90,7 @@ pub async fn diagnose(config: &OpsConfig) -> DoctorReport {
     check_disk_space(config, &mut results);
     check_data_directories(config, &mut results);
     check_data_sources(config, &mut results).await;
+    check_posthog(config, &mut results).await;
 
     let ok = results
         .iter()
@@ -619,6 +620,97 @@ async fn check_data_sources(config: &OpsConfig, results: &mut Vec<CheckResult>) 
                 results,
             )
             .await;
+        }
+    }
+}
+
+/// Probe each project::env's PostHog endpoint, if configured. A successful
+/// authenticated GET on `feature_flags` confirms host reachability, project
+/// id, and api_key in one call.
+async fn check_posthog(config: &OpsConfig, results: &mut Vec<CheckResult>) {
+    let cat = "posthog";
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            results.push(CheckResult::error(
+                cat,
+                format!("could not create HTTP client: {e}"),
+            ));
+            return;
+        }
+    };
+
+    for project in &config.projects {
+        for env in &project.environments {
+            let Some(ph) = env.endpoints.posthog.as_ref() else {
+                continue;
+            };
+            let origin = format!("{}::{}", project.name, env.name);
+            let api_key = match config.decrypt_secret(&ph.api_key).await {
+                Ok(k) => k,
+                Err(e) => {
+                    results.push(CheckResult::error(
+                        cat,
+                        format!("{origin}: failed to resolve api_key: {e}"),
+                    ));
+                    continue;
+                }
+            };
+            let url = format!(
+                "{}/api/projects/{}/feature_flags",
+                ph.host.trim_end_matches('/'),
+                ph.project_id
+            );
+            match client
+                .get(&url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    results.push(CheckResult::ok(
+                        cat,
+                        format!(
+                            "{origin}: PostHog reachable at {} (project {})",
+                            ph.host, ph.project_id
+                        ),
+                    ));
+                }
+                Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                    results.push(CheckResult::error(
+                        cat,
+                        format!("{origin}: PostHog rejected api_key (401 Unauthorized)"),
+                    ));
+                }
+                Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+                    results.push(CheckResult::error(
+                        cat,
+                        format!(
+                            "{origin}: PostHog returned 404 — project_id={} likely wrong",
+                            ph.project_id
+                        ),
+                    ));
+                }
+                Ok(resp) => {
+                    results.push(CheckResult::warn(
+                        cat,
+                        format!(
+                            "{origin}: PostHog returned HTTP {} from {}",
+                            resp.status(),
+                            ph.host
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    results.push(CheckResult::error(
+                        cat,
+                        format!("{origin}: PostHog at {} unreachable: {e}", ph.host),
+                    ));
+                }
+            }
         }
     }
 }

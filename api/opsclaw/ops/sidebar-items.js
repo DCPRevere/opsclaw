@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["approval","approval_channel","approval_channels","data_sources","doctor","probes","setup","wizard"]};

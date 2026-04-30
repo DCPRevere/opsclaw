@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CORRELATION_WINDOW_SECS","DEFAULT_WINDOW_HOURS"],"fn":["correlate_commits","fetch_git_deploy_snapshot","fetch_recent_commits","format_as_markdown","parse_git_date","parse_git_log_output"],"struct":["DeployCorrelation","GitDeploySnapshot","RecentCommit"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_ROW_LIMIT","DEFAULT_STATEMENT_TIMEOUT_MS","MAX_OUTPUT_BYTES","MAX_ROW_LIMIT"],"fn":["_unused_fromsql","build_maintenance_sql","connect","is_read_only_sql","is_safe_table_ident","pg_err","pg_ok","render_rows","render_value","run_query","strip_leading_comments"],"struct":["PostgresInstance","PostgresTool","PostgresToolConfig"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_LIMIT","DEFAULT_SINCE","MAX_LIMIT","MAX_OUTPUT_BYTES"],"fn":["action_detail","clamp_limit","consume","ensure_select_only","err","escape_sql","indent","ok_res","since_or_default","snippet","strip_sql_comments","until_or_default"],"struct":["PostHogTool","PostHogToolConfig"]};

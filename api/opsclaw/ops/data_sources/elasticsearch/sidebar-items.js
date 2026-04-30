@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_HITS"],"fn":["apply_auth","build_query","fetch_error_logs","map_es_level"],"struct":["Hit","HitSource","HitsEnvelope","SearchResponse"]};

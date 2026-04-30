@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_OUTPUT_BYTES"],"fn":["format_metric","matrix_stats","render_prom_result","truncate"],"struct":["PrometheusEndpoint","PrometheusTool"]};

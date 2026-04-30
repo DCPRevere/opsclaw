@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["A2A_TASK_NOT_FOUND","A2A_UNAUTHORIZED","JSONRPC_INTERNAL_ERROR","JSONRPC_INVALID_PARAMS","JSONRPC_INVALID_REQUEST","JSONRPC_METHOD_NOT_FOUND","JSONRPC_PARSE_ERROR"],"enum":["TaskStatus"],"struct":["A2aError","A2aRequest","A2aResponse","AgentAuth","AgentCard","AgentSkill","Artifact","Task"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TIMEOUT_SECS"],"enum":["DnsRecord"],"fn":["build_resolver","do_lookup","do_tcp_probe","reverse_name"],"struct":["DnsTool"],"type":["TokioResolver"]};

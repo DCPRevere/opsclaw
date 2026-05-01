@@ -13,7 +13,7 @@
 </div>
 
 <p align="center">
-  <strong>An SRE agent that runs as a daemon.</strong><br>
+  <strong>📟 An autonomous SRE agent. SSHes, diagnoses, escalates.</strong><br>
   Built on the <a href="https://github.com/zeroclaw-labs/zeroclaw">zeroclaw</a> runtime. Rust. Single binary.
 </p>
 

@@ -13,8 +13,8 @@
 </div>
 
 <p align="center">
-  <strong>📟 Autonomous SRE. Watches your servers whilst you sleep.</strong><br>
-  Built on the <a href="https://github.com/zeroclaw-labs/zeroclaw">zeroclaw</a> runtime. 100% Rust. Single binary.
+  <strong>An SRE agent that runs as a daemon.</strong><br>
+  Built on the <a href="https://github.com/zeroclaw-labs/zeroclaw">zeroclaw</a> runtime. Rust. Single binary.
 </p>
 
 <p align="center">
@@ -22,19 +22,17 @@
   <a href="https://github.com/dcprevere/opsclaw/releases/latest"><img src="https://img.shields.io/badge/opsclaw-v0.6.2-blue" alt="opsclaw v0.6.2" /></a>
 </p>
 
-opsclaw is an autonomous SRE agent. It SSHes into your servers and Kubernetes clusters, runs diagnostics, escalates real problems, follows your runbooks, and remembers what worked. It runs as a daemon that wakes on a heartbeat, ticks through the work, and pages you only when it actually matters.
+opsclaw is an SRE agent. It connects to servers and Kubernetes clusters over SSH or `kubeconfig`, runs diagnostics, follows runbooks, escalates incidents, and persists state across runs. It runs as a daemon and notifies through configured channels.
 
-It's a fork of the [zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) runtime — which provides the agent loop, tool dispatch, channels, memory, gateway, and scheduler — with SRE-specific tools and conventions layered on top.
+It is a fork of [zeroclaw](https://github.com/zeroclaw-labs/zeroclaw), which provides the agent loop, tool dispatch, channels, memory, gateway, and scheduler. SRE-specific tools and conventions are layered on top.
 
-## Why
+## What it does
 
-Most monitoring stacks tell you something is wrong and stop there. opsclaw goes further:
+On alert or heartbeat:
 
-- it picks the right diagnostic tool to confirm the alert,
-- it connects observed signals into a hypothesis,
-- it acts within a policy you set, or escalates with a payload that lets a human triage in ten seconds.
-
-You configure once. It runs in the background.
+- selects a diagnostic tool to confirm the signal
+- correlates observations into a hypothesis
+- acts within configured policy, or escalates with a structured payload
 
 ## Quick start
 
@@ -85,7 +83,7 @@ The runtime owns four concurrent subsystems:
 - **Gateway** — HTTP / WebSocket API for webhooks and the dashboard.
 - **Scheduler** — cron-driven jobs.
 
-Workspace files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `MEMORY.md`) under `~/.opsclaw/workspace/` are how the agent persists across restarts. They're injected into the system prompt every session, so the agent wakes up knowing who it is, what it's monitoring, and what it learned last time.
+Workspace files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `MEMORY.md`) under `~/.opsclaw/workspace/` persist agent state across restarts. They are injected into the system prompt at the start of each session.
 
 ## Tools
 
@@ -95,7 +93,7 @@ opsclaw ships SRE-shaped tools on top of the zeroclaw default set:
 - **observability** — `prometheus`, `loki`, `elk`, `jaeger`
 - **provider/infra** — `pagerduty`, `cloudflare`, `github`, `azure_service_bus`, `rabbitmq`, `postgres`, `posthog`
 - **escalation** — `opsclaw_notify`
-- **upstream zeroclaw** — `shell`, `file_read`, `file_write`, `memory_recall`, `memory_store`, `web_search`, `web_fetch`, and friends
+- **upstream zeroclaw** — `shell`, `file_read`, `file_write`, `memory_recall`, `memory_store`, `web_search`, `web_fetch`
 
 ## CLI
 
@@ -234,7 +232,7 @@ For tier-1/2/3 production-readiness testing, see [`docs/testing.md`](docs/testin
 
 ## Upstream
 
-opsclaw tracks [zeroclaw-labs/zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) as `upstream` for the agent runtime, providers, channels, memory, and gateway. The SRE-specific surface — the SSH/k8s/observability tools, the project/env/target hierarchy, the configuration wizards, the daemon hooks — lives in its own crate at `crates/opsclaw`, kept deliberately separate so upstream improvements continue to flow through.
+opsclaw tracks [zeroclaw-labs/zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) as `upstream` for the agent runtime, providers, channels, memory, and gateway. SRE-specific code (SSH/k8s/observability tools, the project/env/target hierarchy, configuration wizards, daemon hooks) lives in `crates/opsclaw` so upstream changes can be merged cleanly.
 
 ## Documentation
 

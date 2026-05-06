@@ -4,14 +4,15 @@ import Sidebar from '@/components/layout/Sidebar';
 import Header from '@/components/layout/Header';
 import { ErrorBoundary } from '@/App';
 
-const SIDEBAR_COLLAPSED_KEY = 'zeroclaw-sidebar-collapsed';
+const SIDEBAR_COLLAPSED_KEY = 'opsclaw-sidebar-collapsed';
+const LEGACY_SIDEBAR_COLLAPSED_KEY = 'zeroclaw-sidebar-collapsed';
 
 export default function Layout() {
   const { pathname } = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
     try {
-      return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
+      return (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) ?? localStorage.getItem(LEGACY_SIDEBAR_COLLAPSED_KEY)) === 'true';
     } catch {
       return false;
     }

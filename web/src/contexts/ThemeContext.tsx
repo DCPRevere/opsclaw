@@ -87,10 +87,11 @@ function loadMonoFont(font: string) {
 
 // ── Locale storage (was localeStorage.ts) ────────────────────────────────────
 
-export const LOCALE_STORAGE_KEY = 'zeroclaw-locale';
+export const LOCALE_STORAGE_KEY = 'opsclaw-locale';
+const LEGACY_LOCALE_STORAGE_KEY = 'zeroclaw-locale';
 
 export function loadLocale(): string {
-  return localStorage.getItem(LOCALE_STORAGE_KEY) ?? 'en';
+  return localStorage.getItem(LOCALE_STORAGE_KEY) ?? localStorage.getItem(LEGACY_LOCALE_STORAGE_KEY) ?? 'en';
 }
 
 export function saveLocale(locale: string) {
@@ -99,7 +100,8 @@ export function saveLocale(locale: string) {
 
 // ── Theme storage (was themeStorage.ts) ──────────────────────────────────────
 
-const STORAGE_KEY = 'zeroclaw-theme';
+const STORAGE_KEY = 'opsclaw-theme';
+const LEGACY_STORAGE_KEY = 'zeroclaw-theme';
 
 interface StoredTheme {
   theme: ThemeMode;
@@ -134,7 +136,7 @@ function migrateThemeToColorTheme(themeMode: ThemeMode): ColorThemeId {
 
 function loadStored(): StoredTheme {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       const themeValid = validThemes.includes(parsed.theme);

@@ -2,7 +2,8 @@ import type { SessionMessageRow } from '@/types/api';
 import { generateUUID } from '@/lib/uuid';
 
 const MAX_MESSAGES = 100;
-const PREFIX = 'zeroclaw_chat_history_v1:';
+const PREFIX = 'opsclaw_chat_history_v1:';
+const LEGACY_PREFIX = 'zeroclaw_chat_history_v1:';
 
 export interface PersistedChatBubble {
   id: string;
@@ -18,9 +19,13 @@ function storageKey(sessionId: string): string {
   return `${PREFIX}${sessionId}`;
 }
 
+function legacyStorageKey(sessionId: string): string {
+  return `${LEGACY_PREFIX}${sessionId}`;
+}
+
 export function loadChatHistory(sessionId: string): PersistedChatBubble[] {
   try {
-    const raw = localStorage.getItem(storageKey(sessionId));
+    const raw = localStorage.getItem(storageKey(sessionId)) ?? localStorage.getItem(legacyStorageKey(sessionId));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as { messages?: PersistedChatBubble[] };
     if (!parsed.messages?.length) return [];

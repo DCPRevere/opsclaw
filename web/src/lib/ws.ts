@@ -23,11 +23,12 @@ export interface WebSocketClientOptions {
 const DEFAULT_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
 
-export const SESSION_ID_STORAGE_KEY = 'zeroclaw_session_id';
+export const SESSION_ID_STORAGE_KEY = 'opsclaw_session_id';
+const LEGACY_SESSION_ID_STORAGE_KEY = 'zeroclaw_session_id';
 
 /** Return a stable session ID, persisted in localStorage across page reloads. */
 export function getOrCreateSessionId(): string {
-  let id = localStorage.getItem(SESSION_ID_STORAGE_KEY);
+  let id = localStorage.getItem(SESSION_ID_STORAGE_KEY) ?? localStorage.getItem(LEGACY_SESSION_ID_STORAGE_KEY);
   if (!id) {
     id = generateUUID();
     localStorage.setItem(SESSION_ID_STORAGE_KEY, id);
@@ -79,7 +80,7 @@ export class WebSocketClient {
     params.set('session_id', sessionId);
     const url = `${this.baseUrl}${basePath}/ws/chat?${params.toString()}`;
 
-    const protocols: string[] = ['zeroclaw.v1'];
+    const protocols: string[] = ['opsclaw.v1'];
     if (token) protocols.push(`bearer.${token}`);
     this.ws = new WebSocket(url, protocols);
 

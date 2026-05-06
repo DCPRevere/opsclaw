@@ -18,6 +18,9 @@ import {
   uiMessagesToPersisted,
 } from '@/lib/chatHistoryStorage';
 
+const CHAT_COMPACT_STORAGE_KEY = 'opsclaw_chat_compact';
+const LEGACY_CHAT_COMPACT_STORAGE_KEY = 'zeroclaw_chat_compact';
+
 interface ChatMessage {
   id: string;
   role: 'user' | 'agent';
@@ -48,7 +51,11 @@ export default function AgentChat() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [compact, setCompact] = useState(() => {
-    try { return localStorage.getItem('zeroclaw_chat_compact') === '1'; } catch { return false; }
+    try {
+      return (localStorage.getItem(CHAT_COMPACT_STORAGE_KEY) ?? localStorage.getItem(LEGACY_CHAT_COMPACT_STORAGE_KEY)) === '1';
+    } catch {
+      return false;
+    }
   });
   const pendingContentRef = useRef('');
   const pendingThinkingRef = useRef('');
@@ -360,7 +367,7 @@ export default function AgentChat() {
   const toggleCompact = useCallback(() => {
     setCompact((prev) => {
       const next = !prev;
-      try { localStorage.setItem('zeroclaw_chat_compact', next ? '1' : '0'); } catch { /* noop */ }
+      try { localStorage.setItem(CHAT_COMPACT_STORAGE_KEY, next ? '1' : '0'); } catch { /* noop */ }
       return next;
     });
   }, []);

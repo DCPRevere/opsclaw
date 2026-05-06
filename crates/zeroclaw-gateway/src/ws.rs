@@ -51,8 +51,9 @@ struct ConnectParams {
     capabilities: Vec<String>,
 }
 
-/// The sub-protocol we support for the chat WebSocket.
-const WS_PROTOCOL: &str = "zeroclaw.v1";
+/// The sub-protocols we support for the chat WebSocket.
+const WS_PROTOCOL: &str = "opsclaw.v1";
+const LEGACY_WS_PROTOCOL: &str = "zeroclaw.v1";
 
 /// Prefix used in `Sec-WebSocket-Protocol` to carry a bearer token.
 const BEARER_SUBPROTO_PREFIX: &str = "bearer.";
@@ -129,13 +130,9 @@ pub async fn handle_ws_chat(
         }
     }
 
-    // Echo Sec-WebSocket-Protocol if the client requests our sub-protocol.
-    let ws = if headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|protos| protos.split(',').any(|p| p.trim() == WS_PROTOCOL))
-    {
-        ws.protocols([WS_PROTOCOL])
+    // Echo Sec-WebSocket-Protocol if the client requests a supported sub-protocol.
+    let ws = if let Some(protocol) = requested_ws_protocol(&headers) {
+        ws.protocols([protocol])
     } else {
         ws
     };
@@ -148,6 +145,19 @@ pub async fn handle_ws_chat(
 
 /// Gateway session key prefix to avoid collisions with channel sessions.
 const GW_SESSION_PREFIX: &str = "gw_";
+
+fn requested_ws_protocol(headers: &HeaderMap) -> Option<&'static str> {
+    let protos = headers
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())?;
+    if protos.split(',').any(|p| p.trim() == WS_PROTOCOL) {
+        Some(WS_PROTOCOL)
+    } else if protos.split(',').any(|p| p.trim() == LEGACY_WS_PROTOCOL) {
+        Some(LEGACY_WS_PROTOCOL)
+    } else {
+        None
+    }
+}
 
 async fn handle_socket(
     socket: WebSocket,
@@ -689,9 +699,26 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "sec-websocket-protocol",
-            "zeroclaw.v1, bearer.zc_sub456".parse().unwrap(),
+            "opsclaw.v1, bearer.zc_sub456".parse().unwrap(),
         );
         assert_eq!(extract_ws_token(&headers, None), Some("zc_sub456"));
+    }
+
+    #[test]
+    fn requested_ws_protocol_prefers_opsclaw() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "sec-websocket-protocol",
+            "zeroclaw.v1, opsclaw.v1".parse().unwrap(),
+        );
+        assert_eq!(requested_ws_protocol(&headers), Some("opsclaw.v1"));
+    }
+
+    #[test]
+    fn requested_ws_protocol_accepts_legacy_zeroclaw() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-websocket-protocol", "zeroclaw.v1".parse().unwrap());
+        assert_eq!(requested_ws_protocol(&headers), Some("zeroclaw.v1"));
     }
 
     #[test]

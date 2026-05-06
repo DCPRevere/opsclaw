@@ -46,12 +46,13 @@ function eventTypeStyle(type: string): { color: string; bg: string; border: stri
 
 interface LogEntry { id: string; event: SSEEvent; }
 
-const LOG_STORAGE_KEY = 'zeroclaw_live_logs';
+const LOG_STORAGE_KEY = 'opsclaw_live_logs';
+const LEGACY_LOG_STORAGE_KEY = 'zeroclaw_live_logs';
 const MAX_PERSISTED_LOGS = 200;
 
 function loadPersistedLogs(): LogEntry[] {
   try {
-    const raw = sessionStorage.getItem(LOG_STORAGE_KEY);
+    const raw = sessionStorage.getItem(LOG_STORAGE_KEY) ?? sessionStorage.getItem(LEGACY_LOG_STORAGE_KEY);
     if (!raw) return [];
     return JSON.parse(raw) as LogEntry[];
   } catch {

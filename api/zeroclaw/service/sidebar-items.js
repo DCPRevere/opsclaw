@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["InitSystem"],"fn":["handle_command","install","is_running","logs","restart","run_capture","start","status","stop","uninstall","xml_escape"]};

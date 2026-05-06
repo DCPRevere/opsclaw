@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Severity"],"fn":["check_config","check_data_directories","check_data_sources","check_disk_space","check_http_endpoint","check_llm_provider","check_notifications","check_posthog","check_ssh_connectivity","check_targets","diagnose","disk_available_mb","run"],"struct":["CheckResult","DoctorReport","ReportSummary"]};

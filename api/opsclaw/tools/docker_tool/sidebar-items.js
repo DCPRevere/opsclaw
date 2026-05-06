@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TIMEOUT_SECS","MAX_OUTPUT_BYTES"],"enum":["Build"],"fn":["build_command","err","is_safe_arg","is_valid_ref"],"struct":["DockerTool","DockerToolConfig"]};

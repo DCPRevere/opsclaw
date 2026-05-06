@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IntegrationCategory","IntegrationStatus"],"fn":["handle_command","show_integration_info"],"mod":["registry"],"struct":["IntegrationEntry"]};

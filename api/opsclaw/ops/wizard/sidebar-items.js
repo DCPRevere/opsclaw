@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NEW_SENTINEL"],"fn":["pick_env_or_new","pick_project_or_new","prompt_new_env","prompt_new_project","prompt_new_target","run_env_add","run_project_add","run_target_add","save_with_summary"]};

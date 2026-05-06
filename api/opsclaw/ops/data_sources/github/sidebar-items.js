@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fetch_latest_release","fetch_recent_runs","fetch_recent_tags"],"struct":["GhRelease","GhTag","GhTagCommit","GhWorkflowRunsResponse","ReleaseInfo","RepoTag","WorkflowRun"]};

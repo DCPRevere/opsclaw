@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_LIMIT","MAX_LIMIT","MAX_OUTPUT_BYTES"],"fn":["matrix_stats","render_logs_or_metrics","render_series","render_string_list","truncate"],"struct":["LokiEndpoint","LokiTool"]};

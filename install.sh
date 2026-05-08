@@ -156,14 +156,20 @@ install_prebuilt() {
     return 1
   fi
 
-  # Resolve latest release version via GitHub API
-  version=$(curl -fsSL "https://api.github.com/repos/zeroclaw-labs/zeroclaw/releases/latest" \
-    | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\(.*\)".*/\1/')
-
+  version="${INSTALL_RELEASE_VERSION:-${ZEROCLAW_INSTALL_VERSION:-}}"
   if [ -z "$version" ]; then
-    warn "Could not resolve latest release — falling back to source build"
+    warn "Pre-built installs require a pinned release version; pass --release-version X.Y.Z or set ZEROCLAW_INSTALL_VERSION."
     return 1
   fi
+  case "$version" in
+    latest) die "Refusing mutable release version latest; use a concrete X.Y.Z release." ;;
+    v*) ;;
+    *) version="v${version}" ;;
+  esac
+  case "$version" in
+    v[0-9]*.[0-9]*.[0-9]*) ;;
+    *) die "Invalid release version $version. Expected X.Y.Z or vX.Y.Z." ;;
+  esac
 
   asset_name="zeroclaw-${triple}.tar.gz"
   asset_url="https://github.com/zeroclaw-labs/zeroclaw/releases/download/${version}/${asset_name}"
@@ -181,7 +187,9 @@ install_prebuilt() {
     return 0
   fi
 
-  tmp_dir=$(mktemp -d)
+  tmp_dir="${XDG_CACHE_HOME:-$PREFIX/.cache}/zeroclaw/install-${version}-${triple}-$$"
+  rm -rf "$tmp_dir"
+  mkdir -p "$tmp_dir"
   trap 'rm -rf "$tmp_dir"' EXIT
 
   curl -fSL --progress-bar "$asset_url" -o "$tmp_dir/$asset_name" \
@@ -238,6 +246,7 @@ Options:
   --list-features      Print all available features and exit
   --prefix PATH        Install everything under PATH (default: \$HOME)
                        Sets CARGO_HOME, RUSTUP_HOME, source checkout, config
+  --release-version X  Pre-built release version to install (required for prebuilt)
   --dry-run            Show what would happen without building or installing
   --skip-onboard       Skip the setup wizard after install
   --uninstall          Remove ZeroClaw binary and optionally config/data
@@ -251,12 +260,14 @@ Examples:
   $0 --source --minimal                        # smallest possible binary
   $0 --source --features agent-runtime,channel-discord  # custom feature set
   $0 --skip-onboard                            # install only, configure later
-  $0 --prefix /tmp/zc-test --skip-onboard      # isolated test install
+  $0 --prefix ./zc-test --skip-onboard         # isolated test install
   $0 --dry-run --prebuilt                      # preview without installing
   $0 --uninstall                               # remove ZeroClaw
 
 Environment:
-  ZEROCLAW_INSTALL_DIR   Source checkout override (default: PREFIX/.zeroclaw/src)
+  ZEROCLAW_INSTALL_DIR     Source checkout override (default: PREFIX/.zeroclaw/src)
+  ZEROCLAW_INSTALL_VERSION  Pinned release version for --prebuilt
+  ZEROCLAW_INSTALL_RUSTUP=1 Opt in to remote rustup bootstrap if Rust is missing
   ZEROCLAW_CARGO_FEATURES  Extra cargo features (legacy; prefer --features)
 EOF
 }
@@ -319,6 +330,7 @@ UNINSTALL=false
 DRY_RUN=false
 PREFIX="$HOME"
 INSTALL_MODE=""   # ""=ask, "prebuilt"=force prebuilt, "source"=force source
+INSTALL_RELEASE_VERSION=""
 
 # Support legacy env var
 if [ -n "${ZEROCLAW_CARGO_FEATURES:-}" ]; then
@@ -343,6 +355,11 @@ while [ $# -gt 0 ]; do
     --skip-onboard)   SKIP_ONBOARD=true ;;
     --prebuilt)       INSTALL_MODE="prebuilt" ;;
     --source)         INSTALL_MODE="source" ;;
+    --release-version)
+      if [ $# -lt 2 ]; then
+        die "Missing value for --release-version. Expected: --release-version X.Y.Z"
+      fi
+      shift; INSTALL_RELEASE_VERSION="$1" ;;
     --uninstall)      UNINSTALL=true ;;
     -h|--help)        usage; exit 0 ;;
     -V|--version)
@@ -416,6 +433,9 @@ if [ "$INSTALL_MODE" = "prebuilt" ]; then
   if install_prebuilt; then
     PREBUILT_OK=true
   else
+    if [ -z "${INSTALL_RELEASE_VERSION:-${ZEROCLAW_INSTALL_VERSION:-}}" ]; then
+      die "Pre-built install requires a pinned version; rerun with --release-version X.Y.Z, or choose --source explicitly."
+    fi
     warn "Pre-built install failed — continuing with source build"
     INSTALL_MODE="source"
     PREBUILT_OK=false
@@ -454,9 +474,7 @@ if [ -f "Cargo.toml" ] && grep -q "zeroclaw" "Cargo.toml" 2>/dev/null; then
 elif [ -d "$INSTALL_DIR/.git" ]; then
   info "Updating source in $INSTALL_DIR"
   git -C "$INSTALL_DIR" pull --ff-only --quiet 2>/dev/null || {
-    warn "Fast-forward pull failed — resetting to origin/master"
-    git -C "$INSTALL_DIR" fetch origin master --quiet
-    git -C "$INSTALL_DIR" reset --hard origin/master --quiet
+    die "Fast-forward pull failed in $INSTALL_DIR. Refusing to reset local changes; resolve manually or choose a clean ZEROCLAW_INSTALL_DIR."
   }
   cd "$INSTALL_DIR"
 else
@@ -485,10 +503,14 @@ if [ "$NEED_RUST" = true ]; then
   if [ "$DRY_RUN" = true ]; then
     warn "[dry-run] Would install Rust via rustup into $RUSTUP_HOME"
   else
-    warn "Installing Rust via rustup into $CARGO_HOME"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-      --no-modify-path --default-toolchain stable
-    . "$CARGO_HOME/env"
+    if [ "${ZEROCLAW_INSTALL_RUSTUP:-}" = "1" ]; then
+      warn "Installing Rust via rustup into $CARGO_HOME (explicit ZEROCLAW_INSTALL_RUSTUP=1 opt-in)"
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+        --no-modify-path --default-toolchain stable
+      . "$CARGO_HOME/env"
+    else
+      die "Rust is required for source builds. Install Rust from your OS package manager or rustup, or set ZEROCLAW_INSTALL_RUSTUP=1 to opt in to the remote rustup bootstrap."
+    fi
   fi
 fi
 

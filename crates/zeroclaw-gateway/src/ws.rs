@@ -54,6 +54,8 @@ struct ConnectParams {
 /// The sub-protocols we support for the chat WebSocket.
 const WS_PROTOCOL: &str = "opsclaw.v1";
 const LEGACY_WS_PROTOCOL: &str = "zeroclaw.v1";
+const WS_CONNECT_TIMEOUT_SECS: u64 = 60;
+const WS_MAX_SESSION_SECS: u64 = 12 * 60 * 60;
 
 /// Prefix used in `Sec-WebSocket-Protocol` to carry a bearer token.
 const BEARER_SUBPROTO_PREFIX: &str = "bearer.";
@@ -242,7 +244,12 @@ async fn handle_socket(
     // process it immediately (backward-compatible).
     let mut first_msg_fallback: Option<String> = None;
 
-    if let Some(first) = receiver.next().await {
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(WS_CONNECT_TIMEOUT_SECS),
+        receiver.next(),
+    )
+    .await;
+    if let Ok(Some(first)) = first {
         match first {
             Ok(Message::Text(text)) => {
                 if let Ok(cp) = serde_json::from_str::<ConnectParams>(&text) {
@@ -274,6 +281,14 @@ async fn handle_socket(
             Ok(Message::Close(_)) | Err(_) => return,
             _ => {}
         }
+    } else {
+        let _ = sender
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1008,
+                reason: axum::extract::ws::Utf8Bytes::from_static("connect timeout"),
+            })))
+            .await;
+        return;
     }
 
     // Process the first message if it was not a connect frame
@@ -312,9 +327,22 @@ async fn handle_socket(
     // Subscribe to the shared broadcast channel so cron/heartbeat events
     // are forwarded to this WebSocket client.
     let mut broadcast_rx = state.event_tx.subscribe();
+    let session_timeout = tokio::time::sleep(std::time::Duration::from_secs(WS_MAX_SESSION_SECS));
+    tokio::pin!(session_timeout);
 
     loop {
         tokio::select! {
+            // ── Hard session cap ───────────────────────────────────────
+            () = &mut session_timeout => {
+                let _ = sender
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1000,
+                        reason: axum::extract::ws::Utf8Bytes::from_static("session timeout"),
+                    })))
+                    .await;
+                break;
+            }
+
             // ── Client message ────────────────────────────────────────
             client_msg = receiver.next() => {
                 let Some(msg) = client_msg else { break };

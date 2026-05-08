@@ -7,16 +7,23 @@
       "notify_payload": {
         "severity_at_least": "warning",
         "category_matches": "(?i)(flap|restart|unstable|crash|instab)",
-        "content_must_mention": ["myapp"]
+        "content_must_mention": [
+          "myapp"
+        ]
       }
     }
   },
   "phase_dedup": {
     "wait_seconds": 75,
-    "assert": { "extra_alerts_max": 2 }
+    "assert": {
+      "extra_alerts_max": 2
+    }
   },
   "phase_disarm": {
     "within_seconds": 120,
-    "assert": { "resolution_present_or_silent": true }
+    "assert": {
+      "resolution_present_or_silent": true,
+      "recovery_probe": "pgrep -f \"python3 /opt/myapp/myapp.py\" >/dev/null"
+    }
   }
 }

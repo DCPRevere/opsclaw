@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::{RealSshExecutor, SshExecutor, TargetEntry, write_audit_entry};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -273,18 +274,25 @@ impl Tool for SystemdTool {
             }
         };
 
-        if is_write && target.autonomy == OpsClawAutonomy::DryRun {
-            let _ = write_audit_entry(
+        if is_write && target.autonomy != OpsClawAutonomy::Auto {
+            if let Err(e) = write_audit_entry(
                 target_name,
-                &format!("[blocked dry-run] {command}"),
+                &format!("[blocked autonomy] {command}"),
                 -1,
                 0,
                 self.audit_dir.as_ref(),
-            );
+            ) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("audit failure blocked mutating action: {e}")),
+                });
+            }
+            let reason = mutating_action_block_reason(target.autonomy).unwrap();
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("dry-run mode: write action rejected ({command})")),
+                error: Some(format!("{reason} ({command})")),
             });
         }
 
@@ -457,6 +465,18 @@ mod tests {
             last.lock().unwrap().is_none(),
             "executor must not be called"
         );
+    }
+
+    #[tokio::test]
+    async fn restart_rejected_in_approve_mode_without_server_grant() {
+        let (tool, last) = tool_with(OpsClawAutonomy::Approve);
+        let r = tool
+            .execute(json!({"target": "prod", "action": "restart", "unit": "nginx.service"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("approve mode"));
+        assert!(last.lock().unwrap().is_none());
     }
 
     #[tokio::test]

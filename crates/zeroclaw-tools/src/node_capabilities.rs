@@ -31,10 +31,8 @@ pub fn camera_capabilities() -> Vec<NodeCapabilityDef> {
                 "type": "object",
                 "properties": {
                     "camera": { "type": "string", "enum": ["front", "back"], "default": "back" },
-                    "quality": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" },
-                    "approved": { "type": "boolean", "description": "Set to true to approve camera access" }
-                },
-                "required": ["approved"]
+                    "quality": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" }
+                }
             }),
             risk_level: RiskLevel::High,
         },
@@ -46,10 +44,8 @@ pub fn camera_capabilities() -> Vec<NodeCapabilityDef> {
                 "properties": {
                     "camera": { "type": "string", "enum": ["front", "back"], "default": "back" },
                     "duration_secs": { "type": "integer", "minimum": 1, "maximum": 30, "default": 5 },
-                    "quality": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" },
-                    "approved": { "type": "boolean", "description": "Set to true to approve camera access" }
-                },
-                "required": ["approved"]
+                    "quality": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" }
+                }
             }),
             risk_level: RiskLevel::High,
         },
@@ -65,10 +61,8 @@ pub fn screen_capabilities() -> Vec<NodeCapabilityDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "display": { "type": "integer", "default": 0, "description": "Display index for multi-monitor setups" },
-                    "approved": { "type": "boolean", "description": "Set to true to approve screen capture" }
-                },
-                "required": ["approved"]
+                    "display": { "type": "integer", "default": 0, "description": "Display index for multi-monitor setups" }
+                }
             }),
             risk_level: RiskLevel::High,
         },
@@ -79,10 +73,8 @@ pub fn screen_capabilities() -> Vec<NodeCapabilityDef> {
                 "type": "object",
                 "properties": {
                     "duration_secs": { "type": "integer", "minimum": 1, "maximum": 60, "default": 10 },
-                    "display": { "type": "integer", "default": 0 },
-                    "approved": { "type": "boolean", "description": "Set to true to approve screen recording" }
-                },
-                "required": ["approved"]
+                    "display": { "type": "integer", "default": 0 }
+                }
             }),
             risk_level: RiskLevel::High,
         },
@@ -97,10 +89,8 @@ pub fn location_capabilities() -> Vec<NodeCapabilityDef> {
         parameters: json!({
             "type": "object",
             "properties": {
-                "accuracy": { "type": "string", "enum": ["coarse", "fine"], "default": "coarse" },
-                "approved": { "type": "boolean", "description": "Set to true to approve location access" }
-            },
-            "required": ["approved"]
+                "accuracy": { "type": "string", "enum": ["coarse", "fine"], "default": "coarse" }
+            }
         }),
         risk_level: RiskLevel::High,
     }]
@@ -246,20 +236,20 @@ mod tests {
         let props = &snap.parameters["properties"];
         assert!(props["camera"].is_object());
         assert!(props["quality"].is_object());
-        assert!(props["approved"].is_object());
-        let required = snap.parameters["required"].as_array().unwrap();
-        assert!(required.contains(&serde_json::Value::String("approved".to_string())));
+        assert!(props.get("approved").is_none());
+        assert!(snap.parameters["required"].is_null());
     }
 
     #[test]
-    fn all_high_risk_have_approved_field() {
+    fn high_risk_schemas_do_not_accept_caller_controlled_approved_flag() {
         for cap in all_standard_capabilities() {
             if cap.risk_level == RiskLevel::High {
                 assert!(
-                    cap.parameters["properties"]["approved"].is_object(),
-                    "High-risk capability '{}' must have an 'approved' parameter",
+                    cap.parameters["properties"].get("approved").is_none(),
+                    "High-risk capability '{}' must not expose a caller-controlled approved parameter",
                     cap.name
                 );
+                assert!(cap.parameters["required"].is_null());
             }
         }
     }

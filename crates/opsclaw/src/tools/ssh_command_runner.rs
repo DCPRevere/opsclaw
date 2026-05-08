@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use super::discovery::{CommandOutput, CommandRunner};
 use super::ssh_tool::{SshExecutor, TargetEntry, is_read_only_command, write_audit_entry};
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 
 // ---------------------------------------------------------------------------
 // SshCommandRunner
@@ -56,9 +57,11 @@ impl CommandRunner for SshCommandRunner {
     async fn run(&self, command: &str) -> Result<CommandOutput> {
         // Autonomy enforcement — DryRun is normally intercepted by the
         // DryRunCommandRunner wrapper, but guard here as a safety net.
-        if self.project.autonomy == OpsClawAutonomy::DryRun {
-            if let Err(reason) = is_read_only_command(command) {
-                bail!("dry-run mode: {reason}");
+        if self.project.autonomy != OpsClawAutonomy::Auto {
+            if let Err(read_only_reason) = is_read_only_command(command) {
+                let reason = mutating_action_block_reason(self.project.autonomy)
+                    .unwrap_or(read_only_reason.as_str());
+                bail!("{reason}: {read_only_reason}");
             }
         }
 
@@ -151,9 +154,11 @@ impl CommandRunner for LocalCommandRunner {
     async fn run(&self, command: &str) -> Result<CommandOutput> {
         // Autonomy enforcement — DryRun is normally intercepted by the
         // DryRunCommandRunner wrapper, but guard here as a safety net.
-        if self.autonomy == OpsClawAutonomy::DryRun {
-            if let Err(reason) = is_read_only_command(command) {
-                bail!("dry-run mode: {reason}");
+        if self.autonomy != OpsClawAutonomy::Auto {
+            if let Err(read_only_reason) = is_read_only_command(command) {
+                let reason = mutating_action_block_reason(self.autonomy)
+                    .unwrap_or(read_only_reason.as_str());
+                bail!("{reason}: {read_only_reason}");
             }
         }
 

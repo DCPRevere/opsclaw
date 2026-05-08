@@ -52,6 +52,17 @@ impl Tool for McpToolWrapper {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        if !is_conservative_read_only_mcp_tool(&self.prefixed_name, &self.description) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "MCP tool blocked: mutating or unknown-risk MCP tools require a server-side approval path"
+                        .into(),
+                ),
+            });
+        }
+
         // Strip the `approved` field before forwarding to the MCP server.
         // OpsClaw's security model injects `approved: bool` into built-in tool
         // calls for supervised-mode confirmation. MCP servers have no knowledge
@@ -77,6 +88,22 @@ impl Tool for McpToolWrapper {
             }),
         }
     }
+}
+
+fn is_conservative_read_only_mcp_tool(name: &str, description: &str) -> bool {
+    let text = format!("{name} {description}").to_lowercase();
+    let mutating_markers = [
+        "write", "create", "update", "delete", "remove", "mutate", "modify", "edit", "patch",
+        "post", "put", "send", "exec", "execute", "run", "shell", "command", "browser", "click",
+        "type", "upload",
+    ];
+    if mutating_markers.iter().any(|marker| text.contains(marker)) {
+        return false;
+    }
+    let read_markers = [
+        "read", "list", "get", "search", "fetch", "query", "describe", "inspect", "status",
+    ];
+    read_markers.iter().any(|marker| text.contains(marker))
 }
 
 #[cfg(test)]
@@ -158,8 +185,8 @@ mod tests {
         // An empty registry has no tools — execute must return Ok(ToolResult { success: false })
         // rather than propagating an Err (non-fatal by design).
         let registry = empty_registry().await;
-        let def = make_def("ghost", Some("Ghost tool"), json!({}));
-        let wrapper = McpToolWrapper::new("nowhere__ghost".to_string(), def, registry);
+        let def = make_def("read_file", Some("Read a file"), json!({}));
+        let wrapper = McpToolWrapper::new("nowhere__read_file".to_string(), def, registry);
         let result = wrapper
             .execute(json!({}))
             .await
@@ -182,6 +209,32 @@ mod tests {
             output: "hello".to_string(),
             error: None,
         };
+    }
+
+    #[test]
+    fn conservative_mcp_policy_classifies_read_and_write_names() {
+        assert!(is_conservative_read_only_mcp_tool(
+            "filesystem__read_file",
+            "Read a file"
+        ));
+        assert!(!is_conservative_read_only_mcp_tool(
+            "filesystem__write_file",
+            "Write a file"
+        ));
+        assert!(!is_conservative_read_only_mcp_tool(
+            "srv__mystery",
+            "MCP tool"
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_blocks_unknown_risk_mcp_before_dispatch() {
+        let registry = empty_registry().await;
+        let def = make_def("do_thing", Some("Do a thing"), json!({}));
+        let wrapper = McpToolWrapper::new("srv__do_thing".to_string(), def, registry);
+        let result = wrapper.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("MCP tool blocked"));
     }
 
     // ── approved-field stripping ───────────────────────────────────────────

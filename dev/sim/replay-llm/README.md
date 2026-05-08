@@ -61,16 +61,17 @@ Match keys are AND-ed. An empty `match` block matches everything (useful as a ca
 
 1. Run the real scenario once with a real API key (no `--replay`), letting `--log-requests` capture every outgoing request:
    ```bash
-   ./dev/test.sh tier2 --only memory --bring-up
-   # Server isn't running, so the request log won't be populated this way — instead:
-   python3 dev/sim/replay-llm/server.py \
-       --port 18080 \
-       --manifest /dev/null \
-       --log-requests /tmp/captured.jsonl &
-   OPSCLAW_REPLAY_LLM_URL=... ./dev/test.sh tier2 --only memory --bring-up
-   ```
+    ./dev/test.sh tier2 --only memory --bring-up
+    # Server isn't running, so the request log won't be populated this way — instead:
+    : > target/replay-llm-empty.jsonl
+    python3 dev/sim/replay-llm/server.py \
+        --port 18080 \
+        --manifest target/replay-llm-empty.jsonl \
+        --log-requests target/replay-llm-captured.jsonl &
+    OPSCLAW_REPLAY_LLM_URL=... ./dev/test.sh tier2 --only memory --bring-up
+    ```
    *(Better tooling for capture is a follow-up — today the workflow is rough.)*
-2. Read `/tmp/captured.jsonl` to see the actual sequence of `(messages, response)` pairs the agent generated.
+2. Read `target/replay-llm-captured.jsonl` to see the actual sequence of `(messages, response)` pairs the agent generated.
 3. For each tick, pick an anchor in the user message (e.g. the heartbeat task ID or fault category), put it in `match.user_prompt_contains`, and copy the assistant turns into the `turns` array.
 4. Re-run with `--replay` to verify the script reproduces the desired verdict.
 

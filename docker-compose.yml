@@ -9,7 +9,8 @@
 
 services:
   opsclaw:
-    image: ghcr.io/dcprevere/opsclaw:latest
+    # Pin this to an immutable release tag or digest for production.
+    image: ghcr.io/dcprevere/opsclaw:${OPSCLAW_IMAGE_TAG:-v0.7.1}
     # For ARM64 environments where the distroless image exits immediately,
     # switch to the Debian compatibility image instead:
     # image: ghcr.io/dcprevere/opsclaw:debian
@@ -32,8 +33,11 @@ services:
       # Options: openrouter, openai, anthropic, ollama
       - PROVIDER=${PROVIDER:-openrouter}
 
-      # Allow public bind inside Docker (required for container networking)
-      - OPSCLAW_ALLOW_PUBLIC_BIND=true
+      # The container listens on all interfaces, but the host port is bound
+      # to loopback below. Override deliberately if exposing through a proxy.
+      - OPSCLAW_GATEWAY_HOST=${OPSCLAW_GATEWAY_HOST:-[::]}
+      - OPSCLAW_ALLOW_PUBLIC_BIND=${OPSCLAW_ALLOW_PUBLIC_BIND:-true}
+      - OPSCLAW_REQUIRE_PAIRING=${OPSCLAW_REQUIRE_PAIRING:-true}
       # Default gateway port inside container
       - OPSCLAW_GATEWAY_PORT=${OPSCLAW_GATEWAY_PORT:-42617}
 
@@ -45,8 +49,9 @@ services:
       - opsclaw-data:/opsclaw-data
 
     ports:
-      # Gateway API port (override HOST_PORT if 42617 is taken)
-      - "${HOST_PORT:-42617}:${OPSCLAW_GATEWAY_PORT:-42617}"
+      # Gateway API port. Secure default: host loopback only.
+      # Set HOST_BIND=0.0.0.0 only when protected by pairing and a trusted proxy/firewall.
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-42617}:${OPSCLAW_GATEWAY_PORT:-42617}"
 
     # Resource limits
     deploy:

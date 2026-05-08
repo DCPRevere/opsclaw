@@ -98,8 +98,8 @@ export async function pair(code: string): Promise<{ token: string }> {
 }
 
 export async function getAdminPairCode(): Promise<{ pairing_code: string | null; pairing_required: boolean }> {
-  // Use the public /pair/code endpoint which works in Docker and remote environments
-  // (no localhost restriction). Falls back to the admin endpoint for backward compat.
+  // /pair/code is restricted to loopback; remote users must retrieve codes
+  // through the localhost-only admin path or CLI.
   const publicResp = await fetch(`${basePath}/pair/code`);
   if (publicResp.ok) {
     return publicResp.json() as Promise<{ pairing_code: string | null; pairing_required: boolean }>;

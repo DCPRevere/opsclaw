@@ -1,8 +1,8 @@
 //! Policy enforcement via the OpenShell policy engine.
 //!
 //! Before executing a remediation action, OpsClaw can ask the OpenShell policy
-//! engine whether the action is permitted.  If OpenShell is not active the
-//! check is a no-op that always returns `Ok(true)`.
+//! engine whether the action is permitted. If OpenShell is active, lookup
+//! failures deny the action.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -23,20 +23,16 @@ struct PolicyResponse {
 
 /// Ask the OpenShell policy engine whether `action` on `target` is allowed.
 ///
-/// Returns `Ok(true)` when:
-/// - OpenShell is not active (fall back to internal autonomy)
-/// - The policy engine approves the action
-/// - The policy engine is unreachable (fail-open; Phase 2 can add fail-closed)
-///
-/// Returns `Ok(false)` only when the policy engine explicitly denies the action.
+/// Returns `Ok(true)` only when OpenShell is inactive or the active policy
+/// endpoint returns a successful, parseable `{ "allowed": true }` response.
 pub async fn check_policy(ctx: &OpenShellContext, action: &str, target: &str) -> Result<bool> {
     if !ctx.is_active() {
         return Ok(true);
     }
 
     let Some(endpoint) = ctx.policy_endpoint.as_deref() else {
-        warn!("OpenShell active but no policy endpoint configured — allowing action");
-        return Ok(true);
+        warn!("OpenShell active but no policy endpoint configured — denying action");
+        return Ok(false);
     };
 
     let url = format!("{endpoint}/api/check");
@@ -45,23 +41,23 @@ pub async fn check_policy(ctx: &OpenShellContext, action: &str, target: &str) ->
     let result = reqwest::Client::new().post(&url).json(&body).send().await;
 
     match result {
-        Ok(resp) if resp.status().is_success() => {
-            let policy: PolicyResponse = resp
-                .json()
-                .await
-                .unwrap_or(PolicyResponse { allowed: true });
-            Ok(policy.allowed)
-        }
+        Ok(resp) if resp.status().is_success() => match resp.json::<PolicyResponse>().await {
+            Ok(policy) => Ok(policy.allowed),
+            Err(e) => {
+                warn!(error = %e, "OpenShell policy response parse failed — denying action");
+                Ok(false)
+            }
+        },
         Ok(resp) => {
             warn!(
                 status = %resp.status(),
-                "OpenShell policy endpoint returned non-success — failing open"
+                "OpenShell policy endpoint returned non-success — denying action"
             );
-            Ok(true)
+            Ok(false)
         }
         Err(e) => {
-            warn!(error = %e, "Failed to reach OpenShell policy engine — failing open");
-            Ok(true)
+            warn!(error = %e, "Failed to reach OpenShell policy engine — denying action");
+            Ok(false)
         }
     }
 }
@@ -82,24 +78,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_without_endpoint_allows() {
+    async fn active_without_endpoint_denies() {
         let ctx = OpenShellContext {
             active: true,
             sandbox_id: Some("test".into()),
             policy_endpoint: None,
             audit_endpoint: None,
         };
-        assert!(check_policy(&ctx, "restart", "web-1").await.unwrap());
+        assert!(!check_policy(&ctx, "restart", "web-1").await.unwrap());
     }
 
     #[tokio::test]
-    async fn unreachable_endpoint_fails_open() {
+    async fn unreachable_endpoint_fails_closed() {
         let ctx = OpenShellContext {
             active: true,
             sandbox_id: Some("test".into()),
             policy_endpoint: Some("http://127.0.0.1:1".into()),
             audit_endpoint: None,
         };
-        assert!(check_policy(&ctx, "restart", "web-1").await.unwrap());
+        assert!(!check_policy(&ctx, "restart", "web-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn malformed_success_response_fails_closed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let ctx = OpenShellContext {
+            active: true,
+            sandbox_id: Some("test".into()),
+            policy_endpoint: Some(server.uri()),
+            audit_endpoint: None,
+        };
+        assert!(!check_policy(&ctx, "restart", "web-1").await.unwrap());
     }
 }

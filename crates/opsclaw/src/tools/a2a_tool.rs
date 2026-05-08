@@ -6,7 +6,9 @@
 use super::a2a_types::{A2aRequest, A2aResponse, AgentCard, Task};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use reqwest::redirect::Policy;
 use serde_json::json;
+use std::net::IpAddr;
 use std::time::Duration;
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
@@ -19,6 +21,7 @@ impl A2aClient {
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(Policy::none())
             .build()
             .expect("failed to build HTTP client");
         Self { http }
@@ -26,6 +29,7 @@ impl A2aClient {
 
     /// Fetch the agent card from `{base_url}/.well-known/agent-card.json`.
     pub async fn discover(&self, base_url: &str) -> Result<AgentCard> {
+        validate_a2a_base_url(base_url).await?;
         let url = format!(
             "{}/.well-known/agent-card.json",
             base_url.trim_end_matches('/')
@@ -47,6 +51,7 @@ impl A2aClient {
 
     /// Send a task to the remote agent via `tasks/send`.
     pub async fn send_task(&self, base_url: &str, token: &str, message: &str) -> Result<Task> {
+        validate_a2a_token(token)?;
         let req = A2aRequest::new(
             "tasks/send",
             &uuid::Uuid::new_v4().to_string(),
@@ -57,6 +62,7 @@ impl A2aClient {
 
     /// Get the status of a task via `tasks/get`.
     pub async fn get_task(&self, base_url: &str, token: &str, task_id: &str) -> Result<Task> {
+        validate_a2a_token(token)?;
         let req = A2aRequest::new(
             "tasks/get",
             &uuid::Uuid::new_v4().to_string(),
@@ -67,6 +73,7 @@ impl A2aClient {
 
     /// Cancel a task via `tasks/cancel`.
     pub async fn cancel_task(&self, base_url: &str, token: &str, task_id: &str) -> Result<Task> {
+        validate_a2a_token(token)?;
         let req = A2aRequest::new(
             "tasks/cancel",
             &uuid::Uuid::new_v4().to_string(),
@@ -76,6 +83,7 @@ impl A2aClient {
     }
 
     async fn rpc_call(&self, base_url: &str, token: &str, req: &A2aRequest) -> Result<Task> {
+        validate_a2a_base_url(base_url).await?;
         let url = format!("{}/a2a", base_url.trim_end_matches('/'));
         let resp = self
             .http
@@ -92,12 +100,81 @@ impl A2aClient {
         }
 
         let a2a_resp: A2aResponse = resp.json().await.context("failed to parse A2A response")?;
+        validate_a2a_response(&a2a_resp, &req.id)?;
         if let Some(err) = a2a_resp.error {
             anyhow::bail!("A2A error {}: {}", err.code, err.message);
         }
         let result = a2a_resp.result.context("A2A response missing result")?;
         serde_json::from_value(result).context("failed to parse task from A2A result")
     }
+}
+
+fn validate_a2a_token(token: &str) -> Result<()> {
+    if token.trim().is_empty() {
+        anyhow::bail!("A2A bearer token is required");
+    }
+    Ok(())
+}
+
+async fn validate_a2a_base_url(base_url: &str) -> Result<()> {
+    let url = reqwest::Url::parse(base_url).context("invalid A2A base URL")?;
+    if url.scheme() != "https" {
+        anyhow::bail!("A2A base URL must use https");
+    }
+    if url.username() != "" || url.password().is_some() {
+        anyhow::bail!("A2A base URL must not contain credentials");
+    }
+    let host = url.host_str().context("A2A base URL requires a host")?;
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        reject_private_ip(ip)?;
+        return Ok(());
+    }
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .context("failed to resolve A2A host")?;
+    for addr in addrs {
+        reject_private_ip(addr.ip())?;
+    }
+    Ok(())
+}
+
+fn reject_private_ip(ip: IpAddr) -> Result<()> {
+    let blocked = match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_multicast()
+        }
+    };
+    if blocked {
+        anyhow::bail!("A2A base URL resolves to a blocked private or special-use IP address");
+    }
+    Ok(())
+}
+
+fn validate_a2a_response(resp: &A2aResponse, expected_id: &str) -> Result<()> {
+    if resp.jsonrpc != "2.0" {
+        anyhow::bail!("A2A response has invalid jsonrpc version");
+    }
+    if resp.id != expected_id {
+        anyhow::bail!("A2A response id mismatch");
+    }
+    if resp.result.is_some() == resp.error.is_some() {
+        anyhow::bail!("A2A response must contain exactly one of result or error");
+    }
+    Ok(())
 }
 
 /// Tool wrapper exposing A2A client capabilities to the LLM.
@@ -141,7 +218,7 @@ impl Tool for A2aTool {
                 },
                 "token": {
                     "type": "string",
-                    "description": "Bearer token for authentication"
+                    "description": "Bearer token for authentication; required for send/get/cancel"
                 },
                 "message": {
                     "type": "string",
@@ -266,6 +343,47 @@ impl Tool for A2aTool {
 }
 
 #[cfg(test)]
+mod security_tests {
+    use super::*;
+    use crate::tools::a2a_types::{A2aError, JSONRPC_INVALID_REQUEST};
+
+    #[test]
+    fn rejects_empty_a2a_token() {
+        assert!(validate_a2a_token("").is_err());
+        assert!(validate_a2a_token("   ").is_err());
+        assert!(validate_a2a_token("token").is_ok());
+    }
+
+    #[test]
+    fn validates_jsonrpc_response_identity_and_shape() {
+        let ok = A2aResponse::success("req-1", serde_json::json!({"id": "t1"}));
+        assert!(validate_a2a_response(&ok, "req-1").is_ok());
+
+        let wrong_id = A2aResponse::success("req-2", serde_json::json!({}));
+        assert!(validate_a2a_response(&wrong_id, "req-1").is_err());
+
+        let invalid_version = A2aResponse {
+            jsonrpc: "1.0".into(),
+            id: "req-1".into(),
+            result: Some(serde_json::json!({})),
+            error: None,
+        };
+        assert!(validate_a2a_response(&invalid_version, "req-1").is_err());
+
+        let both = A2aResponse {
+            jsonrpc: "2.0".into(),
+            id: "req-1".into(),
+            result: Some(serde_json::json!({})),
+            error: Some(A2aError {
+                code: JSONRPC_INVALID_REQUEST,
+                message: "bad".into(),
+            }),
+        };
+        assert!(validate_a2a_response(&both, "req-1").is_err());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -329,72 +447,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a2a_tool_send_success() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/a2a"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jsonrpc": "2.0",
-                "id": "1",
-                "result": {"id": "t-123", "status": "submitted"}
-            })))
-            .mount(&server)
-            .await;
+    async fn a2a_tool_rejects_plain_http_url_before_send() {
         let tool = A2aTool::new();
         let r = tool
             .execute(json!({
-                "action": "send", "url": server.uri(),
-                "token": "tok", "message": "hi"
-            }))
-            .await
-            .unwrap();
-        assert!(r.success, "error: {:?}", r.error);
-        assert!(r.output.contains("t-123"));
-    }
-
-    #[tokio::test]
-    async fn a2a_tool_send_server_500() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/a2a"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
-            .mount(&server)
-            .await;
-        let tool = A2aTool::new();
-        let r = tool
-            .execute(json!({
-                "action": "send", "url": server.uri(),
+                "action": "send", "url": "http://203.0.113.1",
                 "token": "tok", "message": "hi"
             }))
             .await
             .unwrap();
         assert!(!r.success);
-        assert!(r.error.is_some());
+        assert!(r.error.unwrap().contains("https"));
     }
 
     #[tokio::test]
-    async fn a2a_tool_send_malformed_response() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/a2a"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("not jsonrpc"))
-            .mount(&server)
-            .await;
+    async fn a2a_tool_rejects_empty_token_for_send() {
         let tool = A2aTool::new();
         let r = tool
             .execute(json!({
-                "action": "send", "url": server.uri(),
-                "token": "tok", "message": "hi"
+                "action": "send", "url": "https://example.com",
+                "token": "", "message": "hi"
             }))
             .await
             .unwrap();
         assert!(!r.success);
-        assert!(r.error.is_some());
+        assert!(r.error.unwrap().contains("token"));
     }
 }

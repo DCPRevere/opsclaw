@@ -1026,6 +1026,7 @@ fn mask_sensitive_fields(
     for agent in masked.agents.values_mut() {
         mask_optional_secret(&mut agent.api_key);
     }
+    mask_optional_secret(&mut masked.nodes.auth_token);
 
     // Mask providers
     for model in masked.providers.models.values_mut() {
@@ -1072,6 +1073,7 @@ fn mask_sensitive_fields(
     }
     if let Some(wati) = masked.channels.wati.as_mut() {
         mask_required_secret(&mut wati.api_token);
+        mask_optional_secret(&mut wati.webhook_secret);
     }
     if let Some(irc) = masked.channels.irc.as_mut() {
         mask_optional_secret(&mut irc.server_password);
@@ -1229,7 +1231,9 @@ fn restore_masked_sensitive_fields(
         current.channels.wati.as_ref(),
     ) {
         restore_required_secret(&mut incoming_ch.api_token, &current_ch.api_token);
+        restore_optional_secret(&mut incoming_ch.webhook_secret, &current_ch.webhook_secret);
     }
+    restore_optional_secret(&mut incoming.nodes.auth_token, &current.nodes.auth_token);
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels.irc.as_mut(),
         current.channels.irc.as_ref(),
@@ -1713,6 +1717,13 @@ mod tests {
     }
 
     fn test_state(config: zeroclaw_config::schema::Config) -> AppState {
+        test_state_with_pairing(config, PairingGuard::new(false, &[]))
+    }
+
+    fn test_state_with_pairing(
+        config: zeroclaw_config::schema::Config,
+        pairing: PairingGuard,
+    ) -> AppState {
         AppState {
             config: Arc::new(Mutex::new(config)),
             provider: Arc::new(MockProvider),
@@ -1721,7 +1732,7 @@ mod tests {
             mem: Arc::new(MockMemory),
             auto_save: false,
             webhook_secret_hash: None,
-            pairing: Arc::new(PairingGuard::new(false, &[])),
+            pairing: Arc::new(pairing),
             trust_forwarded_headers: false,
             rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
             auth_limiter: Arc::new(crate::auth_rate_limit::AuthRateLimiter::new()),
@@ -1785,6 +1796,7 @@ mod tests {
         cfg.channels.wati = Some(zeroclaw_config::schema::WatiConfig {
             enabled: true,
             api_token: "wati-token".to_string(),
+            webhook_secret: Some("wati-webhook-secret".to_string()),
             api_url: "https://live-mt-server.wati.io".to_string(),
             tenant_id: None,
             allowed_numbers: vec![],
@@ -1940,6 +1952,7 @@ mod tests {
         current.channels.wati = Some(zeroclaw_config::schema::WatiConfig {
             enabled: true,
             api_token: "wati-real".to_string(),
+            webhook_secret: Some("wati-webhook-real".to_string()),
             api_url: "https://live-mt-server.wati.io".to_string(),
             tenant_id: None,
             allowed_numbers: vec![],
@@ -2231,6 +2244,51 @@ mod tests {
                 .iter()
                 .all(|route| route.api_key.as_deref() != Some(MASKED_SECRET))
         );
+    }
+
+    #[tokio::test]
+    async fn paired_mode_rejects_unauthenticated_privileged_api_handlers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = zeroclaw_config::schema::Config {
+            workspace_dir: tmp.path().join("workspace"),
+            config_path: tmp.path().join("config.toml"),
+            ..zeroclaw_config::schema::Config::default()
+        };
+        std::fs::create_dir_all(&config.workspace_dir).unwrap();
+        let state = test_state_with_pairing(
+            config,
+            PairingGuard::new(true, &["paired-test-token".to_string()]),
+        );
+
+        let get_config = handle_api_config_get(State(state.clone()), HeaderMap::new())
+            .await
+            .into_response();
+        assert_eq!(get_config.status(), StatusCode::UNAUTHORIZED);
+
+        let put_config = handle_api_config_put(
+            State(state.clone()),
+            HeaderMap::new(),
+            "schema_version = 2".to_string(),
+        )
+        .await
+        .into_response();
+        assert_eq!(put_config.status(), StatusCode::UNAUTHORIZED);
+
+        let add_cron = handle_api_cron_add(
+            State(state),
+            HeaderMap::new(),
+            Json(
+                serde_json::from_value::<CronAddBody>(serde_json::json!({
+                    "name": "must-not-add",
+                    "schedule": "*/5 * * * *",
+                    "command": "echo should-not-run"
+                }))
+                .expect("body should deserialize"),
+            ),
+        )
+        .await
+        .into_response();
+        assert_eq!(add_cron.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

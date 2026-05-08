@@ -19,8 +19,8 @@ spec:
     spec:
       containers:
         - name: zeroclaw
-          # For production, pin to a version tag (e.g. ghcr.io/zeroclaw-labs/zeroclaw:v0.7.1)
-          image: ghcr.io/zeroclaw-labs/zeroclaw:latest
+          # Pin to a version tag or digest; do not use mutable latest in production.
+          image: ghcr.io/zeroclaw-labs/zeroclaw:v0.7.1
           args: ["daemon"]
           ports:
             - name: gateway

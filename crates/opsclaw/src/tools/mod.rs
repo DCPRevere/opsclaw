@@ -1,6 +1,7 @@
 pub mod a2a_server;
 pub mod a2a_tool;
 pub mod a2a_types;
+pub mod approval_gate;
 pub mod azure_service_bus_tool;
 pub mod cert_tool;
 pub mod cloudflare_tool;

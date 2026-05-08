@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 
 /// OpsClaw configuration — wraps the upstream zeroclawlabs `Config` with
-/// SRE-specific fields (projects, notifications, diagnosis, a2a).
+/// SRE-specific fields (projects, notifications, diagnosis, a2a, oap).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OpsConfig {
     /// The upstream zeroclawlabs configuration.
@@ -37,6 +37,10 @@ pub struct OpsConfig {
     /// A2A (Agent-to-Agent) protocol configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2a: Option<A2aConfig>,
+
+    /// OAP protocol configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oap: Option<OapConfig>,
 
     /// Postgres instances for the `postgres` tool (driver-based).
     /// Kept at the root because the driver-based pool doesn't yet have
@@ -188,7 +192,7 @@ impl OpsConfig {
     /// Serialize the full `OpsConfig` (including opsclaw-specific fields) to
     /// `self.config_path`. Must be called instead of `Config::save()` whenever
     /// the caller may have modified `projects`, `notifications`, `diagnosis`, or
-    /// `a2a`, because `Config::save()` only serializes the inner zeroclaw fields
+    /// `a2a`, `oap`, because `Config::save()` only serializes the inner zeroclaw fields
     /// and would silently drop those fields.
     pub async fn save(&self) -> Result<()> {
         let config_path = &self.inner.config_path;
@@ -298,6 +302,17 @@ impl OpsConfig {
                 if !peer.token.is_empty() && !crate::secrets::is_reference(&peer.token) {
                     peer.token = store.encrypt(&peer.token)?;
                 }
+            }
+        }
+
+        // Encrypt OAP secret fields.
+        if let Some(ref mut oap) = to_save.oap {
+            let store = zeroclaw::security::SecretStore::new(
+                config_path.parent().context("config path has no parent")?,
+                self.inner.secrets.encrypt,
+            );
+            if !oap.server.token.is_empty() && !crate::secrets::is_reference(&oap.server.token) {
+                oap.server.token = store.encrypt(&oap.server.token)?;
             }
         }
 
@@ -583,6 +598,8 @@ pub struct A2aServerConfig {
     pub bind: String,
     #[serde(default)]
     pub token: String,
+    #[serde(default)]
+    pub allow_unauthenticated: bool,
     #[serde(default = "default_a2a_agent_name")]
     pub agent_name: String,
     #[serde(default = "default_a2a_agent_description")]
@@ -611,6 +628,7 @@ impl Default for A2aServerConfig {
             port: default_a2a_server_port(),
             bind: default_a2a_server_host(),
             token: String::new(),
+            allow_unauthenticated: false,
             agent_name: default_a2a_agent_name(),
             agent_description: default_a2a_agent_description(),
             skills: Vec::new(),
@@ -634,6 +652,70 @@ pub struct A2aPeerConfig {
     pub url: String,
     #[serde(default)]
     pub token: String,
+}
+
+/// Configuration for the OAP server.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OapServerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_oap_server_port")]
+    pub port: u16,
+    #[serde(default = "default_oap_server_host")]
+    pub bind: String,
+    #[serde(default)]
+    pub public_url: String,
+    #[serde(default)]
+    pub token: String,
+    /// Permit unauthenticated operational endpoints only for explicit loopback
+    /// development use. Production deployments should configure `token`.
+    #[serde(default)]
+    pub allow_unauthenticated_loopback: bool,
+    #[serde(default = "default_oap_agent_id")]
+    pub agent_id: String,
+    #[serde(default = "default_oap_agent_name")]
+    pub agent_name: String,
+    #[serde(default = "default_oap_agent_description")]
+    pub agent_description: String,
+}
+
+fn default_oap_server_port() -> u16 {
+    42619
+}
+fn default_oap_server_host() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_oap_agent_id() -> String {
+    "opsclaw".to_string()
+}
+fn default_oap_agent_name() -> String {
+    "OpsClaw".to_string()
+}
+fn default_oap_agent_description() -> String {
+    "OpsClaw autonomous SRE agent".to_string()
+}
+
+impl Default for OapServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_oap_server_port(),
+            bind: default_oap_server_host(),
+            public_url: String::new(),
+            token: String::new(),
+            allow_unauthenticated_loopback: false,
+            agent_id: default_oap_agent_id(),
+            agent_name: default_oap_agent_name(),
+            agent_description: default_oap_agent_description(),
+        }
+    }
+}
+
+/// OAP protocol configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct OapConfig {
+    #[serde(default)]
+    pub server: OapServerConfig,
 }
 
 // ---------------------------------------------------------------------------

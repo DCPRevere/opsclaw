@@ -17,10 +17,17 @@ use axum::{
     routing::{get, post},
 };
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+const MAX_A2A_BODY_BYTES: usize = 64 * 1024;
+const MAX_A2A_TASKS: usize = 1024;
+const MAX_A2A_MESSAGE_CHARS: usize = 16 * 1024;
+const A2A_TASK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const A2A_REPLAY_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Re-export from zeroclaw config (canonical definition lives there for schema generation).
 pub use crate::ops_config::A2aServerConfig;
@@ -30,10 +37,13 @@ pub use crate::ops_config::A2aServerConfig;
 struct A2aState {
     config: A2aServerConfig,
     tasks: Arc<Mutex<HashMap<String, Task>>>,
+    task_created: Arc<Mutex<HashMap<String, Instant>>>,
+    replay_cache: Arc<Mutex<VecDeque<(String, Instant)>>>,
 }
 
 /// Start the A2A server. Blocks until the server shuts down.
 pub async fn run_a2a_server(config: A2aServerConfig) -> Result<()> {
+    validate_server_auth_config(&config)?;
     let addr: SocketAddr = format!("{}:{}", config.bind, config.port)
         .parse()
         .context("invalid A2A server bind address")?;
@@ -41,6 +51,8 @@ pub async fn run_a2a_server(config: A2aServerConfig) -> Result<()> {
     let state = A2aState {
         config,
         tasks: Arc::new(Mutex::new(HashMap::new())),
+        task_created: Arc::new(Mutex::new(HashMap::new())),
+        replay_cache: Arc::new(Mutex::new(VecDeque::new())),
     };
 
     let app = Router::new()
@@ -56,6 +68,13 @@ pub async fn run_a2a_server(config: A2aServerConfig) -> Result<()> {
     )
     .await
     .context("A2A server error")
+}
+
+fn validate_server_auth_config(config: &A2aServerConfig) -> Result<()> {
+    if config.enabled && config.token.trim().is_empty() && !config.allow_unauthenticated {
+        anyhow::bail!("A2A server requires a non-empty token unless allow_unauthenticated is true");
+    }
+    Ok(())
 }
 
 // ── Handlers ────────────────────────────────────────────────────
@@ -75,7 +94,11 @@ async fn handle_agent_card(State(state): State<A2aState>) -> impl IntoResponse {
             })
             .collect(),
         auth: AgentAuth {
-            scheme: "bearer".to_string(),
+            scheme: if state.config.token.trim().is_empty() && state.config.allow_unauthenticated {
+                "none".to_string()
+            } else {
+                "bearer".to_string()
+            },
         },
         version: "0.3.0".to_string(),
     };
@@ -85,10 +108,25 @@ async fn handle_agent_card(State(state): State<A2aState>) -> impl IntoResponse {
 async fn handle_a2a_rpc(
     State(state): State<A2aState>,
     headers: HeaderMap,
-    Json(req): Json<A2aRequest>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    if body.len() > MAX_A2A_BODY_BYTES {
+        let resp = A2aResponse::error("", JSONRPC_INVALID_PARAMS, "request body too large");
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(resp));
+    }
+    let req: A2aRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            let resp = A2aResponse::error("", super::a2a_types::JSONRPC_PARSE_ERROR, "parse error");
+            return (StatusCode::BAD_REQUEST, Json(resp));
+        }
+    };
+    if let Err(resp) = validate_jsonrpc_request(&req) {
+        return (StatusCode::BAD_REQUEST, Json(resp));
+    }
+
     // Validate bearer token
-    if !state.config.token.is_empty() {
+    if !state.config.token.trim().is_empty() {
         let authorized = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
@@ -99,6 +137,9 @@ async fn handle_a2a_rpc(
             let resp = A2aResponse::error(&req.id, A2A_UNAUTHORIZED, "unauthorized");
             return (StatusCode::UNAUTHORIZED, Json(resp));
         }
+    }
+    if let Err(resp) = record_request_id(&state, &req) {
+        return (StatusCode::BAD_REQUEST, Json(resp));
     }
 
     let resp = match req.method.as_str() {
@@ -113,7 +154,16 @@ async fn handle_a2a_rpc(
 }
 
 fn handle_tasks_send(state: &A2aState, req: &A2aRequest) -> A2aResponse {
+    prune_tasks(state);
     let message = req.params.get("message").and_then(|v| v.as_str());
+    if let Some(message) = message
+        && message.chars().count() > MAX_A2A_MESSAGE_CHARS
+    {
+        return A2aResponse::error(&req.id, JSONRPC_INVALID_PARAMS, "message too large");
+    }
+    if state.tasks.lock().len() >= MAX_A2A_TASKS {
+        return A2aResponse::error(&req.id, JSONRPC_INVALID_PARAMS, "task limit exceeded");
+    }
     let task = Task {
         id: Uuid::new_v4().to_string(),
         status: TaskStatus::Submitted,
@@ -122,12 +172,17 @@ fn handle_tasks_send(state: &A2aState, req: &A2aRequest) -> A2aResponse {
     };
 
     state.tasks.lock().insert(task.id.clone(), task.clone());
+    state
+        .task_created
+        .lock()
+        .insert(task.id.clone(), Instant::now());
     tracing::info!(task_id = %task.id, "A2A task submitted");
 
     A2aResponse::success(&req.id, serde_json::to_value(&task).unwrap_or_default())
 }
 
 fn handle_tasks_get(state: &A2aState, req: &A2aRequest) -> A2aResponse {
+    prune_tasks(state);
     let task_id = req
         .params
         .get("task_id")
@@ -146,6 +201,7 @@ fn handle_tasks_get(state: &A2aState, req: &A2aRequest) -> A2aResponse {
 }
 
 fn handle_tasks_cancel(state: &A2aState, req: &A2aRequest) -> A2aResponse {
+    prune_tasks(state);
     let task_id = req
         .params
         .get("task_id")
@@ -164,6 +220,63 @@ fn handle_tasks_cancel(state: &A2aState, req: &A2aRequest) -> A2aResponse {
             A2aResponse::success(&req.id, serde_json::to_value(&*task).unwrap_or_default())
         }
         None => A2aResponse::error(&req.id, A2A_TASK_NOT_FOUND, "task not found"),
+    }
+}
+
+fn validate_jsonrpc_request(req: &A2aRequest) -> std::result::Result<(), A2aResponse> {
+    if req.jsonrpc != "2.0"
+        || req.id.trim().is_empty()
+        || req.id.len() > 128
+        || req.method.trim().is_empty()
+        || !req.params.is_object()
+    {
+        return Err(A2aResponse::error(
+            &req.id,
+            super::a2a_types::JSONRPC_INVALID_REQUEST,
+            "invalid JSON-RPC 2.0 request",
+        ));
+    }
+    Ok(())
+}
+
+fn record_request_id(state: &A2aState, req: &A2aRequest) -> std::result::Result<(), A2aResponse> {
+    let now = Instant::now();
+    let mut replay_cache = state.replay_cache.lock();
+    while let Some((_, seen_at)) = replay_cache.front() {
+        if now.duration_since(*seen_at) <= A2A_REPLAY_TTL {
+            break;
+        }
+        replay_cache.pop_front();
+    }
+    if replay_cache.iter().any(|(id, _)| id == &req.id) {
+        return Err(A2aResponse::error(
+            &req.id,
+            super::a2a_types::JSONRPC_INVALID_REQUEST,
+            "replayed request id",
+        ));
+    }
+    replay_cache.push_back((req.id.clone(), now));
+    Ok(())
+}
+
+fn prune_tasks(state: &A2aState) {
+    let now = Instant::now();
+    let expired: Vec<String> = state
+        .task_created
+        .lock()
+        .iter()
+        .filter_map(|(task_id, created_at)| {
+            (now.duration_since(*created_at) > A2A_TASK_TTL).then(|| task_id.clone())
+        })
+        .collect();
+    if expired.is_empty() {
+        return;
+    }
+    let mut tasks = state.tasks.lock();
+    let mut task_created = state.task_created.lock();
+    for task_id in expired {
+        tasks.remove(&task_id);
+        task_created.remove(&task_id);
     }
 }
 
@@ -192,6 +305,7 @@ mod tests {
             port: 0,
             bind: "127.0.0.1".into(),
             token: "test-token".into(),
+            allow_unauthenticated: false,
             agent_name: "TestAgent".into(),
             agent_description: "A test agent".into(),
             skills: vec![A2aAgentSkill {
@@ -205,6 +319,8 @@ mod tests {
         let state = A2aState {
             config: test_config(),
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            task_created: Arc::new(Mutex::new(HashMap::new())),
+            replay_cache: Arc::new(Mutex::new(VecDeque::new())),
         };
         Router::new()
             .route("/.well-known/agent-card.json", get(handle_agent_card))
@@ -250,6 +366,8 @@ mod tests {
         let state = A2aState {
             config: test_config(),
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            task_created: Arc::new(Mutex::new(HashMap::new())),
+            replay_cache: Arc::new(Mutex::new(VecDeque::new())),
         };
         let app = Router::new()
             .route("/.well-known/agent-card.json", get(handle_agent_card))
@@ -352,6 +470,54 @@ mod tests {
         let a2a_resp: A2aResponse = serde_json::from_slice(&body).unwrap();
         assert!(a2a_resp.error.is_some());
         assert_eq!(a2a_resp.error.unwrap().code, JSONRPC_METHOD_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_jsonrpc_and_replayed_request_ids() {
+        let app = test_app();
+        let invalid = serde_json::json!({
+            "jsonrpc": "1.0",
+            "method": "tasks/send",
+            "id": "bad",
+            "params": {"message": "hi"}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/a2a")
+            .header("Content-Type", "application/json")
+            .header("Authorization", "Bearer test-token")
+            .body(Body::from(serde_json::to_string(&invalid).unwrap()))
+            .unwrap();
+        let resp: axum::http::Response<Body> = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let rpc = A2aRequest::new(
+            "tasks/send",
+            "replay-1",
+            serde_json::json!({"message": "hi"}),
+        );
+        let body = serde_json::to_string(&rpc).unwrap();
+        for expected_status in [StatusCode::OK, StatusCode::BAD_REQUEST] {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/a2a")
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer test-token")
+                .body(Body::from(body.clone()))
+                .unwrap();
+            let resp: axum::http::Response<Body> = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), expected_status);
+        }
+    }
+
+    #[test]
+    fn enabled_server_requires_auth_unless_explicitly_disabled() {
+        let mut cfg = test_config();
+        cfg.token.clear();
+        cfg.allow_unauthenticated = false;
+        assert!(validate_server_auth_config(&cfg).is_err());
+        cfg.allow_unauthenticated = true;
+        assert!(validate_server_auth_config(&cfg).is_ok());
     }
 
     #[tokio::test]

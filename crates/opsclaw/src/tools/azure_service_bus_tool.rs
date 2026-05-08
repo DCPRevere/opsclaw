@@ -17,6 +17,7 @@ use sha2::Sha256;
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::write_audit_entry;
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
@@ -120,6 +121,10 @@ impl AzureServiceBusTool {
 
     fn is_dry_run(&self) -> bool {
         self.config.autonomy == OpsClawAutonomy::DryRun
+    }
+
+    fn mutating_block_reason(&self) -> Option<&'static str> {
+        mutating_action_block_reason(self.config.autonomy)
     }
 
     fn audit(&self, action: &str, detail: &str, duration_ms: u128, exit: i32) {
@@ -335,6 +340,9 @@ impl AzureServiceBusTool {
                 "[dry-run] would DELETE one message from {base}"
             )));
         }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
+        }
         let path = format!("{base}/head?timeout=10");
         let resp = self
             .req(reqwest::Method::DELETE, &path, Some(&base))
@@ -372,6 +380,9 @@ impl AzureServiceBusTool {
             return Ok(ok_res(format!(
                 "[dry-run] would dead-letter message at {lock_url}"
             )));
+        }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
         }
         // Dead-letter by deleting with the dead-letter header.
         let target = format!("{}/", self.base_url());

@@ -16,8 +16,10 @@ data:
 
     [gateway]
     port = 42617
-    host = "[::]"
-    allow_public_bind = true
+    # Safe default. If exposing through a Service/Ingress, change host to "[::]"
+    # and keep require_pairing enabled.
+    host = "127.0.0.1"
+    allow_public_bind = false
     require_pairing = true
     web_dist_dir = "/zeroclaw-data/web/dist"
 

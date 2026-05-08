@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::write_audit_entry;
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
@@ -99,6 +100,10 @@ impl GithubTool {
 
     fn is_dry_run(&self) -> bool {
         self.config.autonomy == OpsClawAutonomy::DryRun
+    }
+
+    fn mutating_block_reason(&self) -> Option<&'static str> {
+        mutating_action_block_reason(self.config.autonomy)
     }
 }
 
@@ -631,6 +636,9 @@ impl GithubTool {
                 "[dry-run] would create issue in {owner}/{repo}: {title}"
             )));
         }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
+        }
 
         let payload = json!({"title": title, "body": body, "labels": labels});
         let path = format!("repos/{owner}/{repo}/issues");
@@ -672,6 +680,9 @@ impl GithubTool {
                 "[dry-run] would comment on {owner}/{repo}#{n}: {body}"
             )));
         }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
+        }
         let path = format!("repos/{owner}/{repo}/issues/{n}/comments");
         let resp = self
             .req(reqwest::Method::POST, &path)
@@ -698,6 +709,9 @@ impl GithubTool {
             return Ok(ok_res(format!(
                 "[dry-run] would {op} run {id} in {owner}/{repo}"
             )));
+        }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
         }
         let suffix = if op == "rerun" { "rerun" } else { "cancel" };
         let path = format!("repos/{owner}/{repo}/actions/runs/{id}/{suffix}");

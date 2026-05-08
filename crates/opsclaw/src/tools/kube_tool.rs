@@ -644,6 +644,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 use crate::ops_config::{ConnectionType, OpsClawAutonomy, OpsConfig, TargetConfig};
+use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::write_audit_entry;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -797,7 +798,7 @@ impl Tool for KubeTool {
             action,
             "restart_deployment" | "scale_deployment" | "delete_pod"
         );
-        if is_write && target.autonomy == OpsClawAutonomy::DryRun {
+        if is_write && target.autonomy != OpsClawAutonomy::Auto {
             let detail = args
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -805,13 +806,14 @@ impl Tool for KubeTool {
                 .to_string();
             self.audit(
                 target_name,
-                &format!("[blocked dry-run] {action}"),
+                &format!("[blocked autonomy] {action}"),
                 &detail,
                 0,
                 -1,
             );
+            let reason = mutating_action_block_reason(target.autonomy).unwrap();
             return Ok(kube_err(format!(
-                "dry-run mode: write action '{action}' rejected"
+                "{reason}: write action '{action}' rejected"
             )));
         }
 

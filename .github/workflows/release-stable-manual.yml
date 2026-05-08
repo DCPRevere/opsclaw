@@ -3,7 +3,8 @@ name: Release Stable
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+" # stable tags only (no -beta suffix)
+      # GitHub tag filters are globs, not regex; exact stable semver is enforced below.
+      - "v[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
       version:
@@ -41,9 +42,15 @@ jobs:
           INPUT_VERSION: ${{ inputs.version || '' }}
           REF_NAME: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF_FULL: ${{ github.ref }}
         run: |
           set -euo pipefail
           cargo_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF_FULL" != "refs/heads/master" ]]; then
+            echo "::error::Stable releases must be dispatched from master. Current ref: ${GITHUB_REF_FULL}"
+            exit 1
+          fi
 
           # Resolve version from tag push or manual input
           if [[ "$EVENT_NAME" == "push" ]]; then
@@ -531,8 +538,9 @@ jobs:
             '' \
             '[gateway]' \
             'port = 42617' \
-            'host = "[::]"' \
-            'allow_public_bind = true' \
+            'host = "127.0.0.1"' \
+            'allow_public_bind = false' \
+            'require_pairing = true' \
             'web_dist_dir = "/zeroclaw-data/web/dist"' \
             > docker-ctx/zeroclaw-data/.zeroclaw/config.toml
 
@@ -554,7 +562,6 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           platforms: linux/amd64,linux/arm64
 
       - name: Build and push Debian compatibility image
@@ -565,7 +572,6 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.tag }}-debian
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:debian
           platforms: linux/amd64,linux/arm64
 
   # ── Post-publish: package manager auto-sync ─────────────────────────

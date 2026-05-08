@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::write_audit_entry;
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
@@ -83,6 +84,10 @@ impl RabbitMqTool {
 
     fn is_dry_run(&self) -> bool {
         self.config.autonomy == OpsClawAutonomy::DryRun
+    }
+
+    fn mutating_block_reason(&self) -> Option<&'static str> {
+        mutating_action_block_reason(self.config.autonomy)
     }
 
     fn audit(&self, action: &str, detail: &str, duration_ms: u128, exit: i32) {
@@ -374,6 +379,9 @@ impl RabbitMqTool {
                 payload.len()
             )));
         }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
+        }
         let path = format!("exchanges/{vhost}/{}/publish", urlencode(exchange));
         let body = json!({
             "properties": {},
@@ -404,6 +412,9 @@ impl RabbitMqTool {
         if self.is_dry_run() {
             return Ok(ok_res(format!("[dry-run] would purge queue '{queue}'")));
         }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
+        }
         let path = format!("queues/{vhost}/{}/contents", urlencode(&queue));
         let resp = self.req(reqwest::Method::DELETE, &path).send().await?;
         let (ok, status, body) = consume(resp).await;
@@ -421,6 +432,9 @@ impl RabbitMqTool {
         };
         if self.is_dry_run() {
             return Ok(ok_res(format!("[dry-run] would delete queue '{queue}'")));
+        }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
         }
         let path = format!("queues/{vhost}/{}", urlencode(&queue));
         let resp = self.req(reqwest::Method::DELETE, &path).send().await?;
@@ -456,6 +470,9 @@ impl RabbitMqTool {
             return Ok(ok_res(format!(
                 "[dry-run] would bind {exchange} → {destination}({dtype}) rk='{routing_key}'"
             )));
+        }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
         }
         let seg = if dtype == "queue" { "q" } else { "e" };
         let path = format!(
@@ -498,6 +515,9 @@ impl RabbitMqTool {
             return Ok(ok_res(format!(
                 "[dry-run] would delete binding {exchange} → {destination}({dtype}) rk='{routing_key}'"
             )));
+        }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
         }
         let seg = if dtype == "queue" { "q" } else { "e" };
         // The binding's `props_key` segment — RabbitMQ encodes the routing

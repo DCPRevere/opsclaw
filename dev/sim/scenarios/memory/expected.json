@@ -7,8 +7,12 @@
       "notify_payload": {
         "severity_at_least": "warning",
         "category_matches": "(?i)(high.?memory|memory|oom)",
-        "content_must_mention": ["memory"],
-        "content_must_not_mention": ["dns error"]
+        "content_must_mention": [
+          "memory"
+        ],
+        "content_must_not_mention": [
+          "dns error"
+        ]
       }
     }
   },
@@ -22,7 +26,8 @@
     "within_seconds": 150,
     "assert": {
       "resolution_present_or_silent": true,
-      "lagging_alerts_allowed": 2
+      "lagging_alerts_allowed": 2,
+      "recovery_probe": "! pgrep -f \"stress-ng --vm\" >/dev/null"
     }
   }
 }

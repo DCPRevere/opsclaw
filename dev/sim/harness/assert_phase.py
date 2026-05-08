@@ -18,9 +18,9 @@ For phase_arm: expects an alert whose payload satisfies
 For phase_dedup: expects at most `extra_alerts_max` *new* alerts since
 the baseline count.
 
-For phase_disarm: expects either a resolution alert (severity=info or
-content mentions 'resolved'/'clear'/'recovered'), OR no new alerts
-(silence is acceptable for a clean recovery).
+For phase_disarm: alert assertions still allow a quiet recovery, but
+run.sh also requires the manifest's assert.recovery_probe command to pass
+after disarm.sh. Silence alone is not recovery proof.
 
 Exits 0 on PASS, non-zero on FAIL. Prints a single line of JSON
 describing the verdict for that phase.

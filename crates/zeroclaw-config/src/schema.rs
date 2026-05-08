@@ -1098,6 +1098,8 @@ pub struct NodesConfig {
     pub max_nodes: usize,
     /// Optional bearer token for node authentication.
     #[serde(default)]
+    #[secret]
+    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
     pub auth_token: Option<String>,
 }
 
@@ -7591,6 +7593,13 @@ pub struct WatiConfig {
     #[secret]
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
     pub api_token: String,
+    /// Shared secret required for inbound WATI webhook requests.
+    ///
+    /// Can also be set via `OPSCLAW_WATI_WEBHOOK_SECRET`.
+    #[serde(default)]
+    #[secret]
+    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
+    pub webhook_secret: Option<String>,
     /// WATI API base URL (default: <https://live-mt-server.wati.io>).
     #[serde(default = "default_wati_api_url")]
     pub api_url: String,

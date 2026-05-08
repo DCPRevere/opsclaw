@@ -18,6 +18,7 @@ use tokio_postgres::{Client, NoTls, Row};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::write_audit_entry;
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
@@ -249,10 +250,11 @@ impl Tool for PostgresTool {
         };
 
         let is_write = matches!(action.as_str(), "exec" | "analyze" | "vacuum" | "reindex");
-        if is_write && instance.autonomy == OpsClawAutonomy::DryRun {
-            self.audit(name, &format!("[blocked dry-run] {action}"), "", 0, -1);
+        if is_write && instance.autonomy != OpsClawAutonomy::Auto {
+            self.audit(name, &format!("[blocked autonomy] {action}"), "", 0, -1);
+            let reason = mutating_action_block_reason(instance.autonomy).unwrap();
             return Ok(pg_err(format!(
-                "dry-run mode: write action '{action}' rejected"
+                "{reason}: write action '{action}' rejected"
             )));
         }
 

@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::{RealSshExecutor, SshExecutor, TargetEntry, write_audit_entry};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -317,18 +318,25 @@ impl Tool for FirewallTool {
             }
         };
 
-        if is_write && target.autonomy == OpsClawAutonomy::DryRun {
-            let _ = write_audit_entry(
+        if is_write && target.autonomy != OpsClawAutonomy::Auto {
+            if let Err(e) = write_audit_entry(
                 target_name,
-                &format!("[blocked dry-run] {command}"),
+                &format!("[blocked autonomy] {command}"),
                 -1,
                 0,
                 self.audit_dir.as_ref(),
-            );
+            ) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("audit failure blocked mutating action: {e}")),
+                });
+            }
+            let reason = mutating_action_block_reason(target.autonomy).unwrap();
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("dry-run mode: write rejected ({command})")),
+                error: Some(format!("{reason} ({command})")),
             });
         }
 

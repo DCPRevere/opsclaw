@@ -19,7 +19,9 @@
 #   RPI_USER        — SSH user on the Pi              (default: pi)
 #   RPI_PORT        — SSH port                        (default: 22)
 #   RPI_DIR         — remote deployment dir           (default: /home/$RPI_USER/opsclaw)
-#   RPI_PASS        — SSH password (uses sshpass)     (default: prompt interactively)
+#   RPI_PASS        — SSH password (discouraged; requires RPI_ALLOW_SSHPASS=1)
+#   RPI_ALLOW_SSHPASS — explicitly allow sshpass when RPI_PASS is set (default: 0)
+#   SSH_STRICT_HOST_KEY_CHECKING — yes/accept-new/no (default: yes)
 #   CROSS_TOOL      — force "zigbuild" or "cross"     (default: auto-detect)
 
 set -euo pipefail
@@ -31,14 +33,19 @@ RPI_DIR="${RPI_DIR:-/home/${RPI_USER}/opsclaw}"
 TARGET="aarch64-unknown-linux-gnu"
 FEATURES="hardware,peripheral-rpi"
 BINARY="target/${TARGET}/release/opsclaw"
-SSH_OPTS="-p ${RPI_PORT} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+SSH_STRICT_HOST_KEY_CHECKING="${SSH_STRICT_HOST_KEY_CHECKING:-yes}"
+SSH_OPTS="-p ${RPI_PORT} -o StrictHostKeyChecking=${SSH_STRICT_HOST_KEY_CHECKING} -o ConnectTimeout=10"
 # scp uses -P (uppercase) for port; ssh uses -p (lowercase)
-SCP_OPTS="-P ${RPI_PORT} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+SCP_OPTS="-P ${RPI_PORT} -o StrictHostKeyChecking=${SSH_STRICT_HOST_KEY_CHECKING} -o ConnectTimeout=10"
 
 # If RPI_PASS is set, wrap ssh/scp with sshpass for non-interactive auth.
 SSH_CMD="ssh"
 SCP_CMD="scp"
 if [[ -n "${RPI_PASS:-}" ]]; then
+  if [[ "${RPI_ALLOW_SSHPASS:-0}" != "1" ]]; then
+    echo "ERROR: RPI_PASS/sshpass is disabled by default. Use SSH keys, or set RPI_ALLOW_SSHPASS=1 to opt in."
+    exit 1
+  fi
   if ! command -v sshpass &>/dev/null; then
     echo "ERROR: RPI_PASS is set but sshpass is not installed."
     echo "  brew install hudochenkov/sshpass/sshpass"

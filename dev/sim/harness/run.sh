@@ -15,6 +15,8 @@
 #                  Each slot costs ~1 GB RAM, 1 CPU + LLM API concurrency.
 #   --only         Run one scenario.
 #   --skip         Shell glob of scenarios to skip (e.g. '*cascade*').
+#   --include-quarantined
+#                  Also run scenarios with expected.quarantine.json manifests.
 #   --bring-up     Bring slots up inside the harness; tear them down
 #                  unless --no-tear-down is given.
 #
@@ -44,6 +46,7 @@ no_tear_down=false
 replay=false
 replay_manifest=""
 replay_port=18080
+include_quarantined=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -52,6 +55,7 @@ while [ $# -gt 0 ]; do
         --parallel)         parallel="$2";       shift 2 ;;
         --bring-up)         bring_up=true;       shift ;;
         --no-tear-down)     no_tear_down=true;   shift ;;
+        --include-quarantined) include_quarantined=true; shift ;;
         --replay)           replay=true;         shift ;;
         --replay-manifest)  replay_manifest="$2"; shift 2 ;;
         --replay-port)      replay_port="$2";    shift 2 ;;
@@ -131,11 +135,11 @@ print(n)
 }
 
 assert_phase() {
-    local scenario_dir="$1" phase="$2" baseline="$3" req="$4" trace="$5"
+    local expected="$1" phase="$2" baseline="$3" req="$4" trace="$5"
     local trace_arg=()
     [ -n "$trace" ] && [ -f "$trace" ] && trace_arg=(--trace "$trace")
     python3 "$ASSERT" \
-        "$scenario_dir/expected.json" "$req" "$phase" \
+        "$expected" "$req" "$phase" \
         --baseline-count "$baseline" \
         "${trace_arg[@]}"
 }
@@ -154,10 +158,25 @@ except Exception:
 "
 }
 
+phase_exists() {
+    local f="$1" phase="$2"
+    python3 -c "import json,sys;print(sys.argv[2] in json.load(open(sys.argv[1])))" "$f" "$phase"
+}
+
+recovery_probe() {
+    local f="$1"
+    python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+probe = d.get('phase_disarm', {}).get('assert', {}).get('recovery_probe')
+print(probe if isinstance(probe, str) else '')
+" "$f"
+}
+
 # Run one scenario on one slot. Writes the scenario verdict as a JSON
 # line to $VERDICTS_DIR/$name.json. Returns 0 PASS / 1 FAIL.
 run_scenario() {
-    local name="$1" slot="$2"
+    local name="$1" slot="$2" expected="$3"
     local sd; sd=$("$SLOT_SH" state-dir "$slot")
     local req="$sd/requests.jsonl"
     local trace="$sd/runtime-trace.jsonl"
@@ -166,9 +185,9 @@ run_scenario() {
     log "[$name] slot=$slot starting"
 
     local has_arm has_dedup has_disarm
-    has_arm=$(python3 -c "import json;print('phase_arm' in json.load(open('$scenario_dir/expected.json')))")
-    has_dedup=$(python3 -c "import json;print('phase_dedup' in json.load(open('$scenario_dir/expected.json')))")
-    has_disarm=$(python3 -c "import json;print('phase_disarm' in json.load(open('$scenario_dir/expected.json')))")
+    has_arm=$(phase_exists "$expected" phase_arm)
+    has_dedup=$(phase_exists "$expected" phase_dedup)
+    has_disarm=$(phase_exists "$expected" phase_disarm)
 
     local baseline_before; baseline_before=$(count_alerts "$req")
     local verdicts=()
@@ -176,7 +195,7 @@ run_scenario() {
 
     # arm ───────────────────────────────────────────────────────────
     if [ "$has_arm" = "True" ]; then
-        local arm_window; arm_window=$(expected_int "$scenario_dir/expected.json" "phase_arm.within_seconds" 150)
+        local arm_window; arm_window=$(expected_int "$expected" "phase_arm.within_seconds" 150)
         if [ -f "$scenario_dir/arm.sh" ]; then
             "$SLOT_SH" exec "$slot" bash -s < "$scenario_dir/arm.sh" || warn "[$name] arm.sh rc!=0"
         fi
@@ -186,7 +205,7 @@ run_scenario() {
             sleep 1
         done
         local j
-        j=$(assert_phase "$scenario_dir" phase_arm "$baseline_before" "$req" "$trace")
+        j=$(assert_phase "$expected" phase_arm "$baseline_before" "$req" "$trace")
         local rc=$?
         verdicts+=("\"arm\":$j")
         [ $rc -ne 0 ] && scenario_pass=false
@@ -195,11 +214,11 @@ run_scenario() {
 
     # dedup ─────────────────────────────────────────────────────────
     if [ "$has_dedup" = "True" ]; then
-        local dedup_wait; dedup_wait=$(expected_int "$scenario_dir/expected.json" "phase_dedup.wait_seconds" 75)
+        local dedup_wait; dedup_wait=$(expected_int "$expected" "phase_dedup.wait_seconds" 75)
         local baseline_after_arm; baseline_after_arm=$(count_alerts "$req")
         sleep "$dedup_wait"
         local j
-        j=$(assert_phase "$scenario_dir" phase_dedup "$baseline_after_arm" "$req" "$trace")
+        j=$(assert_phase "$expected" phase_dedup "$baseline_after_arm" "$req" "$trace")
         local rc=$?
         verdicts+=("\"dedup\":$j")
         [ $rc -ne 0 ] && scenario_pass=false
@@ -208,14 +227,37 @@ run_scenario() {
 
     # disarm ────────────────────────────────────────────────────────
     if [ "$has_disarm" = "True" ]; then
-        local disarm_window; disarm_window=$(expected_int "$scenario_dir/expected.json" "phase_disarm.within_seconds" 150)
+        local disarm_window; disarm_window=$(expected_int "$expected" "phase_disarm.within_seconds" 150)
         local baseline_after_dedup; baseline_after_dedup=$(count_alerts "$req")
         if [ -f "$scenario_dir/disarm.sh" ]; then
-            "$SLOT_SH" exec "$slot" bash -s < "$scenario_dir/disarm.sh" || warn "[$name] disarm.sh rc!=0"
+            if ! "$SLOT_SH" exec "$slot" bash -s < "$scenario_dir/disarm.sh"; then
+                warn "[$name] disarm.sh rc!=0"
+                scenario_pass=false
+            fi
+        fi
+        local probe; probe=$(recovery_probe "$expected")
+        if [ -n "$probe" ]; then
+            local probe_window; probe_window=$(expected_int "$expected" "phase_disarm.assert.recovery_probe_within_seconds" 10)
+            local probe_ok=false
+            local p
+            for p in $(seq 1 "$probe_window"); do
+                if "$SLOT_SH" exec "$slot" bash -lc "$probe"; then
+                    probe_ok=true
+                    break
+                fi
+                sleep 1
+            done
+            if [ "$probe_ok" != true ]; then
+                warn "[$name] recovery probe failed"
+                scenario_pass=false
+            fi
+        else
+            warn "[$name] phase_disarm is missing assert.recovery_probe"
+            scenario_pass=false
         fi
         sleep "$disarm_window"
         local j
-        j=$(assert_phase "$scenario_dir" phase_disarm "$baseline_after_dedup" "$req" "$trace")
+        j=$(assert_phase "$expected" phase_disarm "$baseline_after_dedup" "$req" "$trace")
         local rc=$?
         verdicts+=("\"disarm\":$j")
         [ $rc -ne 0 ] && scenario_pass=false
@@ -237,7 +279,8 @@ run_scenario() {
 
 START=$(date +%s)
 mkdir -p "$(dirname "$OUT")"
-VERDICTS_DIR=$(mktemp -d)
+VERDICTS_DIR="$REPO_ROOT/target/tier2-verdicts.$$"
+mkdir -p "$VERDICTS_DIR"
 trap 'shutdown_replay; rm -rf "$VERDICTS_DIR"' EXIT
 
 # Ensure opsclaw binary is built once; slots spawn daemons from it.
@@ -248,12 +291,22 @@ fi
 
 # Gather scenarios.
 queue=()
+queue_expected=()
 for edir in "$SIMDIR"/scenarios/*/; do
     name=$(basename "$edir")
-    [ -f "$edir/expected.json" ] || continue
+    expected="$edir/expected.json"
+    if [ ! -f "$expected" ]; then
+        expected="$edir/expected.quarantine.json"
+        [ -f "$expected" ] || continue
+        if ! $include_quarantined && [ "$only" != "$name" ]; then
+            warn "[$name] quarantined; skipping by default"
+            continue
+        fi
+    fi
     if [ -n "$only" ] && [ "$name" != "$only" ]; then continue; fi
     if [ -n "$skip" ] && [[ "$name" == $skip ]]; then continue; fi
     queue+=("$name")
+    queue_expected+=("$expected")
 done
 
 TOTAL=${#queue[@]}
@@ -283,10 +336,10 @@ declare -A slot_pid=()   # slot_n -> worker pid
 declare -A slot_name=()  # slot_n -> scenario name
 
 launch() {
-    local slot="$1" name="$2"
+    local slot="$1" name="$2" expected="$3"
     slot_name[$slot]="$name"
     (
-        run_scenario "$name" "$slot"
+        run_scenario "$name" "$slot" "$expected"
     ) &
     slot_pid[$slot]=$!
 }
@@ -294,7 +347,7 @@ launch() {
 # Initial fill.
 while [ "$next" -lt "$TOTAL" ] && [ "${#slot_pid[@]}" -lt "$parallel" ]; do
     s=${#slot_pid[@]}
-    launch "$s" "${queue[$next]}"
+    launch "$s" "${queue[$next]}" "${queue_expected[$next]}"
     next=$((next + 1))
 done
 
@@ -306,7 +359,7 @@ while [ "${#slot_pid[@]}" -gt 0 ]; do
             unset slot_pid[$s]
             unset slot_name[$s]
             if [ "$next" -lt "$TOTAL" ]; then
-                launch "$s" "${queue[$next]}"
+                launch "$s" "${queue[$next]}" "${queue_expected[$next]}"
                 next=$((next + 1))
             fi
         fi

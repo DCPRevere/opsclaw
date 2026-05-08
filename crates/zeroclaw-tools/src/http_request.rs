@@ -126,6 +126,7 @@ impl HttpRequestTool {
         } else {
             self.timeout_secs
         };
+        self.reject_private_resolved_ips(url).await?;
         let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .connect_timeout(Duration::from_secs(10))
@@ -145,6 +146,31 @@ impl HttpRequestTool {
         }
 
         Ok(request.send().await?)
+    }
+
+    async fn reject_private_resolved_ips(&self, url: &str) -> anyhow::Result<()> {
+        if self.allow_private_hosts {
+            return Ok(());
+        }
+        let parsed = reqwest::Url::parse(url)?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("URL must include a host"))?;
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| anyhow::anyhow!("URL must include a resolvable port"))?;
+        let addrs: Vec<_> = tokio::net::lookup_host((host, port)).await?.collect();
+        if addrs.is_empty() {
+            anyhow::bail!("Host '{host}' did not resolve to any addresses");
+        }
+        if let Some(addr) = addrs
+            .iter()
+            .find(|addr| is_non_global_ip(addr.ip()))
+            .map(|addr| addr.ip())
+        {
+            anyhow::bail!("Blocked DNS-resolved private/non-global address for {host}: {addr}");
+        }
+        Ok(())
     }
 
     fn truncate_response(&self, text: &str) -> String {
@@ -417,13 +443,17 @@ fn is_private_or_local_host(host: &str) -> bool {
     }
 
     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v4) => is_non_global_v4(v4),
-            std::net::IpAddr::V6(v6) => is_non_global_v6(v6),
-        };
+        return is_non_global_ip(ip);
     }
 
     false
+}
+
+fn is_non_global_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_non_global_v4(v4),
+        std::net::IpAddr::V6(v6) => is_non_global_v6(v6),
+    }
 }
 
 /// Returns true if the IPv4 address is not globally routable.

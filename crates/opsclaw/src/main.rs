@@ -101,6 +101,7 @@ pub use zeroclaw::{
 
 // OpsClaw-specific modules
 mod daemon_ext;
+mod oap;
 mod onboard;
 mod openshell;
 mod ops;
@@ -1296,6 +1297,33 @@ async fn main() -> Result<()> {
                     tokio::spawn(async move {
                         if let Err(e) = tools::a2a_server::run_a2a_server(server_cfg).await {
                             tracing::error!(error = %e, "A2A server exited with error");
+                        }
+                    });
+                }
+            }
+
+            // Optional inbound OAP server. Off by default.
+            if let Some(oap) = ops_config.oap.as_ref() {
+                if oap.server.enabled {
+                    let mut server_cfg = oap.server.clone();
+                    if !server_cfg.token.is_empty() {
+                        match ops_config.decrypt_secret(&server_cfg.token).await {
+                            Ok(plain) => server_cfg.token = plain,
+                            Err(e) => {
+                                bail!("Failed to decrypt OAP server token: {e}");
+                            }
+                        }
+                    }
+                    let server_ops_config = ops_config.clone();
+                    info!(
+                        "Starting OAP server on {}:{}",
+                        server_cfg.bind, server_cfg.port
+                    );
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            oap::server::run_oap_server(server_cfg, server_ops_config).await
+                        {
+                            tracing::error!(error = %e, "OAP server exited with error");
                         }
                     });
                 }

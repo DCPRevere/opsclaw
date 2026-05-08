@@ -14,6 +14,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_OUTPUT_BYTES: usize = 1_048_576;
 
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 
 // ── Read-only allowlist / denylist ──────────────────────
 
@@ -87,6 +88,15 @@ const DENY_COMMANDS: &[&str] = &[
 
 /// Check whether `command` is permitted under observe-mode policy.
 pub fn is_read_only_command(command: &str) -> Result<(), String> {
+    if let Some(ch) = command
+        .chars()
+        .find(|c| matches!(c, ';' | '|' | '&' | '>' | '<' | '`' | '$' | '\n' | '\r'))
+    {
+        return Err(format!(
+            "shell control/metacharacter '{ch}' is not allowed in dry-run mode"
+        ));
+    }
+
     let tokens: Vec<&str> = command.split_whitespace().collect();
     if tokens.is_empty() {
         return Err("empty command".into());
@@ -464,9 +474,27 @@ pub fn write_audit_entry_qualified(
     let env_field = env_name.unwrap_or("-");
     writeln!(
         f,
-        "[{timestamp}] PROJECT={project_field} ENV={env_field} TARGET={target_name} CMD={command} EXIT={exit_code} DURATION={duration_ms}ms"
+        "[{timestamp}] PROJECT={} ENV={} TARGET={} CMD={} EXIT={exit_code} DURATION={duration_ms}ms",
+        sanitize_audit_field(project_field),
+        sanitize_audit_field(env_field),
+        sanitize_audit_field(target_name),
+        sanitize_audit_field(command),
     )?;
     Ok(())
+}
+
+fn sanitize_audit_field(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 // ── SshCommandRunner ────────────────────────────────────
@@ -647,12 +675,14 @@ impl Tool for SshTool {
         // Autonomy enforcement — DryRun is intercepted by the
         // DryRunCommandRunner wrapper at a higher level, but if a caller
         // reaches SshTool directly we still block writes.
-        if target.autonomy == OpsClawAutonomy::DryRun {
-            if let Err(reason) = is_read_only_command(command) {
+        if target.autonomy != OpsClawAutonomy::Auto {
+            if let Err(read_only_reason) = is_read_only_command(command) {
+                let reason = mutating_action_block_reason(target.autonomy)
+                    .unwrap_or(read_only_reason.as_str());
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("dry-run mode: {reason}")),
+                    error: Some(format!("{reason}: {read_only_reason}")),
                 });
             }
         }
@@ -779,11 +809,19 @@ mod tests {
 
     #[test]
     fn observe_rejects_write_commands() {
-        assert!(is_read_only_command("rm -rf /tmp/data").is_err());
+        assert!(is_read_only_command("rm -rf /var/data").is_err());
         assert!(is_read_only_command("mv a b").is_err());
         assert!(is_read_only_command("shutdown -h now").is_err());
         assert!(is_read_only_command("kill -9 1234").is_err());
         assert!(is_read_only_command("apt install foo").is_err());
+    }
+
+    #[test]
+    fn observe_rejects_shell_control_operators() {
+        assert!(is_read_only_command("ls; rm -rf /").is_err());
+        assert!(is_read_only_command("ps aux | grep root").is_err());
+        assert!(is_read_only_command("echo $(whoami)").is_err());
+        assert!(is_read_only_command("cat /etc/hostname\nrm -rf /").is_err());
     }
 
     #[test]
@@ -810,6 +848,14 @@ mod tests {
     fn empty_command_rejected() {
         assert!(is_read_only_command("").is_err());
         assert!(is_read_only_command("   ").is_err());
+    }
+
+    #[test]
+    fn audit_fields_escape_control_characters() {
+        assert_eq!(
+            sanitize_audit_field("prod\nCMD=evil\t"),
+            "prod\\nCMD=evil\\t"
+        );
     }
 
     // ── Tool metadata ───────────────────────────────────
@@ -857,11 +903,22 @@ mod tests {
     async fn execute_observe_rejects_write() {
         let tool = SshTool::new(config_with(vec![default_project(OpsClawAutonomy::DryRun)]));
         let result = tool
-            .execute(json!({"target": "prod-web-1", "command": "rm -rf /tmp"}))
+            .execute(json!({"target": "prod-web-1", "command": "rm -rf /var/data"}))
             .await
             .unwrap();
         assert!(!result.success);
         assert!(result.error.as_deref().unwrap().contains("dry-run mode"));
+    }
+
+    #[tokio::test]
+    async fn execute_approve_rejects_mutating_command() {
+        let tool = SshTool::new(config_with(vec![default_project(OpsClawAutonomy::Approve)]));
+        let result = tool
+            .execute(json!({"target": "prod-web-1", "command": "sudo systemctl restart nginx"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.as_deref().unwrap().contains("approve mode"));
     }
 
     #[tokio::test]

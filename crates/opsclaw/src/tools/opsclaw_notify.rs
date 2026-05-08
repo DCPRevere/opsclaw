@@ -205,27 +205,45 @@ impl Tool for OpsClawNotifyTool {
                     Ok(ToolResult {
                         success: true,
                         output: format!(
-                            "Alert sent to {webhook_url} (status={status}, \
+                            "Alert sent to configured webhook (status={status}, \
                              severity={severity}, category={category})"
                         ),
                         error: None,
                     })
                 } else {
-                    let body = resp.text().await.unwrap_or_default();
                     Ok(ToolResult {
                         success: false,
                         output: String::new(),
-                        error: Some(format!("Webhook rejected alert: {status} {body}")),
+                        error: Some(format!("Webhook rejected alert: {status}")),
                     })
                 }
             }
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("Webhook POST failed: {e}")),
+                error: Some(format!(
+                    "Webhook POST failed: {}",
+                    redact_url(&e.to_string())
+                )),
             }),
         }
     }
+}
+
+fn redact_url(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(pos) = rest.find("http://").or_else(|| rest.find("https://")) {
+        out.push_str(&rest[..pos]);
+        out.push_str("[redacted-url]");
+        let after = &rest[pos..];
+        let end = after
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '}'))
+            .unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -299,5 +317,12 @@ mod tests {
             .unwrap();
         assert!(!r.success);
         assert!(r.error.unwrap().contains("severity"));
+    }
+
+    #[test]
+    fn redacts_urls_in_error_messages() {
+        let msg = redact_url("error sending request for url (https://hooks.example/secret-token)");
+        assert!(!msg.contains("secret-token"));
+        assert!(msg.contains("[redacted-url]"));
     }
 }

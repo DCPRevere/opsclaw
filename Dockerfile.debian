@@ -99,8 +99,9 @@ RUN mkdir -p /zeroclaw-data/.zeroclaw /zeroclaw-data/workspace /zeroclaw-data/we
         '' \
         '[gateway]' \
         'port = 42617' \
-        'host = "[::]"' \
-        'allow_public_bind = true' \
+        'host = "127.0.0.1"' \
+        'allow_public_bind = false' \
+        'require_pairing = true' \
         'web_dist_dir = "/zeroclaw-data/web/dist"' \
         '' \
         '[autonomy]' \

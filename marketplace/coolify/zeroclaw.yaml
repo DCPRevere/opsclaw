@@ -6,17 +6,18 @@
 
 services:
   zeroclaw:
-    image: ghcr.io/zeroclaw-labs/zeroclaw:latest
+    image: ghcr.io/zeroclaw-labs/zeroclaw:0.7.1
     restart: unless-stopped
     environment:
       - API_KEY=${SERVICE_PASSWORD_APIKEY:-}
       - PROVIDER=${PROVIDER:-openrouter}
-      - ZEROCLAW_ALLOW_PUBLIC_BIND=true
+      - ZEROCLAW_ALLOW_PUBLIC_BIND=false
+      - ZEROCLAW_REQUIRE_PAIRING=true
       - ZEROCLAW_GATEWAY_PORT=42617
     volumes:
       - zeroclaw-data:/zeroclaw-data
     ports:
-      - "42617:42617"
+      - "127.0.0.1:42617:42617"
     deploy:
       resources:
         limits:

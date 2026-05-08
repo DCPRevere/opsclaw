@@ -7,13 +7,22 @@
       "notify_payload": {
         "severity_at_least": "warning",
         "category_matches": "(?i)(unreach|ssh|connectivity|network|timeout|connect)",
-        "content_must_mention": ["unreach"],
-        "content_must_not_mention": ["all healthy", "looks healthy", "everything operational"]
+        "content_must_mention": [
+          "unreach"
+        ],
+        "content_must_not_mention": [
+          "all healthy",
+          "looks healthy",
+          "everything operational"
+        ]
       }
     }
   },
   "phase_disarm": {
     "within_seconds": 120,
-    "assert": { "resolution_present_or_silent": true }
+    "assert": {
+      "resolution_present_or_silent": true,
+      "recovery_probe": "! iptables -C INPUT -p tcp --dport 2222 -j DROP 2>/dev/null"
+    }
   }
 }

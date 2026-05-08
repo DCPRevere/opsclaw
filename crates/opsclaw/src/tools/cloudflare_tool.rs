@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::write_audit_entry;
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
@@ -80,6 +81,10 @@ impl CloudflareTool {
 
     fn is_dry_run(&self) -> bool {
         self.config.autonomy == OpsClawAutonomy::DryRun
+    }
+
+    fn mutating_block_reason(&self) -> Option<&'static str> {
+        mutating_action_block_reason(self.config.autonomy)
     }
 
     fn audit(&self, action: &str, detail: &str, duration_ms: u128, exit: i32) {
@@ -385,6 +390,9 @@ impl CloudflareTool {
                 "[dry-run] would create DNS {type_} {name} → {content} in zone {zone}"
             )));
         }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
+        }
         let mut body = json!({"type": type_, "name": name, "content": content});
         if let Some(ttl) = args.get("ttl").and_then(|v| v.as_u64()) {
             body["ttl"] = json!(ttl);
@@ -418,6 +426,9 @@ impl CloudflareTool {
             return Ok(ok_res(format!(
                 "[dry-run] would update DNS {id} in zone {zone}"
             )));
+        }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
         }
         let mut body = serde_json::Map::new();
         for k in ["type", "name", "content"] {
@@ -458,6 +469,9 @@ impl CloudflareTool {
                 "[dry-run] would delete DNS {id} in zone {zone}"
             )));
         }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
+        }
         let path = format!("zones/{zone}/dns_records/{id}");
         let resp = self.req(reqwest::Method::DELETE, &path).send().await?;
         let (ok, status, body) = consume(resp).await;
@@ -495,6 +509,9 @@ impl CloudflareTool {
                 "[dry-run] would purge zone {zone} (everything={purge_everything}, {} files)",
                 files.len()
             )));
+        }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
         }
         let body = if purge_everything {
             json!({"purge_everything": true})
@@ -536,6 +553,9 @@ impl CloudflareTool {
             return Ok(ok_res(format!(
                 "[dry-run] would set {kind} rule {rule_id} enabled={enabled} in zone {zone}"
             )));
+        }
+        if let Some(reason) = self.mutating_block_reason() {
+            return Ok(err(reason));
         }
         // PATCH the ruleset's rule.
         let path = format!("zones/{zone}/rulesets/phases/{phase}/entrypoint/rules/{rule_id}");

@@ -60,7 +60,6 @@ use zeroclaw_runtime::platform;
 use zeroclaw_runtime::security::pairing::{PairingGuard, constant_time_eq, is_public_bind};
 use zeroclaw_runtime::tools;
 use zeroclaw_runtime::tools::CanvasStore;
-use zeroclaw_runtime::util::truncate_with_ellipsis;
 
 /// Maximum request body size (64KB) — prevents memory exhaustion
 pub const MAX_BODY_SIZE: usize = 65_536;
@@ -127,6 +126,43 @@ fn hash_webhook_secret(value: &str) -> String {
 
     let digest = Sha256::digest(value.as_bytes());
     hex::encode(digest)
+}
+
+fn resolve_wati_webhook_secret(config: &Config) -> Option<String> {
+    std::env::var("OPSCLAW_WATI_WEBHOOK_SECRET")
+        .ok()
+        .and_then(|secret| {
+            let secret = secret.trim();
+            (!secret.is_empty()).then(|| secret.to_owned())
+        })
+        .or_else(|| {
+            config.channels.wati.as_ref().and_then(|wati| {
+                wati.webhook_secret
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|secret| !secret.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+        })
+}
+
+fn verify_shared_webhook_secret(configured_secret: &str, headers: &HeaderMap) -> bool {
+    let Some(provided_hash) = headers
+        .get("X-Webhook-Secret")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty())
+        .map(hash_webhook_secret)
+    else {
+        return false;
+    };
+    constant_time_eq(&provided_hash, &hash_webhook_secret(configured_secret))
+}
+
+fn hash_webhook_payload(message: &str) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(message.as_bytes()).to_vec()
 }
 
 /// How often the rate limiter sweeps stale IP entries from its map.
@@ -230,7 +266,22 @@ impl GatewayRateLimiter {
 pub struct IdempotencyStore {
     ttl: Duration,
     max_keys: usize,
-    keys: Mutex<HashMap<String, Instant>>,
+    keys: Mutex<HashMap<String, IdempotencyRecord>>,
+}
+
+#[derive(Debug, Clone)]
+struct IdempotencyRecord {
+    seen_at: Instant,
+    payload_hash: Vec<u8>,
+    response: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IdempotencyBegin {
+    New,
+    InProgress,
+    Replay(serde_json::Value),
+    Conflict,
 }
 
 impl IdempotencyStore {
@@ -242,29 +293,60 @@ impl IdempotencyStore {
         }
     }
 
-    /// Returns true if this key is new and is now recorded.
-    fn record_if_new(&self, key: &str) -> bool {
+    fn begin(&self, key: &str, payload_hash: Vec<u8>) -> IdempotencyBegin {
         let now = Instant::now();
         let mut keys = self.keys.lock();
 
-        keys.retain(|_, seen_at| now.duration_since(*seen_at) < self.ttl);
+        keys.retain(|_, record| now.duration_since(record.seen_at) < self.ttl);
 
-        if keys.contains_key(key) {
-            return false;
+        if let Some(existing) = keys.get(key) {
+            if existing.payload_hash != payload_hash {
+                return IdempotencyBegin::Conflict;
+            }
+            return match &existing.response {
+                Some(response) => IdempotencyBegin::Replay(response.clone()),
+                None => IdempotencyBegin::InProgress,
+            };
         }
 
         if keys.len() >= self.max_keys {
             let evict_key = keys
                 .iter()
-                .min_by_key(|(_, seen_at)| *seen_at)
+                .min_by_key(|(_, record)| record.seen_at)
                 .map(|(k, _)| k.clone());
             if let Some(evict_key) = evict_key {
                 keys.remove(&evict_key);
             }
         }
 
-        keys.insert(key.to_owned(), now);
-        true
+        keys.insert(
+            key.to_owned(),
+            IdempotencyRecord {
+                seen_at: now,
+                payload_hash,
+                response: None,
+            },
+        );
+        IdempotencyBegin::New
+    }
+
+    #[cfg(test)]
+    fn record_if_new(&self, key: &str) -> bool {
+        matches!(
+            self.begin(key, hash_webhook_payload(key)),
+            IdempotencyBegin::New
+        )
+    }
+
+    fn complete(&self, key: &str, response: serde_json::Value) {
+        if let Some(record) = self.keys.lock().get_mut(key) {
+            record.response = Some(response);
+            record.seen_at = Instant::now();
+        }
+    }
+
+    fn forget(&self, key: &str) {
+        self.keys.lock().remove(key);
     }
 }
 
@@ -1224,7 +1306,14 @@ fn prometheus_observer_from_state(
 }
 
 /// GET /metrics — Prometheus text exposition format
-async fn handle_metrics(State(state): State<AppState>) -> impl IntoResponse {
+async fn handle_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Err(resp) = api::require_auth(&state, &headers) {
+        return resp.into_response();
+    }
+
     let body = {
         #[cfg(feature = "observability-prometheus")]
         {
@@ -1246,6 +1335,7 @@ async fn handle_metrics(State(state): State<AppState>) -> impl IntoResponse {
         [(header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
         body,
     )
+        .into_response()
 }
 
 /// POST /pair — exchange one-time code for bearer token
@@ -1477,24 +1567,42 @@ async fn handle_webhook(
         }
     };
 
-    // ── Idempotency (optional) ──
-    if let Some(idempotency_key) = headers
+    let idempotency_key = headers
         .get("X-Idempotency-Key")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        && !state.idempotency_store.record_if_new(idempotency_key)
-    {
-        tracing::info!("Webhook duplicate ignored (idempotency key: {idempotency_key})");
-        let body = serde_json::json!({
-            "status": "duplicate",
-            "idempotent": true,
-            "message": "Request already processed for this idempotency key"
-        });
-        return (StatusCode::OK, Json(body));
-    }
+        .map(str::to_owned);
 
     let message = &webhook_body.message;
+    if let Some(idempotency_key) = idempotency_key.as_deref() {
+        match state
+            .idempotency_store
+            .begin(idempotency_key, hash_webhook_payload(message))
+        {
+            IdempotencyBegin::New => {}
+            IdempotencyBegin::Replay(body) => {
+                tracing::info!("Webhook duplicate replayed (idempotency key: {idempotency_key})");
+                return (StatusCode::OK, Json(body));
+            }
+            IdempotencyBegin::InProgress => {
+                tracing::info!(
+                    "Webhook duplicate still processing (idempotency key: {idempotency_key})"
+                );
+                let err = serde_json::json!({
+                    "error": "Request already in progress for this idempotency key"
+                });
+                return (StatusCode::CONFLICT, Json(err));
+            }
+            IdempotencyBegin::Conflict => {
+                tracing::warn!("Webhook idempotency key reused with different payload");
+                let err = serde_json::json!({
+                    "error": "Idempotency key already used with a different request body"
+                });
+                return (StatusCode::CONFLICT, Json(err));
+            }
+        }
+    }
     let session_id = webhook_session_id(&headers);
 
     if state.auto_save && !zeroclaw_memory::should_skip_autosave_content(message) {
@@ -1570,6 +1678,11 @@ async fn handle_webhook(
 
             let response = chat_response.text.unwrap_or_default();
             let body = serde_json::json!({"response": response, "model": state.model});
+            if let Some(idempotency_key) = idempotency_key.as_deref() {
+                state
+                    .idempotency_store
+                    .complete(idempotency_key, body.clone());
+            }
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
@@ -1608,6 +1721,9 @@ async fn handle_webhook(
 
             tracing::error!("Webhook provider error: {}", sanitized);
             let err = serde_json::json!({"error": "LLM request failed"});
+            if let Some(idempotency_key) = idempotency_key.as_deref() {
+                state.idempotency_store.forget(idempotency_key);
+            }
             (StatusCode::INTERNAL_SERVER_ERROR, Json(err))
         }
     }
@@ -1731,10 +1847,10 @@ async fn handle_whatsapp_message(
 
     // Process each message
     for msg in &messages {
-        tracing::info!(
-            "WhatsApp message from {}: {}",
-            msg.sender,
-            truncate_with_ellipsis(&msg.content, 50)
+        tracing::info!("WhatsApp message received from {}", msg.sender);
+        tracing::debug!(
+            "WhatsApp message content redacted at info level ({} bytes)",
+            msg.content.len()
         );
 
         // Route approval replies to pending approval requests before dispatching to agent
@@ -1861,10 +1977,10 @@ async fn handle_linq_webhook(
 
     // Process each message
     for msg in &messages {
-        tracing::info!(
-            "Linq message from {}: {}",
-            msg.sender,
-            truncate_with_ellipsis(&msg.content, 50)
+        tracing::info!("Linq message received from {}", msg.sender);
+        tracing::debug!(
+            "Linq message content redacted at info level ({} bytes)",
+            msg.content.len()
         );
         let session_id = sender_session_id("linq", msg);
 
@@ -1940,13 +2056,36 @@ pub struct WatiVerifyQuery {
 }
 
 /// POST /wati — incoming WATI WhatsApp message webhook
-async fn handle_wati_webhook(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
+async fn handle_wati_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
     let Some(ref wati) = state.wati else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "WATI not configured"})),
         );
     };
+
+    let webhook_secret = {
+        let config = state.config.lock();
+        resolve_wati_webhook_secret(&config)
+    };
+    let Some(webhook_secret) = webhook_secret else {
+        tracing::warn!("WATI webhook rejected because no webhook secret is configured");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Webhook authentication required"})),
+        );
+    };
+    if !verify_shared_webhook_secret(&webhook_secret, &headers) {
+        tracing::warn!("WATI webhook secret verification failed");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid webhook secret"})),
+        );
+    }
 
     // Parse JSON body
     let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
@@ -1976,10 +2115,10 @@ async fn handle_wati_webhook(State(state): State<AppState>, body: Bytes) -> impl
 
     // Process each message
     for msg in &messages {
-        tracing::info!(
-            "WATI message from {}: {}",
-            msg.sender,
-            truncate_with_ellipsis(&msg.content, 50)
+        tracing::info!("WATI message received from {}", msg.sender);
+        tracing::debug!(
+            "WATI message content redacted at info level ({} bytes)",
+            msg.content.len()
         );
         let session_id = sender_session_id("wati", msg);
 
@@ -2094,10 +2233,10 @@ async fn handle_nextcloud_talk_webhook(
     }
 
     for msg in &messages {
-        tracing::info!(
-            "Nextcloud Talk message from {}: {}",
-            msg.sender,
-            truncate_with_ellipsis(&msg.content, 50)
+        tracing::info!("Nextcloud Talk message received from {}", msg.sender);
+        tracing::debug!(
+            "Nextcloud Talk message content redacted at info level ({} bytes)",
+            msg.content.len()
         );
         let session_id = sender_session_id("nextcloud_talk", msg);
 
@@ -2315,14 +2454,12 @@ async fn handle_admin_paircode_new(
     }
 }
 
-/// GET /pair/code — fetch the initial pairing code (no auth, no localhost restriction).
-///
-/// This endpoint is intentionally public so that Docker and remote users can see
-/// the pairing code on the web dashboard without needing terminal access. It only
-/// returns a code when the gateway is in its initial un-paired state (no devices
-/// paired yet and a pairing code exists). Once the first device pairs, this
-/// endpoint stops returning a code.
-async fn handle_pair_code(State(state): State<AppState>) -> impl IntoResponse {
+/// GET /pair/code — fetch the initial pairing code (localhost only).
+async fn handle_pair_code(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    require_localhost(&peer)?;
     let require = state.pairing.require_pairing();
     let is_paired = state.pairing.is_paired();
 
@@ -2339,7 +2476,7 @@ async fn handle_pair_code(State(state): State<AppState>) -> impl IntoResponse {
         "pairing_code": code,
     });
 
-    (StatusCode::OK, Json(body))
+    Ok((StatusCode::OK, Json(body)))
 }
 
 #[cfg(test)]
@@ -2451,7 +2588,9 @@ mod tests {
             webauthn: None,
         };
 
-        let response = handle_metrics(State(state)).await.into_response();
+        let response = handle_metrics(State(state), HeaderMap::new())
+            .await
+            .into_response();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response
@@ -2524,7 +2663,9 @@ mod tests {
             webauthn: None,
         };
 
-        let response = handle_metrics(State(state)).await.into_response();
+        let response = handle_metrics(State(state), HeaderMap::new())
+            .await
+            .into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -2949,8 +3090,7 @@ mod tests {
 
         let payload = second.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(parsed["status"], "duplicate");
-        assert_eq!(parsed["idempotent"], true);
+        assert_eq!(parsed["response"], "ok");
         assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 1);
     }
 
@@ -3046,6 +3186,45 @@ mod tests {
         assert_eq!(one, two);
         assert_ne!(one, other);
         assert_eq!(one.len(), 64);
+    }
+
+    #[test]
+    fn idempotency_store_replays_success_and_rejects_payload_conflicts() {
+        let store = IdempotencyStore::new(Duration::from_secs(300), 10);
+        let hash = hash_webhook_payload("hello");
+        assert_eq!(store.begin("key-1", hash.clone()), IdempotencyBegin::New);
+        assert_eq!(
+            store.begin("key-1", hash.clone()),
+            IdempotencyBegin::InProgress
+        );
+
+        let response = serde_json::json!({"response": "ok"});
+        store.complete("key-1", response.clone());
+        assert_eq!(
+            store.begin("key-1", hash),
+            IdempotencyBegin::Replay(response)
+        );
+        assert_eq!(
+            store.begin("key-1", hash_webhook_payload("different")),
+            IdempotencyBegin::Conflict
+        );
+    }
+
+    #[test]
+    fn shared_webhook_secret_verification_requires_matching_header() {
+        let secret = generate_test_secret();
+        let mut headers = HeaderMap::new();
+        assert!(!verify_shared_webhook_secret(&secret, &headers));
+
+        let wrong_secret = generate_test_secret();
+        headers.insert(
+            "X-Webhook-Secret",
+            HeaderValue::from_str(&wrong_secret).unwrap(),
+        );
+        assert!(!verify_shared_webhook_secret(&secret, &headers));
+
+        headers.insert("X-Webhook-Secret", HeaderValue::from_str(&secret).unwrap());
+        assert!(verify_shared_webhook_secret(&secret, &headers));
     }
 
     #[tokio::test]

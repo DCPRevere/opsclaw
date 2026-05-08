@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::{RealSshExecutor, SshExecutor, TargetEntry, write_audit_entry};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
@@ -286,15 +287,18 @@ impl Tool for DockerTool {
             Build::Err(e) => return Ok(err(e)),
         };
 
-        if is_write && target.autonomy == OpsClawAutonomy::DryRun {
-            let _ = write_audit_entry(
+        if is_write && target.autonomy != OpsClawAutonomy::Auto {
+            if let Err(e) = write_audit_entry(
                 target_name,
-                &format!("[blocked dry-run] {command}"),
+                &format!("[blocked autonomy] {command}"),
                 -1,
                 0,
                 self.audit_dir.as_ref(),
-            );
-            return Ok(err(format!("dry-run mode: write rejected ({command})")));
+            ) {
+                return Ok(err(format!("audit failure blocked mutating action: {e}")));
+            }
+            let reason = mutating_action_block_reason(target.autonomy).unwrap();
+            return Ok(err(format!("{reason} ({command})")));
         }
 
         let start = std::time::Instant::now();
@@ -486,6 +490,18 @@ mod tests {
             .unwrap();
         assert!(!r.success);
         assert!(r.error.unwrap().contains("dry-run"));
+        assert!(last.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn write_blocked_in_approve_mode_without_server_grant() {
+        let (tool, last) = tool_with(OpsClawAutonomy::Approve);
+        let r = tool
+            .execute(json!({"target": "prod", "action": "restart", "container": "web"}))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("approve mode"));
         assert!(last.lock().unwrap().is_none());
     }
 

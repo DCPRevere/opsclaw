@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
 use crate::ops_config::OpsClawAutonomy;
+use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::write_audit_entry;
 
 const MAX_OUTPUT_BYTES: usize = 8 * 1024;
@@ -380,6 +381,9 @@ impl PagerDutyTool {
                 error: None,
             });
         }
+        if let Some(reason) = mutating_action_block_reason(self.config.autonomy) {
+            return Ok(param_err(reason));
+        }
 
         let body = json!({
             "incidents": ids.iter().map(|id| json!({
@@ -424,6 +428,9 @@ impl PagerDutyTool {
                 output: format!("[dry-run] would add note to {id}: {content}"),
                 error: None,
             });
+        }
+        if let Some(reason) = mutating_action_block_reason(self.config.autonomy) {
+            return Ok(param_err(reason));
         }
         let body = json!({"note": {"content": content}});
         let resp = match self

@@ -55,6 +55,7 @@ Commands:
   test-system     Run system tests only
   test-live       Run live tests (requires credentials)
   test-manual     Run manual test scripts (dockerignore, etc.)
+  secret-hygiene  Check tracked/local fixtures for committed-looking secrets
   build         Run release build smoke check (container only)
   audit         Run cargo audit (container only)
   deny          Run cargo deny check (container only)
@@ -115,6 +116,10 @@ case "$1" in
     run_in_ci "bash tests/manual/test_dockerignore.sh"
     ;;
 
+  secret-hygiene)
+    run_in_ci "bash scripts/ci/secret_hygiene_gate.sh"
+    ;;
+
   build)
     run_in_ci "cargo build --release --locked --verbose"
     ;;
@@ -139,6 +144,7 @@ case "$1" in
 
   all)
     run_in_ci "./scripts/ci/rust_quality_gate.sh"
+    run_in_ci "bash scripts/ci/secret_hygiene_gate.sh"
     run_in_ci "cargo test --locked --verbose"
     run_in_ci "bash tests/manual/test_dockerignore.sh"
     run_in_ci "cargo build --release --locked --verbose"

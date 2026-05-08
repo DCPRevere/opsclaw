@@ -385,7 +385,7 @@ message_timeout_secs = 300
 
 [channels_config.webhook]
 port = 8080
-secret = "mytoken123"
+secret = ""
 
 [channels_config.ack_reaction]
 
@@ -426,10 +426,10 @@ provider = "none"
 
 [gateway]
 port = 8080
-host = "0.0.0.0"
-require_pairing = false
-trusted_ips = ["0.0.0.0/0"]
-allow_public_bind = true
+host = "127.0.0.1"
+require_pairing = true
+trusted_ips = ["127.0.0.1/32", "::1/128"]
+allow_public_bind = false
 paired_tokens = []
 pair_rate_limit_per_minute = 10
 webhook_rate_limit_per_minute = 60
@@ -437,7 +437,7 @@ trust_forwarded_headers = false
 rate_limit_max_keys = 10000
 idempotency_ttl_secs = 300
 idempotency_max_keys = 10000
-webhook_secret = "mytoken123"
+webhook_secret = ""
 
 [gateway.node_control]
 enabled = false

@@ -171,6 +171,7 @@ impl SecretStore {
     /// Load the encryption key from disk, or create one if it doesn't exist.
     fn load_or_create_key(&self) -> Result<Vec<u8>> {
         if self.key_path.exists() {
+            self.validate_existing_key_file_permissions()?;
             let hex_key =
                 fs::read_to_string(&self.key_path).context("Failed to read secret key file")?;
             hex_decode(hex_key.trim()).context("Secret key file is corrupt")
@@ -253,6 +254,30 @@ impl SecretStore {
 
             Ok(key)
         }
+    }
+
+    #[cfg(unix)]
+    fn validate_existing_key_file_permissions(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = fs::metadata(&self.key_path).context("Failed to inspect secret key file")?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "Secret key path is not a regular file: {}",
+            self.key_path.display()
+        );
+        let mode = metadata.permissions().mode();
+        anyhow::ensure!(
+            mode & 0o077 == 0,
+            "Secret key file permissions are too broad: {} must not be readable, writable, or executable by group/other",
+            self.key_path.display()
+        );
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn validate_existing_key_file_permissions(&self) -> Result<()> {
+        Ok(())
     }
 }
 

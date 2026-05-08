@@ -108,11 +108,6 @@ When uncertain, classify higher.
    or `dev/test.sh` harnesses for broad/high-risk changes.
 5. Document behavior, risk, side effects, and rollback notes in PRs.
 
-Work from a non-`master` branch, open PRs to `master`, use conventional commit
-titles, follow `.github/pull_request_template.md`, and never commit secrets,
-personal data, or real identity information. See
-`docs/book/src/contributing/privacy.md`.
-
 ## Anti-patterns
 
 - Do not put OpsClaw product logic into `zeroclaw-*` crates.

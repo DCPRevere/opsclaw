@@ -1,29 +1,31 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import type { CronSettings } from '@/lib/api';
 import {
-  Clock,
-  Plus,
-  Trash2,
-  X,
-  CheckCircle,
-  XCircle,
-  AlertCircle,
-  ChevronDown,
-  ChevronRight,
-  RefreshCw,
-  Pencil,
-} from 'lucide-react';
-import type { CronJob, CronRun } from '@/types/api';
-import {
-  getCronJobs,
   addCronJob,
   deleteCronJob,
+  getCronJobs,
   getCronRuns,
   getCronSettings,
-  patchCronSettings,
   patchCronJob,
+  patchCronSettings,
+  triggerCronJob,
 } from '@/lib/api';
-import type { CronSettings } from '@/lib/api';
 import { t } from '@/lib/i18n';
+import type { CronJob, CronRun } from '@/types/api';
+import {
+  AlertCircle,
+  CheckCircle,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  Pencil,
+  Play,
+  Plus,
+  RefreshCw,
+  Trash2,
+  X,
+  XCircle,
+} from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
 
 function formatDate(iso: string | null): string {
   if (!iso) return '-';
@@ -39,7 +41,7 @@ function formatDuration(ms: number | null): string {
   return `${(secs / 60).toFixed(1)}m`;
 }
 
-function RunHistoryPanel({ jobId }: { jobId: string }) {
+function RunHistoryPanel({ jobId, refreshKey = 0 }: { jobId: string; refreshKey?: number }) {
   const [runs, setRuns] = useState<CronRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -53,7 +55,7 @@ function RunHistoryPanel({ jobId }: { jobId: string }) {
       .finally(() => setLoading(false));
   }, [jobId]);
 
-  useEffect(() => { fetchRuns(); }, [fetchRuns]);
+  useEffect(() => { fetchRuns(); }, [fetchRuns, refreshKey]);
 
   if (loading) {
     return (
@@ -149,6 +151,9 @@ export default function Cron() {
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
+  const [triggering, setTriggering] = useState<string | null>(null);
+  const [triggerError, setTriggerError] = useState<string | null>(null);
+  const [runHistoryRefresh, setRunHistoryRefresh] = useState<Record<string, number>>({});
   const [settings, setSettings] = useState<CronSettings | null>(null);
   const [togglingCatchUp, setTogglingCatchUp] = useState(false);
 
@@ -219,7 +224,7 @@ export default function Cron() {
   };
 
   const fetchSettings = () => {
-    getCronSettings().then(setSettings).catch(() => {});
+    getCronSettings().then(setSettings).catch(() => { });
   };
 
   const toggleCatchUp = async () => {
@@ -319,15 +324,42 @@ export default function Cron() {
     }
   };
 
+  const handleTrigger = async (id: string) => {
+    setTriggering(id);
+    setTriggerError(null);
+    try {
+      const result = await triggerCronJob(id);
+      // Refresh job list so last_run / last_status reflect the manual run.
+      try {
+        const refreshed = await getCronJobs();
+        setJobs(refreshed);
+      } catch {
+        // If list refresh fails, leave the existing rows; the user can reload.
+      }
+      // Auto-expand the run history so the user can see the result they just triggered,
+      // and bump its refresh key so an already-expanded panel reloads.
+      setExpandedJob(id);
+      setRunHistoryRefresh((prev) => ({ ...prev, [id]: (prev[id] ?? 0) + 1 }));
+      if (!result.success) {
+        const detail = result.output?.trim();
+        setTriggerError(detail ? `${t('cron.trigger_error')}: ${detail}` : t('cron.trigger_error'));
+      }
+    } catch (err: unknown) {
+      setTriggerError(err instanceof Error ? err.message : t('cron.trigger_error'));
+    } finally {
+      setTriggering(null);
+    }
+  };
+
   const statusIcon = (status: string | null) => {
     if (!status) return null;
     switch (status.toLowerCase()) {
       case 'ok':
-        case 'success':
-          return <CheckCircle className="h-4 w-4" style={{ color: 'var(--color-status-success)' }} />;
+      case 'success':
+        return <CheckCircle className="h-4 w-4" style={{ color: 'var(--color-status-success)' }} />;
       case 'error':
-        case 'failed':
-          return <XCircle className="h-4 w-4" style={{ color: 'var(--color-status-error)' }} />;
+      case 'failed':
+        return <XCircle className="h-4 w-4" style={{ color: 'var(--color-status-error)' }} />;
       default:
         return <AlertCircle className="h-4 w-4" style={{ color: 'var(--color-status-warning)' }} />;
     }
@@ -336,7 +368,7 @@ export default function Cron() {
   if (error) {
     return (
       <div className="p-6 animate-fade-in">
-        <div className="rounded-2xl border p-4" style={{ background: 'rgba(239, 68, 68, 0.08)', borderColor: 'rgba(239, 68, 68, 0.2)', color: '#f87171' }}>
+        <div className="rounded-2xl border p-4" style={{ background: 'var(--color-status-error-alpha-08)', borderColor: 'var(--color-status-error-alpha-20)', color: 'var(--color-status-error)' }}>
           {t('cron.load_error')}: {error}
         </div>
       </div>
@@ -383,18 +415,17 @@ export default function Cron() {
           <button
             onClick={toggleCatchUp}
             disabled={togglingCatchUp}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-300 focus:outline-none ${
-              settings.catch_up_on_startup
-                ? 'bg-[#0080ff]'
-                : 'bg-[#1a1a3e]'
-            }`}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-300 focus:outline-none`}
+            style={settings.catch_up_on_startup
+              ? { background: 'var(--color-status-info)' }
+              : { background: 'var(--pc-bg-elevated)', border: '1px solid var(--pc-border)' }
+            }
           >
             <span
-              className={`inline-block h-4 w-4 rounded-full bg-white transition-transform duration-300 ${
-                settings.catch_up_on_startup
+              className={`inline-block h-4 w-4 rounded-full bg-white transition-transform duration-300 ${settings.catch_up_on_startup
                   ? 'translate-x-6'
                   : 'translate-x-1'
-              }`}
+                }`}
             />
           </button>
         </div>
@@ -416,7 +447,7 @@ export default function Cron() {
               </button>
             </div>
             {formError && (
-              <div className="mb-4 rounded-xl border p-3 text-sm animate-fade-in" style={{ background: 'rgba(239, 68, 68, 0.08)', borderColor: 'rgba(239, 68, 68, 0.2)', color: '#f87171' }}>
+              <div className="mb-4 rounded-xl border p-3 text-sm animate-fade-in" style={{ background: 'var(--color-status-error-alpha-08)', borderColor: 'var(--color-status-error-alpha-20)', color: 'var(--color-status-error)' }}>
                 {formError}
               </div>
             )}
@@ -440,11 +471,10 @@ export default function Cron() {
                     <button
                       type="button"
                       onClick={() => setFormJobType('shell')}
-                      className={`flex-1 px-3 py-2.5 rounded-xl text-sm font-medium border transition-colors ${
-                        formJobType === 'shell'
+                      className={`flex-1 px-3 py-2.5 rounded-xl text-sm font-medium border transition-colors ${formJobType === 'shell'
                           ? 'border-[var(--pc-accent)] text-[var(--pc-accent)]'
                           : 'border-[var(--pc-border)] text-[var(--pc-text-muted)]'
-                      }`}
+                        }`}
                       style={formJobType === 'shell' ? { background: 'rgba(0, 128, 255, 0.08)' } : { background: 'transparent' }}
                     >
                       {t('cron.job_type_shell')}
@@ -452,11 +482,10 @@ export default function Cron() {
                     <button
                       type="button"
                       onClick={() => setFormJobType('agent')}
-                      className={`flex-1 px-3 py-2.5 rounded-xl text-sm font-medium border transition-colors ${
-                        formJobType === 'agent'
+                      className={`flex-1 px-3 py-2.5 rounded-xl text-sm font-medium border transition-colors ${formJobType === 'agent'
                           ? 'border-[var(--pc-accent)] text-[var(--pc-accent)]'
                           : 'border-[var(--pc-border)] text-[var(--pc-text-muted)]'
-                      }`}
+                        }`}
                       style={formJobType === 'agent' ? { background: 'rgba(0, 128, 255, 0.08)' } : { background: 'transparent' }}
                     >
                       {t('cron.job_type_agent')}
@@ -527,11 +556,10 @@ export default function Cron() {
                           <button
                             type="button"
                             onClick={() => setFormSessionTarget('isolated')}
-                            className={`flex-1 px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${
-                              formSessionTarget === 'isolated'
+                            className={`flex-1 px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${formSessionTarget === 'isolated'
                                 ? 'border-[var(--pc-accent)] text-[var(--pc-accent)]'
                                 : 'border-[var(--pc-border)] text-[var(--pc-text-muted)]'
-                            }`}
+                              }`}
                             style={formSessionTarget === 'isolated' ? { background: 'rgba(0, 128, 255, 0.08)' } : { background: 'transparent' }}
                           >
                             {t('cron.session_isolated')}
@@ -539,11 +567,10 @@ export default function Cron() {
                           <button
                             type="button"
                             onClick={() => setFormSessionTarget('main')}
-                            className={`flex-1 px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${
-                              formSessionTarget === 'main'
+                            className={`flex-1 px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${formSessionTarget === 'main'
                                 ? 'border-[var(--pc-accent)] text-[var(--pc-accent)]'
                                 : 'border-[var(--pc-border)] text-[var(--pc-text-muted)]'
-                            }`}
+                              }`}
                             style={formSessionTarget === 'main' ? { background: 'rgba(0, 128, 255, 0.08)' } : { background: 'transparent' }}
                           >
                             {t('cron.session_main')}
@@ -588,6 +615,23 @@ export default function Cron() {
         </div>
       )}
 
+      {/* Inline trigger-error banner — keeps the cron table mounted on failed manual runs */}
+      {triggerError && (
+        <div
+          className="rounded-2xl border p-3 text-sm flex items-start justify-between gap-3 animate-fade-in"
+          style={{ background: 'rgba(239, 68, 68, 0.08)', borderColor: 'rgba(239, 68, 68, 0.2)', color: '#f87171' }}
+        >
+          <span className="whitespace-pre-wrap break-words">{triggerError}</span>
+          <button
+            onClick={() => setTriggerError(null)}
+            className="btn-icon shrink-0"
+            title={t('cron.dismiss')}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       {/* Jobs Table */}
       {jobs.length === 0 ? (
         <div className="card p-8 text-center">
@@ -606,35 +650,37 @@ export default function Cron() {
                 <th>{t('cron.next_run')}</th>
                 <th>{t('cron.last_status')}</th>
                 <th>{t('cron.enabled')}</th>
-                <th className="text-right">{t('cron.actions')}</th>
+                <th>{t('cron.actions')}</th>
               </tr>
             </thead>
             <tbody>
               {jobs.map((job) => (
                 <React.Fragment key={job.id}>
                   <tr>
-                    <td className="font-mono text-xs">
+                    <td className="font-mono text-xs max-w-40">
                       <button
                         onClick={() =>
                           setExpandedJob((prev) =>
                             prev === job.id ? null : job.id,
                           )
-                      }
-                        className="flex items-center gap-1 btn-icon"
+                        }
+                        className="flex min-w-0 items-center gap-1 btn-icon max-w-full"
                         title="Toggle run history"
                       >
                         {expandedJob === job.id ? (
-                          <ChevronDown className="h-3.5 w-3.5" />
+                          <ChevronDown className="h-3.5 w-3.5 shrink-0" />
                         ) : (
-                          <ChevronRight className="h-3.5 w-3.5" />
+                          <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                         )}
-                        {job.id.slice(0, 8)}
+                        <span className='min-w-0 truncate'>
+                          {job.id}
+                        </span>
                       </button>
                     </td>
-                    <td className="font-medium text-sm" style={{ color: 'var(--pc-text-primary)' }}>
+                    <td className="font-medium text-sm text-center" style={{ color: 'var(--pc-text-primary)' }}>
                       {job.name ?? '-'}
                     </td>
-                    <td>
+                    <td className='text-center'>
                       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold border"
                         style={job.job_type === 'agent'
                           ? { color: 'var(--pc-accent)', borderColor: 'rgba(0, 128, 255, 0.2)', background: 'rgba(0, 128, 255, 0.06)' }
@@ -643,28 +689,40 @@ export default function Cron() {
                         {job.job_type === 'agent' ? t('cron.job_type_agent') : t('cron.job_type_shell')}
                       </span>
                     </td>
-                    <td className="font-mono text-xs max-w-[200px] truncate" style={{ color: 'var(--pc-text-secondary)' }}>
+                    <td className="font-mono text-xs max-w-50 truncate text-center" style={{ color: 'var(--pc-text-secondary)' }}>
                       {job.prompt ?? job.command}
                     </td>
-                    <td className="text-xs" style={{ color: 'var(--pc-text-muted)' }}>
+                    <td className="text-xs text-center" style={{ color: 'var(--pc-text-muted)' }}>
                       {formatDate(job.next_run)}
                     </td>
-                    <td>
-                      <div className="flex items-center gap-1.5">
+                    <td className="text-center">
+                      <div className="flex items-center gap-1.5 justify-center">
                         {statusIcon(job.last_status)}
                         <span className="text-xs capitalize" style={{ color: 'var(--pc-text-secondary)' }}>
                           {job.last_status ?? '-'}
                         </span>
                       </div>
                     </td>
-                    <td>
+                    <td className="text-center">
                       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold border"
                         style={job.enabled ? { color: 'var(--color-status-success)', borderColor: 'rgba(0, 230, 138, 0.2)', background: 'rgba(0, 230, 138, 0.06)' } : { color: 'var(--pc-text-faint)', borderColor: 'var(--pc-border)', background: 'transparent' }}>
                         {job.enabled ? t('cron.enabled_status') : t('cron.disabled_status')}
                       </span>
                     </td>
-                    <td className="text-right">
-                      <div className="flex items-center justify-end gap-2">
+                    <td className="text-center">
+                      <div className="flex items-center justify-center gap-2">
+                        <button
+                          onClick={() => handleTrigger(job.id)}
+                          className="btn-icon"
+                          title={t('cron.trigger')}
+                          disabled={triggering === job.id}
+                        >
+                          {triggering === job.id ? (
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Play className="h-4 w-4" />
+                          )}
+                        </button>
                         <button
                           onClick={() => openEditModal(job)}
                           className="btn-icon"
@@ -706,7 +764,7 @@ export default function Cron() {
                   {expandedJob === job.id && (
                     <tr>
                       <td colSpan={8} style={{ background: 'var(--pc-bg-elevated)' }}>
-                        <RunHistoryPanel jobId={job.id} />
+                        <RunHistoryPanel jobId={job.id} refreshKey={runHistoryRefresh[job.id] ?? 0} />
                       </td>
                     </tr>
                   )}

@@ -1,4 +1,4 @@
-use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
+use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalRequirement, ApprovalResponse};
 
 /// CLI channel factory, injected by the binary. Returns a `Box<dyn Channel>` for interactive mode.
 pub static CLI_CHANNEL_FN: std::sync::OnceLock<
@@ -49,7 +49,9 @@ use uuid::Uuid;
 use zeroclaw_api::channel::Channel;
 use zeroclaw_api::provider::StreamEvent;
 use zeroclaw_config::schema::Config;
-use zeroclaw_memory::{self, Memory, MemoryCategory, decay};
+use zeroclaw_memory::{
+    self, MEMORY_CONTEXT_CLOSE, MEMORY_CONTEXT_OPEN, Memory, MemoryCategory, decay,
+};
 use zeroclaw_providers::multimodal;
 use zeroclaw_providers::{
     self, ChatMessage, ChatRequest, Provider, ProviderCapabilityError, ToolCall,
@@ -57,8 +59,8 @@ use zeroclaw_providers::{
 
 // Cost tracking moved to `super::cost`.
 pub use super::cost::{
-    TOOL_LOOP_COST_TRACKING_CONTEXT, ToolLoopCostTrackingContext, check_tool_loop_budget,
-    record_tool_loop_cost_usage,
+    TOOL_LOOP_COST_TRACKING_CONTEXT, ToolLoopCostTrackingContext, TurnUsage,
+    check_tool_loop_budget, record_tool_loop_cost_usage,
 };
 
 /// Minimum characters per chunk when relaying LLM text to a streaming draft.
@@ -72,9 +74,9 @@ const DEFAULT_MAX_TOOL_ITERATIONS: usize = 10;
 
 // History management moved to `super::history`.
 pub use super::history::{
-    emergency_history_trim, estimate_history_tokens, fast_trim_tool_results,
-    load_interactive_session_history, save_interactive_session_history, trim_history,
-    truncate_tool_result,
+    canonicalize_tool_result_media_markers, emergency_history_trim, estimate_history_tokens,
+    fast_trim_tool_results, load_interactive_session_history, save_interactive_session_history,
+    trim_history, truncate_tool_result,
 };
 
 /// Minimum user-message length (in chars) for auto-save to memory.
@@ -183,6 +185,7 @@ pub fn filter_by_allowed_tools(
 }
 
 // Re-export from zeroclaw-types for backwards compatibility.
+pub use zeroclaw_api::TOOL_LOOP_SESSION_KEY;
 pub use zeroclaw_api::TOOL_LOOP_THREAD_ID;
 
 // Re-export tool call parsing from the standalone parser crate.
@@ -199,6 +202,17 @@ where
     F: std::future::Future,
 {
     TOOL_LOOP_THREAD_ID.scope(thread_id, future).await
+}
+
+/// Run a future with the session key set in task-local storage.
+/// The scope wraps the entire agent turn, so all tools invoked during
+/// the turn (including nested calls) see the same session key.
+/// SessionsCurrentTool reads this to identify the active session.
+pub async fn scope_session_key<F>(session_key: Option<String>, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    TOOL_LOOP_SESSION_KEY.scope(session_key, future).await
 }
 
 /// Computes the list of MCP tool names that should be excluded for a given turn
@@ -323,11 +337,17 @@ fn autosave_memory_key(prefix: &str) -> String {
 /// Entries with a hybrid score below `min_relevance_score` are dropped to
 /// prevent unrelated memories from bleeding into the conversation.
 /// Core memories are exempt from time decay (evergreen).
+///
+/// `exclude_conversation` skips `MemoryCategory::Conversation` entries
+/// regardless of their key shape. Set to `true` for autonomous/scheduled
+/// runs (cron, daemon heartbeat) so chat memory cannot leak into prompts
+/// the user did not initiate. See #5415 / #5456.
 async fn build_context(
     mem: &dyn Memory,
     user_msg: &str,
     min_relevance_score: f64,
     session_id: Option<&str>,
+    exclude_conversation: bool,
 ) -> String {
     let mut context = String::new();
 
@@ -345,8 +365,16 @@ async fn build_context(
             .collect();
 
         if !relevant.is_empty() {
-            context.push_str("[Memory context]\n");
+            let mut included = false;
             for entry in &relevant {
+                // Scheduled (cron / heartbeat) runs must not see chat-origin
+                // memories. The autosave-key checks below catch the agent's
+                // own autosaves but miss Conversation entries written by
+                // channel handlers (Discord, gateway, WhatsApp, …) under
+                // their own keys. See #5415 / #5456.
+                if exclude_conversation && matches!(entry.category, MemoryCategory::Conversation) {
+                    continue;
+                }
                 if zeroclaw_memory::is_assistant_autosave_key(&entry.key) {
                     continue;
                 }
@@ -365,12 +393,16 @@ async fn build_context(
                 if entry.content.contains("<tool_result") {
                     continue;
                 }
+                if !included {
+                    context.push_str(MEMORY_CONTEXT_OPEN);
+                    context.push('\n');
+                    included = true;
+                }
                 let _ = writeln!(context, "- {}: {}", entry.key, entry.content);
             }
-            if context == "[Memory context]\n" {
-                context.clear();
-            } else {
-                context.push_str("[/Memory context]\n\n");
+            if included {
+                context.push_str(MEMORY_CONTEXT_CLOSE);
+                context.push_str("\n\n");
             }
         }
     }
@@ -531,8 +563,18 @@ pub fn is_model_switch_requested(err: &anyhow::Error) -> Option<(String, String)
 #[derive(Debug, Default)]
 struct StreamedChatOutcome {
     response_text: String,
+    /// Accumulated reasoning/thinking content from streaming deltas.
+    ///
+    /// Captured separately from `response_text` so it can be threaded into
+    /// `ChatResponse.reasoning_content` and ultimately persisted on the
+    /// `AssistantToolCalls` history entry. Required for providers like
+    /// DeepSeek V4 that reject follow-up requests when the assistant's
+    /// prior `reasoning_content` is missing from replayed tool-call turns
+    /// (see issue #6059).
+    reasoning_content: String,
     tool_calls: Vec<ToolCall>,
     forwarded_live_deltas: bool,
+    usage: Option<zeroclaw_providers::traits::TokenUsage>,
 }
 
 async fn consume_provider_streaming_response(
@@ -575,6 +617,9 @@ async fn consume_provider_streaming_response(
         let event = event_result.map_err(|err| anyhow::anyhow!("provider stream error: {err}"))?;
         match event {
             StreamEvent::Final => break,
+            StreamEvent::Usage(usage) => {
+                outcome.usage = Some(usage);
+            }
             StreamEvent::ToolCall(tool_call) => {
                 outcome.tool_calls.push(tool_call);
                 suppress_forwarding = true;
@@ -585,6 +630,21 @@ async fn consume_provider_streaming_response(
                 // do not affect the agent's tool dispatch loop.
             }
             StreamEvent::TextDelta(chunk) => {
+                // Reasoning/thinking deltas arrive on the same `TextDelta`
+                // event as plain text but populate `chunk.reasoning` instead
+                // of `chunk.delta`. They must be captured into the outcome
+                // even when `chunk.delta` is empty — otherwise providers
+                // that require reasoning to round-trip on subsequent turns
+                // (DeepSeek V4 thinking mode; see #6059) reject the next
+                // request with a 400. Reasoning is never forwarded as a
+                // visible response delta — it is the model's internal
+                // monologue, kept for replay only.
+                if let Some(reasoning) = chunk.reasoning.as_deref()
+                    && !reasoning.is_empty()
+                {
+                    outcome.reasoning_content.push_str(reasoning);
+                }
+
                 if chunk.delta.is_empty() {
                     continue;
                 }
@@ -790,31 +850,6 @@ fn maybe_inject_channel_delivery_defaults(
 //   • the cancellation token fires (external abort).
 
 /// Append a receipt footer to the response text if any receipts were collected.
-///
-/// Format:
-/// ```text
-/// \n\n---\nTool receipts:\n  shell: zc-receipt-...\n  web_search: zc-receipt-...
-/// ```
-pub fn append_receipt_footer(
-    response: String,
-    collected_receipts: Option<&std::sync::Mutex<Vec<String>>>,
-) -> String {
-    let Some(store) = collected_receipts else {
-        return response;
-    };
-    let Ok(receipts) = store.lock() else {
-        return response;
-    };
-    if receipts.is_empty() {
-        return response;
-    }
-    let mut footer = format!("{response}\n\n---\nTool receipts:");
-    for entry in receipts.iter() {
-        footer.push_str(&format!("\n  {entry}"));
-    }
-    footer
-}
-
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
 /// execute tools, and loop until the LLM produces a final text response.
 #[allow(clippy::too_many_arguments)]
@@ -1108,11 +1143,16 @@ pub async fn run_tool_call_loop(
             {
                 Ok(streamed) => {
                     streamed_live_deltas = streamed.forwarded_live_deltas;
+                    let reasoning_content = if streamed.reasoning_content.is_empty() {
+                        None
+                    } else {
+                        Some(streamed.reasoning_content)
+                    };
                     Ok(zeroclaw_providers::ChatResponse {
                         text: Some(streamed.response_text),
                         tool_calls: streamed.tool_calls,
-                        usage: None,
-                        reasoning_content: None,
+                        usage: streamed.usage,
+                        reasoning_content,
                     })
                 }
                 Err(stream_err) => {
@@ -1236,24 +1276,33 @@ pub async fn run_tool_call_loop(
                     .as_ref()
                     .and_then(|usage| record_tool_loop_cost_usage(provider_name, model, usage));
 
-                let response_text = resp.text_or_empty().to_string();
+                let response_text = if tool_specs.is_empty() {
+                    strip_think_tags(resp.text_or_empty())
+                } else {
+                    resp.text_or_empty().to_string()
+                };
                 // First try native structured tool calls (OpenAI-format).
                 // Fall back to text-based parsing (XML tags, markdown blocks,
                 // GLM format) only if the provider returned no native calls —
                 // this ensures we support both native and prompt-guided models.
-                let mut calls: Vec<ParsedToolCall> = resp
-                    .tool_calls
-                    .iter()
-                    .map(|call| ParsedToolCall {
-                        name: call.name.clone(),
-                        arguments: serde_json::from_str::<serde_json::Value>(&call.arguments)
-                            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-                        tool_call_id: Some(call.id.clone()),
-                    })
-                    .collect();
+                let mut calls: Vec<ParsedToolCall> = if tool_specs.is_empty() {
+                    Vec::new()
+                } else {
+                    resp.tool_calls
+                        .iter()
+                        .map(|call| ParsedToolCall {
+                            name: call.name.clone(),
+                            arguments: serde_json::from_str::<serde_json::Value>(&call.arguments)
+                                .unwrap_or_else(|_| {
+                                    serde_json::Value::Object(serde_json::Map::new())
+                                }),
+                            tool_call_id: Some(call.id.clone()),
+                        })
+                        .collect()
+                };
                 let mut parsed_text = String::new();
 
-                if calls.is_empty() {
+                if calls.is_empty() && !tool_specs.is_empty() {
                     let (fallback_text, fallback_calls) = parse_tool_calls(&response_text);
                     if !fallback_text.is_empty() {
                         parsed_text = fallback_text;
@@ -1261,7 +1310,11 @@ pub async fn run_tool_call_loop(
                     calls = fallback_calls;
                 }
 
-                let parse_issue = detect_tool_call_parse_issue(&response_text, &calls);
+                let parse_issue = if tool_specs.is_empty() {
+                    None
+                } else {
+                    detect_tool_call_parse_issue(&response_text, &calls)
+                };
                 if let Some(ref issue) = parse_issue {
                     runtime_trace::record_event(
                         "tool_call_parse_issue",
@@ -1454,10 +1507,7 @@ pub async fn run_tool_call_loop(
             }
 
             history.push(ChatMessage::assistant(response_text.clone()));
-            return Ok(append_receipt_footer(
-                accumulated_display_text,
-                collected_receipts,
-            ));
+            return Ok(accumulated_display_text);
         }
 
         // Accumulate text from this iteration (tool calls present, loop continues).
@@ -1556,9 +1606,14 @@ pub async fn run_tool_call_loop(
                 channel_reply_target,
             );
 
+            super::set_runtime_approved_arg(&tool_name, &mut tool_args, false);
+
             // ── Approval hook ────────────────────────────────
+            let mut approval_requirement = approval
+                .map(|mgr| mgr.approval_requirement(&tool_name))
+                .unwrap_or(ApprovalRequirement::NotRequired);
             if let Some(mgr) = approval
-                && mgr.needs_approval(&tool_name)
+                && approval_requirement == ApprovalRequirement::Prompt
             {
                 let request = ApprovalRequest {
                     tool_name: tool_name.clone(),
@@ -1643,7 +1698,16 @@ pub async fn run_tool_call_loop(
                     ));
                     continue;
                 }
+
+                if matches!(decision, ApprovalResponse::Yes | ApprovalResponse::Always) {
+                    approval_requirement = ApprovalRequirement::Approved;
+                }
             }
+            super::set_runtime_approved_arg(
+                &tool_name,
+                &mut tool_args,
+                approval_requirement == ApprovalRequirement::Approved,
+            );
 
             let signature = {
                 let canonical_args = canonicalize_json_for_tool_signature(&tool_args);
@@ -1871,7 +1935,8 @@ pub async fn run_tool_call_loop(
                     }
                 }
             }
-            let mut result_output = truncate_tool_result(&outcome.output, max_tool_result_chars);
+            let canonical_output = canonicalize_tool_result_media_markers(&outcome.output);
+            let mut result_output = truncate_tool_result(&canonical_output, max_tool_result_chars);
             // Append HMAC receipt to tool result when receipts are enabled (#4830)
             if let Some(ref receipt) = outcome.receipt {
                 tracing::debug!(tool = %tool_name, receipt = %receipt, "Tool receipt generated");
@@ -2011,10 +2076,7 @@ pub async fn run_tool_call_loop(
                 anyhow::bail!("Agent exceeded maximum tool iterations ({max_iterations})")
             }
             accumulated_display_text.push_str(&text);
-            Ok(append_receipt_footer(
-                accumulated_display_text,
-                collected_receipts,
-            ))
+            Ok(accumulated_display_text)
         }
         Err(e) => {
             tracing::warn!(error = %e, "Final summary LLM call failed, bailing");
@@ -2026,6 +2088,29 @@ pub async fn run_tool_call_loop(
 /// Build the tool instruction block for the system prompt so the LLM knows
 /// how to invoke tools.
 pub fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> String {
+    build_tool_instructions_for_tools(tools_registry.iter().map(|tool| tool.as_ref()))
+}
+
+/// Build tool instructions for the subset of registered tools that are
+/// effective for the current prompt.
+pub fn build_tool_instructions_for_names(
+    tools_registry: &[Box<dyn Tool>],
+    effective_tool_names: &HashSet<&str>,
+) -> String {
+    build_tool_instructions_for_tools(
+        tools_registry
+            .iter()
+            .map(|tool| tool.as_ref())
+            .filter(|tool| effective_tool_names.contains(tool.name())),
+    )
+}
+
+fn build_tool_instructions_for_tools<'a>(tools: impl IntoIterator<Item = &'a dyn Tool>) -> String {
+    let tools: Vec<&dyn Tool> = tools.into_iter().collect();
+    if tools.is_empty() {
+        return String::new();
+    }
+
     let mut instructions = String::new();
     instructions.push_str("\n## Tool Use Protocol\n\n");
     instructions.push_str("To use a tool, wrap a JSON object in <tool_call></tool_call> tags:\n\n");
@@ -2040,7 +2125,7 @@ pub fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> String {
         .push_str("Continue reasoning with the results until you can give a final answer.\n\n");
     instructions.push_str("### Available Tools\n\n");
 
-    for tool in tools_registry {
+    for tool in tools {
         let desc = tool.description();
         let _ = writeln!(
             instructions,
@@ -2052,6 +2137,15 @@ pub fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> String {
     }
 
     instructions
+}
+
+fn retain_registered_tool_descriptions(
+    tool_descs: &mut Vec<(&str, &str)>,
+    tools_registry: &[Box<dyn Tool>],
+) {
+    let registered_tool_names: HashSet<&str> =
+        tools_registry.iter().map(|tool| tool.name()).collect();
+    tool_descs.retain(|(name, _)| registered_tool_names.contains(name));
 }
 
 // ── CLI Entrypoint ───────────────────────────────────────────────────────
@@ -2427,6 +2521,7 @@ pub async fn run(
             "Query connected hardware for reported GPIO pins and LED pin. Use when: user asks what pins are available.",
         ));
     }
+    retain_registered_tool_descriptions(&mut tool_descs, &tools_registry);
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
     } else {
@@ -2478,7 +2573,7 @@ pub async fn run(
     let cost_tracking_context: Option<ToolLoopCostTrackingContext> =
         crate::cost::CostTracker::get_or_init_global(config.cost.clone(), &config.workspace_dir)
             .map(|tracker| {
-                ToolLoopCostTrackingContext::new(tracker, Arc::new(config.cost.prices.clone()))
+                ToolLoopCostTrackingContext::new(tracker, Arc::new(config.combined_pricing()))
             });
 
     // ── Execute ──────────────────────────────────────────────────
@@ -2531,12 +2626,16 @@ pub async fn run(
                 .await;
         }
 
-        // Inject memory + hardware RAG context into user message
+        // Inject memory + hardware RAG context into user message.
+        // For non-interactive runs (cron, daemon heartbeat), exclude
+        // Conversation-category memories so chat history does not leak
+        // into autonomous executions. See #5415 / #5456.
         let mem_context = build_context(
             mem.as_ref(),
             &effective_msg,
             config.memory.min_relevance_score,
             memory_session_id.as_deref(),
+            !interactive,
         )
         .await;
         let rag_limit = if config.agent.compact_context { 2 } else { 5 };
@@ -2818,12 +2917,15 @@ pub async fn run(
                     .await;
             }
 
-            // Inject memory + hardware RAG context into user message
+            // Inject memory + hardware RAG context into user message.
+            // Interactive REPL: keep Conversation memories (user is actively
+            // chatting in this session and may want their own history recalled).
             let mem_context = build_context(
                 mem.as_ref(),
                 &effective_input,
                 config.memory.min_relevance_score,
                 memory_session_id.as_deref(),
+                false,
             )
             .await;
             let rag_limit = if config.agent.compact_context { 2 } else { 5 };
@@ -3354,6 +3456,19 @@ pub async fn process_message(
             tool_descs.retain(|(name, _)| !excluded.iter().any(|ex| ex == name));
         }
     }
+    let effective_tool_names: HashSet<&str> = tools_registry
+        .iter()
+        .map(|tool| tool.name())
+        .filter(|name| {
+            config.autonomy.level == AutonomyLevel::Full
+                || !config
+                    .autonomy
+                    .non_cli_excluded_tools
+                    .iter()
+                    .any(|excluded| excluded.as_str() == *name)
+        })
+        .collect();
+    tool_descs.retain(|(name, _)| effective_tool_names.contains(name));
 
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
@@ -3375,7 +3490,10 @@ pub async fn process_message(
         config.agent.max_system_prompt_chars,
     );
     if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(&tools_registry));
+        system_prompt.push_str(&build_tool_instructions_for_names(
+            &tools_registry,
+            &effective_tool_names,
+        ));
     }
     if !deferred_section.is_empty() {
         system_prompt.push('\n');
@@ -3412,11 +3530,15 @@ pub async fn process_message(
     }
 
     let effective_msg_ref = effective_message.as_str();
+    // process_message is the channel entrypoint (Discord, Telegram, gateway,
+    // etc.) — recall is scoped to the channel's session_id, so retrieving the
+    // user's own Conversation history within their session is intended.
     let mem_context = build_context(
         mem.as_ref(),
         effective_msg_ref,
         config.memory.min_relevance_score,
         session_id,
+        false,
     )
     .await;
     let rag_limit = if config.agent.compact_context { 2 } else { 5 };
@@ -4147,6 +4269,12 @@ mod tests {
     enum NativeStreamTurn {
         ToolCall(ToolCall),
         Text(String),
+        /// Emit a single text delta with associated reasoning content. Used by
+        /// regression tests for issue #6059 (DeepSeek V4 thinking-mode replay).
+        TextWithReasoning {
+            text: String,
+            reasoning: String,
+        },
     }
 
     struct StreamingNativeToolEventProvider {
@@ -4242,6 +4370,13 @@ mod tests {
                     Ok(StreamEvent::TextDelta(StreamChunk::delta(text))),
                     Ok(StreamEvent::Final),
                 ])),
+                NativeStreamTurn::TextWithReasoning { text, reasoning } => {
+                    Box::pin(futures_util::stream::iter(vec![
+                        Ok(StreamEvent::TextDelta(StreamChunk::reasoning(reasoning))),
+                        Ok(StreamEvent::TextDelta(StreamChunk::delta(text))),
+                        Ok(StreamEvent::Final),
+                    ]))
+                }
             }
         }
     }
@@ -5750,6 +5885,7 @@ mod tests {
                         id: "call_wait".into(),
                         name: "count_tool".into(),
                         arguments: r#"{"value":"A"}"#.into(),
+                        extra_content: None,
                     }],
                     usage: None,
                     reasoning_content: None,
@@ -5982,6 +6118,7 @@ mod tests {
                 id: "call_native_1".to_string(),
                 name: "count_tool".to_string(),
                 arguments: r#"{"value":"A"}"#.to_string(),
+                extra_content: None,
             }),
             NativeStreamTurn::Text("done".to_string()),
         ]);
@@ -6260,6 +6397,14 @@ mod tests {
     }
 
     #[test]
+    fn build_tool_instructions_empty_registry_returns_empty() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let instructions = build_tool_instructions(&tools);
+
+        assert!(instructions.is_empty());
+    }
+
+    #[test]
     fn tools_to_openai_format_produces_valid_schema() {
         use crate::security::SecurityPolicy;
         let security = Arc::new(SecurityPolicy::from_config(
@@ -6372,7 +6517,7 @@ mod tests {
         .await
         .unwrap();
 
-        let context = build_context(&mem, "status updates", 0.0, None).await;
+        let context = build_context(&mem, "status updates", 0.0, None, false).await;
         assert!(context.contains("user_preference"));
         assert!(!context.contains("assistant_resp_poisoned"));
         assert!(!context.contains("fabricated event"));
@@ -6407,10 +6552,54 @@ mod tests {
         .await
         .unwrap();
 
-        let context = build_context(&mem, "answers", 0.0, None).await;
+        let context = build_context(&mem, "answers", 0.0, None, false).await;
         assert!(context.contains("user_preference"));
         assert!(!context.contains("user_msg"));
         assert!(!context.contains("embedding prior context"));
+    }
+
+    /// Regression: cron / heartbeat runs must not surface chat-origin
+    /// `Conversation` memories — the leak path the #5456 prefix filter
+    /// missed because `agent::run` performs a second, unfiltered recall
+    /// inside `build_context`. See #5415.
+    #[tokio::test]
+    async fn build_context_excludes_conversation_when_flag_set() {
+        let tmp = TempDir::new().unwrap();
+        let mem = SqliteMemory::new(tmp.path()).unwrap();
+        // A Conversation entry written by a chat channel with a non-autosave
+        // key (autosave keys are already skipped by the existing filters).
+        mem.store(
+            "discord:guild:chan:msg-42",
+            "Reminder for Alice: the API key is in 1Password vault Foo.",
+            MemoryCategory::Conversation,
+            Some("discord:guild:chan"),
+        )
+        .await
+        .unwrap();
+        // A non-Conversation memory that should still surface so we know the
+        // function still does its job — only Conversation should be dropped.
+        mem.store(
+            "team_oncall",
+            "Primary on-call rotates every Monday at 09:00 UTC.",
+            MemoryCategory::Core,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let context = build_context(&mem, "Alice on-call", 0.0, None, true).await;
+        assert!(
+            !context.contains("Alice"),
+            "Conversation memory leaked into scheduled context: {context}"
+        );
+        assert!(
+            !context.contains("API key"),
+            "Conversation memory leaked into scheduled context: {context}"
+        );
+        assert!(
+            context.contains("team_oncall"),
+            "Non-Conversation memory should still surface: {context}"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -6799,20 +6988,20 @@ Let me check the result."#;
     }
 
     /// When `build_system_prompt_with_mode` is called with `native_tools = true`,
-    /// the output must contain ZERO XML protocol artifacts. In the native path
-    /// `build_tool_instructions` is never called, so the system prompt alone
-    /// must be clean of XML tool-call protocol.
+    /// the output must contain ZERO XML protocol artifacts and must not inject
+    /// the duplicate non-native tools summary.
     #[test]
     fn native_tools_system_prompt_contains_zero_xml() {
         use crate::agent::system_prompt::build_system_prompt_with_mode;
 
+        let workspace = tempdir().unwrap();
         let tool_summaries: Vec<(&str, &str)> = vec![
             ("shell", "Execute shell commands"),
             ("file_read", "Read files"),
         ];
 
         let system_prompt = build_system_prompt_with_mode(
-            std::path::Path::new("/tmp"),
+            workspace.path(),
             "test-model",
             &tool_summaries,
             &[],  // no skills
@@ -6845,14 +7034,58 @@ Let me check the result."#;
             "Native prompt must not contain XML protocol header"
         );
 
-        // Positive: native prompt should still list tools and contain task instructions
+        // Positive: native prompt should still contain native-task framing.
         assert!(
-            system_prompt.contains("shell"),
-            "Native prompt must list tool names"
+            !system_prompt.contains("## Tools"),
+            "Native prompt should skip the duplicate tools summary"
         );
         assert!(
             system_prompt.contains("## Your Task"),
             "Native prompt should contain task instructions"
+        );
+    }
+
+    #[test]
+    fn non_native_system_prompt_with_no_tools_contains_zero_tool_protocol() {
+        use crate::agent::system_prompt::build_system_prompt_with_mode;
+
+        let tool_summaries: Vec<(&str, &str)> = vec![];
+
+        let system_prompt = build_system_prompt_with_mode(
+            std::path::Path::new("/tmp"),
+            "test-model",
+            &tool_summaries,
+            &[],
+            None,
+            None,
+            false,
+            zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            crate::security::AutonomyLevel::default(),
+        );
+
+        assert!(
+            !system_prompt.contains("## Tools"),
+            "No-tools prompt must not include a Tools section"
+        );
+        assert!(
+            !system_prompt.contains("## Tool Use Protocol"),
+            "No-tools prompt must not include tool protocol"
+        );
+        assert!(
+            !system_prompt.contains("<tool_call>"),
+            "No-tools prompt must not mention XML tool calls"
+        );
+        assert!(
+            !system_prompt.contains("<tool_result>"),
+            "No-tools prompt must not mention XML tool results"
+        );
+        assert!(
+            !system_prompt.contains("Use the tools"),
+            "No-tools prompt must not instruct the model to use unavailable tools"
+        );
+        assert!(
+            system_prompt.contains("No tools are available for this turn"),
+            "No-tools prompt should explicitly describe the current capability boundary"
         );
     }
 
@@ -6958,6 +7191,7 @@ Let me check the result."#;
             id: "call_1".into(),
             name: "shell".into(),
             arguments: "{}".into(),
+            extra_content: None,
         }];
         let result = build_native_assistant_history("answer", &calls, Some("thinking step"));
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -6972,6 +7206,7 @@ Let me check the result."#;
             id: "call_1".into(),
             name: "shell".into(),
             arguments: "{}".into(),
+            extra_content: None,
         }];
         let result = build_native_assistant_history("answer", &calls, None);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -7010,6 +7245,124 @@ Let me check the result."#;
         let parsed: serde_json::Value = serde_json::from_str(result.as_deref().unwrap()).unwrap();
         assert_eq!(parsed["content"].as_str(), Some("answer"));
         assert!(parsed.get("reasoning_content").is_none());
+    }
+
+    /// Regression test for issue #6059 — DeepSeek V4 thinking-mode tool-call
+    /// replay rejected with `400` because the assistant's prior
+    /// `reasoning_content` was missing from the next request.
+    ///
+    /// Before the fix, the streaming consumer dropped reasoning chunks on the
+    /// floor (`chunk.delta.is_empty()` short-circuit + hardcoded
+    /// `reasoning_content: None` on the synthesized `ChatResponse`). After
+    /// the fix, reasoning deltas accumulate into `StreamedChatOutcome` and
+    /// surface on the response so the agent's history layer can persist them
+    /// and replay them on subsequent turns.
+    #[tokio::test]
+    async fn consume_provider_streaming_response_captures_reasoning_content() {
+        let provider = StreamingNativeToolEventProvider::with_turns(vec![
+            NativeStreamTurn::TextWithReasoning {
+                text: "Listing the directory now.".to_string(),
+                reasoning: "I need to call the shell tool to list files.".to_string(),
+            },
+        ]);
+        let messages = vec![ChatMessage::user(
+            "List the folders in the current directory",
+        )];
+
+        let outcome = consume_provider_streaming_response(
+            &provider,
+            &messages,
+            None,
+            "deepseek-v4-pro",
+            0.2,
+            None,
+            None,
+        )
+        .await
+        .expect("streaming should succeed");
+
+        assert_eq!(outcome.response_text, "Listing the directory now.");
+        assert_eq!(
+            outcome.reasoning_content,
+            "I need to call the shell tool to list files."
+        );
+        assert!(
+            outcome.tool_calls.is_empty(),
+            "this turn does not emit native tool calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn consume_provider_streaming_response_accumulates_split_reasoning_chunks() {
+        // Scripted multi-event stream: two reasoning chunks straddling a text
+        // delta. The outcome should concatenate the reasoning chunks in order
+        // and keep them out of the visible response text.
+        struct MultiChunkProvider;
+
+        #[async_trait]
+        impl Provider for MultiChunkProvider {
+            async fn chat_with_system(
+                &self,
+                _system_prompt: Option<&str>,
+                _message: &str,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<String> {
+                anyhow::bail!("not used in this test")
+            }
+
+            async fn chat(
+                &self,
+                _request: ChatRequest<'_>,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<ChatResponse> {
+                anyhow::bail!("not used in this test")
+            }
+
+            fn supports_streaming(&self) -> bool {
+                true
+            }
+
+            fn stream_chat(
+                &self,
+                _request: ChatRequest<'_>,
+                _model: &str,
+                _temperature: Option<f64>,
+                _options: StreamOptions,
+            ) -> futures_util::stream::BoxStream<
+                'static,
+                zeroclaw_providers::traits::StreamResult<StreamEvent>,
+            > {
+                Box::pin(futures_util::stream::iter(vec![
+                    Ok(StreamEvent::TextDelta(StreamChunk::reasoning("Step 1: "))),
+                    Ok(StreamEvent::TextDelta(StreamChunk::delta("Hello "))),
+                    Ok(StreamEvent::TextDelta(StreamChunk::reasoning(
+                        "consider options.",
+                    ))),
+                    Ok(StreamEvent::TextDelta(StreamChunk::delta("there."))),
+                    Ok(StreamEvent::Final),
+                ]))
+            }
+        }
+
+        let provider = MultiChunkProvider;
+        let messages = vec![ChatMessage::user("hi")];
+
+        let outcome = consume_provider_streaming_response(
+            &provider,
+            &messages,
+            None,
+            "deepseek-v4-flash",
+            0.2,
+            None,
+            None,
+        )
+        .await
+        .expect("streaming should succeed");
+
+        assert_eq!(outcome.response_text, "Hello there.");
+        assert_eq!(outcome.reasoning_content, "Step 1: consider options.");
     }
 
     // ── glob_match tests ──────────────────────────────────────────────────────
@@ -7527,45 +7880,5 @@ Let me check the result."#;
         .expect("should succeed without cost scope");
 
         assert_eq!(result, "ok");
-    }
-
-    // ── append_receipt_footer tests ──────────────────────────────
-
-    #[test]
-    fn receipt_footer_empty_receipts_unchanged() {
-        let store = std::sync::Mutex::new(Vec::<String>::new());
-        let result = super::append_receipt_footer("Hello world".to_string(), Some(&store));
-        assert_eq!(result, "Hello world");
-    }
-
-    #[test]
-    fn receipt_footer_none_store_unchanged() {
-        let result = super::append_receipt_footer("Hello world".to_string(), None);
-        assert_eq!(result, "Hello world");
-    }
-
-    #[test]
-    fn receipt_footer_single_receipt() {
-        let store = std::sync::Mutex::new(vec!["shell: zc-receipt-1234567890-abcdef".to_string()]);
-        let result = super::append_receipt_footer("The date is Monday.".to_string(), Some(&store));
-        assert_eq!(
-            result,
-            "The date is Monday.\n\n---\nTool receipts:\n  shell: zc-receipt-1234567890-abcdef"
-        );
-    }
-
-    #[test]
-    fn receipt_footer_multiple_receipts() {
-        let store = std::sync::Mutex::new(vec![
-            "shell: zc-receipt-100-aaa".to_string(),
-            "web_search: zc-receipt-200-bbb".to_string(),
-            "file_read: zc-receipt-300-ccc".to_string(),
-        ]);
-        let result = super::append_receipt_footer("Done.".to_string(), Some(&store));
-        let expected = "Done.\n\n---\nTool receipts:\
-            \n  shell: zc-receipt-100-aaa\
-            \n  web_search: zc-receipt-200-bbb\
-            \n  file_read: zc-receipt-300-ccc";
-        assert_eq!(result, expected);
     }
 }

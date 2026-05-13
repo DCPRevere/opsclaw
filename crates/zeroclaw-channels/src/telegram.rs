@@ -774,6 +774,124 @@ impl TelegramChannel {
         }
     }
 
+    /// Check whether a voice reply should be queued for the given recipient and
+    /// content. Shared between `send()` and `finalize_draft()` so the TTS
+    /// voice-reply path works regardless of `stream_mode`.
+    ///
+    /// When `immediate` is `true` (called from `finalize_draft`), the 10-second
+    /// debounce is skipped and `synthesize_and_send_voice` is called directly,
+    /// since the text is already the final response.
+    fn try_queue_voice_reply(&self, recipient: &str, content: &str, immediate: bool) {
+        let is_voice_chat = self
+            .voice_chats
+            .lock()
+            .map(|vs| vs.contains(recipient))
+            .unwrap_or(false);
+
+        if !is_voice_chat || self.tts_config.is_none() {
+            return;
+        }
+
+        // Only queue substantive natural-language replies for voice.
+        // Skip tool outputs: URLs, JSON, code blocks, errors, short status.
+        let is_substantive = content.len() > 40
+            && !content.starts_with("http")
+            && !content.starts_with('{')
+            && !content.starts_with('[')
+            && !content.starts_with("Error")
+            && !content.contains("```")
+            && !content.contains("tool_call")
+            && !content.contains("wttr.in");
+
+        if !is_substantive {
+            return;
+        }
+
+        let (chat_id, thread_id) = Self::parse_reply_target(recipient);
+        let voice_chats = self.voice_chats.clone();
+        let api_base = self.api_base.clone();
+        let bot_token = self.bot_token.clone();
+        let tts_config = self.tts_config.clone().unwrap();
+
+        if immediate {
+            // Finalize path: text is already the final answer — no debounce.
+            let text = content.to_string();
+            let recipient = recipient.to_string();
+            tokio::spawn(async move {
+                if let Ok(mut vc) = voice_chats.lock() {
+                    vc.remove(&recipient);
+                }
+                match Self::synthesize_and_send_voice(
+                    &api_base,
+                    &bot_token,
+                    &chat_id,
+                    thread_id.as_deref(),
+                    &text,
+                    &tts_config,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        tracing::info!("Telegram: voice reply sent ({} chars)", text.len());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Telegram: TTS voice reply failed: {e}");
+                    }
+                }
+            });
+            return;
+        }
+
+        // Send path: debounce to coalesce multi-part tool-chain responses.
+        if let Ok(mut pv) = self.pending_voice.lock() {
+            pv.insert(
+                recipient.to_string(),
+                (content.to_string(), std::time::Instant::now()),
+            );
+        }
+
+        let pending = self.pending_voice.clone();
+        let recipient = recipient.to_string();
+        tokio::spawn(async move {
+            // Wait 10 seconds — long enough for the agent to finish its
+            // full tool chain and send the final answer.
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+            // Atomic check-and-remove: only one task gets the value
+            let to_voice = pending.lock().ok().and_then(|mut pv| {
+                if let Some((_, ts)) = pv.get(&recipient)
+                    && ts.elapsed().as_secs() >= 8
+                {
+                    return pv.remove(&recipient).map(|(text, _)| text);
+                }
+                None
+            });
+
+            if let Some(text) = to_voice {
+                if let Ok(mut vc) = voice_chats.lock() {
+                    vc.remove(&recipient);
+                }
+                match Self::synthesize_and_send_voice(
+                    &api_base,
+                    &bot_token,
+                    &chat_id,
+                    thread_id.as_deref(),
+                    &text,
+                    &tts_config,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        tracing::info!("Telegram: voice reply sent ({} chars)", text.len());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Telegram: TTS voice reply failed: {e}");
+                    }
+                }
+            }
+        });
+    }
+
     /// Synthesize text to speech and send as a Telegram voice note (static version for spawned tasks).
     async fn synthesize_and_send_voice(
         api_base: &str,
@@ -1546,6 +1664,22 @@ Allowlist Telegram username (without '@') or numeric user ID.",
     /// Extract reply context from a Telegram `reply_to_message`, if present.
     fn extract_reply_context(&self, message: &serde_json::Value) -> Option<String> {
         let reply = message.get("reply_to_message")?;
+
+        // Skip the auto-injected topic-root reference Telegram adds to every
+        // message in a non-General forum topic. Its message_id equals the
+        // parent message's message_thread_id. Treating it as a real reply
+        // produces a spurious `> @user:\n> [Message]` blockquote prefix that
+        // downstream reply-intent classification reads as "user is replying
+        // to someone else" and rejects.
+        let reply_mid = reply.get("message_id").and_then(serde_json::Value::as_i64);
+        let thread_id = message
+            .get("message_thread_id")
+            .and_then(serde_json::Value::as_i64);
+        if let (Some(rmid), Some(tid)) = (reply_mid, thread_id)
+            && rmid == tid
+        {
+            return None;
+        }
 
         let reply_sender = reply
             .get("from")
@@ -2658,6 +2792,9 @@ impl Channel for TelegramChannel {
         let text = &strip_tool_call_tags(text);
         let (chat_id, thread_id) = Self::parse_reply_target(recipient);
 
+        // Queue TTS voice reply — immediate mode since text is already final
+        self.try_queue_voice_reply(recipient, text, true);
+
         // Clean up rate-limit tracking for this chat
         self.last_draft_edit.lock().remove(&chat_id);
 
@@ -2853,80 +2990,7 @@ impl Channel for TelegramChannel {
 
         // Voice chat mode: send text normally AND queue a voice note of the
         // final answer. Text in → text out. Voice in → text + voice out.
-        let is_voice_chat = self
-            .voice_chats
-            .lock()
-            .map(|vs| vs.contains(&message.recipient))
-            .unwrap_or(false);
-
-        if is_voice_chat && self.tts_config.is_some() {
-            // Only queue substantive natural-language replies for voice.
-            // Skip tool outputs: URLs, JSON, code blocks, errors, short status.
-            let is_substantive = content.len() > 40
-                && !content.starts_with("http")
-                && !content.starts_with('{')
-                && !content.starts_with('[')
-                && !content.starts_with("Error")
-                && !content.contains("```")
-                && !content.contains("tool_call")
-                && !content.contains("wttr.in");
-
-            if is_substantive {
-                if let Ok(mut pv) = self.pending_voice.lock() {
-                    pv.insert(
-                        message.recipient.clone(),
-                        (content.clone(), std::time::Instant::now()),
-                    );
-                }
-
-                let pending = self.pending_voice.clone();
-                let voice_chats = self.voice_chats.clone();
-                let api_base = self.api_base.clone();
-                let bot_token = self.bot_token.clone();
-                let chat_id_owned = chat_id.to_string();
-                let thread_id_owned = thread_id.map(str::to_string);
-                let recipient = message.recipient.clone();
-                let tts_config = self.tts_config.clone().unwrap();
-                tokio::spawn(async move {
-                    // Wait 10 seconds — long enough for the agent to finish its
-                    // full tool chain and send the final answer.
-                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-                    // Atomic check-and-remove: only one task gets the value
-                    let to_voice = pending.lock().ok().and_then(|mut pv| {
-                        if let Some((_, ts)) = pv.get(&recipient)
-                            && ts.elapsed().as_secs() >= 8
-                        {
-                            return pv.remove(&recipient).map(|(text, _)| text);
-                        }
-                        None
-                    });
-
-                    if let Some(text) = to_voice {
-                        if let Ok(mut vc) = voice_chats.lock() {
-                            vc.remove(&recipient);
-                        }
-                        match Self::synthesize_and_send_voice(
-                            &api_base,
-                            &bot_token,
-                            &chat_id_owned,
-                            thread_id_owned.as_deref(),
-                            &text,
-                            &tts_config,
-                        )
-                        .await
-                        {
-                            Ok(()) => {
-                                tracing::info!("Telegram: voice reply sent ({} chars)", text.len());
-                            }
-                            Err(e) => {
-                                tracing::warn!("Telegram: TTS voice reply failed: {e}");
-                            }
-                        }
-                    }
-                });
-            }
-        }
+        self.try_queue_voice_reply(&message.recipient, &content, false);
 
         // Always send text reply (voice chat gets both text and voice)
         let (text_without_markers, attachments) = parse_attachment_markers(&content);
@@ -3272,8 +3336,10 @@ Ensure only one `zeroclaw` process is using this bot token."
     ) -> anyhow::Result<Option<zeroclaw_api::channel::ChannelApprovalResponse>> {
         use zeroclaw_api::channel::ChannelApprovalResponse;
 
-        // Parse recipient for chat_id (may contain ":thread_id" suffix).
-        let chat_id = recipient.split_once(':').map_or(recipient, |(c, _)| c);
+        // Parse recipient for chat_id + optional thread_id ("chat_id:thread_id" format).
+        let (chat_id, thread_id) = recipient
+            .split_once(':')
+            .map_or((recipient, None), |(c, t)| (c, Some(t)));
 
         // Unique key embedded in callback_data so listen() can route the tap.
         let approval_id = uuid::Uuid::new_v4().to_string();
@@ -3295,12 +3361,15 @@ Ensure only one `zeroclaw` process is using this bot token."
             ]]
         });
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML",
             "reply_markup": reply_markup,
         });
+        if let Some(tid) = thread_id {
+            body["message_thread_id"] = serde_json::Value::String(tid.to_string());
+        }
 
         // Register the oneshot BEFORE sending the message to avoid a race
         // where the user taps the button before the sender is in the map.
@@ -4626,6 +4695,43 @@ mod tests {
             "text": "just a regular message"
         });
         assert!(ch.extract_reply_context(&msg).is_none());
+    }
+
+    #[test]
+    fn extract_reply_context_skips_topic_root() {
+        // Telegram auto-injects a reply_to_message pointing at the topic-root
+        // message on every message in a non-General forum topic. The injected
+        // reply's message_id equals the parent's message_thread_id. It is
+        // not a real reply and must not produce a blockquote prefix.
+        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false);
+        let msg = serde_json::json!({
+            "message_thread_id": 42,
+            "text": "hello in topic",
+            "reply_to_message": {
+                "message_id": 42,
+                "from": { "username": "alice" },
+                "forum_topic_created": { "name": "General Discussion", "icon_color": 0 }
+            }
+        });
+        assert!(ch.extract_reply_context(&msg).is_none());
+    }
+
+    #[test]
+    fn extract_reply_context_real_reply_in_topic() {
+        // A genuine reply inside a forum topic (reply.message_id differs from
+        // the parent's message_thread_id) should still produce a blockquote.
+        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false);
+        let msg = serde_json::json!({
+            "message_thread_id": 42,
+            "text": "I agree",
+            "reply_to_message": {
+                "message_id": 100,
+                "from": { "username": "alice" },
+                "text": "What do you think?"
+            }
+        });
+        let ctx = ch.extract_reply_context(&msg).unwrap();
+        assert_eq!(ctx, "> @alice:\n> What do you think?");
     }
 
     #[test]

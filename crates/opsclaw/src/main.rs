@@ -1076,7 +1076,7 @@ async fn main() -> Result<()> {
 
         // Auto-start channels if user said yes during wizard
         if std::env::var("OPSCLAW_AUTOSTART_CHANNELS").as_deref() == Ok("1") {
-            Box::pin(channels::start_channels(config)).await?;
+            Box::pin(channels::start_channels(config, None)).await?;
         }
         return Ok(());
     }
@@ -1157,7 +1157,7 @@ async fn main() -> Result<()> {
                 acp_config.session_timeout_secs = timeout;
             }
             let server = channels::acp_server::AcpServer::new(config, acp_config);
-            server.run().await
+            std::sync::Arc::new(server).run().await
         }
 
         Commands::Gateway { gateway_command } => {
@@ -1196,7 +1196,7 @@ async fn main() -> Result<()> {
                     }
 
                     log_gateway_start(&host, port);
-                    Box::pin(gateway::run_gateway(&host, port, config, None)).await
+                    Box::pin(gateway::run_gateway(&host, port, config, None, None, None)).await
                 }
                 Some(zeroclaw::GatewayCommands::GetPaircode { new }) => {
                     let port = config.gateway.port;
@@ -1249,13 +1249,13 @@ async fn main() -> Result<()> {
                 Some(zeroclaw::GatewayCommands::Start { port, host }) => {
                     let (port, host) = resolve_gateway_addr(&config, port, host);
                     log_gateway_start(&host, port);
-                    Box::pin(gateway::run_gateway(&host, port, config, None)).await
+                    Box::pin(gateway::run_gateway(&host, port, config, None, None, None)).await
                 }
                 None => {
                     let port = config.gateway.port;
                     let host = config.gateway.host.clone();
                     log_gateway_start(&host, port);
-                    Box::pin(gateway::run_gateway(&host, port, config, None)).await
+                    Box::pin(gateway::run_gateway(&host, port, config, None, None, None)).await
                 }
             }
         }
@@ -1333,14 +1333,20 @@ async fn main() -> Result<()> {
             }
 
             let subsystems = daemon::DaemonSubsystems {
-                gateway_start: Some(Box::new(|host, port, config, tx| {
+                gateway_start: Some(Box::new(|host, port, config, tx, reload_tx| {
                     Box::pin(async move {
-                        Box::pin(zeroclaw_gateway::run_gateway(&host, port, config, tx)).await
+                        Box::pin(zeroclaw_gateway::run_gateway(
+                            &host, port, config, tx, reload_tx, None,
+                        ))
+                        .await
                     })
                 })),
                 channels_start: Some(Box::new(|config| {
                     Box::pin(async move {
-                        Box::pin(zeroclaw_channels::orchestrator::start_channels(config)).await
+                        Box::pin(zeroclaw_channels::orchestrator::start_channels(
+                            config, None,
+                        ))
+                        .await
                     })
                 })),
                 mqtt_start: Some(Box::new(|mqtt_config| {
@@ -1361,7 +1367,9 @@ async fn main() -> Result<()> {
                     })
                 })),
             };
-            Box::pin(daemon::run(config, host, port, subsystems)).await
+            Box::pin(daemon::run(config, host, port, subsystems))
+                .await
+                .map(|_| ())
         }
 
         Commands::Status { format } => {
@@ -1586,7 +1594,7 @@ async fn main() -> Result<()> {
         },
 
         Commands::Channel { channel_command } => match channel_command {
-            ChannelCommands::Start => Box::pin(channels::start_channels(config)).await,
+            ChannelCommands::Start => Box::pin(channels::start_channels(config, None)).await,
             ChannelCommands::Doctor => Box::pin(channels::doctor_channels(config)).await,
             other => Box::pin(channels::handle_command(other, &config)).await,
         },

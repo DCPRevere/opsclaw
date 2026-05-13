@@ -7,8 +7,12 @@
 //! - Request timeouts (30s) to prevent slow-loris attacks
 //! - Header sanitization (handled by axum/hyper)
 
+pub mod acp;
 pub mod api;
+pub mod api_config;
+pub mod api_onboard;
 pub mod api_pairing;
+pub mod api_personality;
 #[cfg(feature = "plugins-wasm")]
 pub mod api_plugins;
 #[cfg(feature = "webauthn")]
@@ -18,6 +22,7 @@ pub mod canvas;
 pub mod hardware_context;
 pub mod node_tool;
 pub mod nodes;
+pub mod openapi;
 pub mod session_queue;
 pub mod sse;
 pub mod static_files;
@@ -25,6 +30,7 @@ pub mod tls;
 #[cfg(feature = "gateway-voice-duplex")]
 pub mod voice_duplex;
 pub mod ws;
+pub mod ws_approval;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -33,7 +39,7 @@ use axum::{
     extract::{ConnectInfo, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Json},
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post},
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -52,31 +58,53 @@ use zeroclaw_channels::{
 use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::Config;
 use zeroclaw_infra::session_backend::SessionBackend;
-use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
 use zeroclaw_memory::{self, Memory, MemoryCategory};
-use zeroclaw_providers::{self, ChatMessage, Provider};
+use zeroclaw_providers::{self, Provider};
 use zeroclaw_runtime::cost::CostTracker;
+use zeroclaw_runtime::i18n;
 use zeroclaw_runtime::platform;
 use zeroclaw_runtime::security::pairing::{PairingGuard, constant_time_eq, is_public_bind};
 use zeroclaw_runtime::tools;
 use zeroclaw_runtime::tools::CanvasStore;
+use zeroclaw_runtime::util::truncate_with_ellipsis;
 
 /// Maximum request body size (64KB) — prevents memory exhaustion
 pub const MAX_BODY_SIZE: usize = 65_536;
 /// Default request timeout (30s) — prevents slow-loris attacks.
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 
-/// Read gateway request timeout from `OPSCLAW_GATEWAY_TIMEOUT_SECS` env var
+/// Default request timeout for `POST /api/cron/{id}/run` (10 minutes).
+///
+/// Manually-triggered cron jobs run synchronously inside the request handler
+/// and frequently exceed the 30s gateway-wide default — agent jobs in
+/// particular can take minutes to complete a full reasoning loop. Capping at
+/// 10 minutes keeps the route from hanging indefinitely while still allowing
+/// realistic workloads to finish.
+pub const LONG_RUNNING_REQUEST_TIMEOUT_SECS: u64 = 600;
+
+/// Read gateway request timeout from `ZEROCLAW_GATEWAY_TIMEOUT_SECS` env var
 /// at runtime, falling back to [`REQUEST_TIMEOUT_SECS`].
 ///
 /// Agentic workloads with tool use (web search, MCP tools, sub-agent
 /// delegation) regularly exceed 30 seconds. This allows operators to
 /// increase the timeout without recompiling.
 pub fn gateway_request_timeout_secs() -> u64 {
-    std::env::var("OPSCLAW_GATEWAY_TIMEOUT_SECS")
+    std::env::var("ZEROCLAW_GATEWAY_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(REQUEST_TIMEOUT_SECS)
+}
+
+/// Read manual cron-run request timeout from
+/// `ZEROCLAW_GATEWAY_LONG_RUNNING_REQUEST_TIMEOUT_SECS` at runtime, falling back to
+/// [`LONG_RUNNING_REQUEST_TIMEOUT_SECS`]. Long-running jobs (e.g. agent prompts that
+/// invoke tools) can comfortably exceed the 30s gateway-wide default, so the
+/// `/api/cron/{id}/run` route gets its own timeout layer.
+pub fn gateway_long_running_request_timeout_secs() -> u64 {
+    std::env::var("ZEROCLAW_GATEWAY_LONG_RUNNING_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(LONG_RUNNING_REQUEST_TIMEOUT_SECS)
 }
 /// Sliding window used by gateway rate limiting.
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
@@ -113,11 +141,18 @@ fn sender_session_id(channel: &str, msg: &zeroclaw_api::channel::ChannelMessage)
 }
 
 fn webhook_session_id(headers: &HeaderMap) -> Option<String> {
+    const MAX_SESSION_ID_LEN: usize = 128;
     headers
         .get("X-Session-Id")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .filter(|value| value.len() <= MAX_SESSION_ID_LEN)
+        .filter(|value| {
+            value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        })
         .map(str::to_owned)
 }
 
@@ -126,43 +161,6 @@ fn hash_webhook_secret(value: &str) -> String {
 
     let digest = Sha256::digest(value.as_bytes());
     hex::encode(digest)
-}
-
-fn resolve_wati_webhook_secret(config: &Config) -> Option<String> {
-    std::env::var("OPSCLAW_WATI_WEBHOOK_SECRET")
-        .ok()
-        .and_then(|secret| {
-            let secret = secret.trim();
-            (!secret.is_empty()).then(|| secret.to_owned())
-        })
-        .or_else(|| {
-            config.channels.wati.as_ref().and_then(|wati| {
-                wati.webhook_secret
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|secret| !secret.is_empty())
-                    .map(ToOwned::to_owned)
-            })
-        })
-}
-
-fn verify_shared_webhook_secret(configured_secret: &str, headers: &HeaderMap) -> bool {
-    let Some(provided_hash) = headers
-        .get("X-Webhook-Secret")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|secret| !secret.is_empty())
-        .map(hash_webhook_secret)
-    else {
-        return false;
-    };
-    constant_time_eq(&provided_hash, &hash_webhook_secret(configured_secret))
-}
-
-fn hash_webhook_payload(message: &str) -> Vec<u8> {
-    use sha2::{Digest, Sha256};
-
-    Sha256::digest(message.as_bytes()).to_vec()
 }
 
 /// How often the rate limiter sweeps stale IP entries from its map.
@@ -266,22 +264,7 @@ impl GatewayRateLimiter {
 pub struct IdempotencyStore {
     ttl: Duration,
     max_keys: usize,
-    keys: Mutex<HashMap<String, IdempotencyRecord>>,
-}
-
-#[derive(Debug, Clone)]
-struct IdempotencyRecord {
-    seen_at: Instant,
-    payload_hash: Vec<u8>,
-    response: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum IdempotencyBegin {
-    New,
-    InProgress,
-    Replay(serde_json::Value),
-    Conflict,
+    keys: Mutex<HashMap<String, Instant>>,
 }
 
 impl IdempotencyStore {
@@ -293,60 +276,29 @@ impl IdempotencyStore {
         }
     }
 
-    fn begin(&self, key: &str, payload_hash: Vec<u8>) -> IdempotencyBegin {
+    /// Returns true if this key is new and is now recorded.
+    fn record_if_new(&self, key: &str) -> bool {
         let now = Instant::now();
         let mut keys = self.keys.lock();
 
-        keys.retain(|_, record| now.duration_since(record.seen_at) < self.ttl);
+        keys.retain(|_, seen_at| now.duration_since(*seen_at) < self.ttl);
 
-        if let Some(existing) = keys.get(key) {
-            if existing.payload_hash != payload_hash {
-                return IdempotencyBegin::Conflict;
-            }
-            return match &existing.response {
-                Some(response) => IdempotencyBegin::Replay(response.clone()),
-                None => IdempotencyBegin::InProgress,
-            };
+        if keys.contains_key(key) {
+            return false;
         }
 
         if keys.len() >= self.max_keys {
             let evict_key = keys
                 .iter()
-                .min_by_key(|(_, record)| record.seen_at)
+                .min_by_key(|(_, seen_at)| *seen_at)
                 .map(|(k, _)| k.clone());
             if let Some(evict_key) = evict_key {
                 keys.remove(&evict_key);
             }
         }
 
-        keys.insert(
-            key.to_owned(),
-            IdempotencyRecord {
-                seen_at: now,
-                payload_hash,
-                response: None,
-            },
-        );
-        IdempotencyBegin::New
-    }
-
-    #[cfg(test)]
-    fn record_if_new(&self, key: &str) -> bool {
-        matches!(
-            self.begin(key, hash_webhook_payload(key)),
-            IdempotencyBegin::New
-        )
-    }
-
-    fn complete(&self, key: &str, response: serde_json::Value) {
-        if let Some(record) = self.keys.lock().get_mut(key) {
-            record.response = Some(response);
-            record.seen_at = Instant::now();
-        }
-    }
-
-    fn forget(&self, key: &str) {
-        self.keys.lock().remove(key);
+        keys.insert(key.to_owned(), now);
+        true
     }
 }
 
@@ -449,6 +401,11 @@ pub struct AppState {
     pub event_buffer: Arc<sse::EventBuffer>,
     /// Shutdown signal sender for graceful shutdown
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// Reload signal sender owned by the daemon. /admin/reload writes `true`
+    /// here; the daemon's wait loop reacts and re-instantiates every
+    /// subsystem in place. `None` when running standalone (`zeroclaw gateway start`)
+    /// — reload then degrades to a 503 with a clear message.
+    pub reload_tx: Option<tokio::sync::watch::Sender<bool>>,
     /// Registry of dynamically connected nodes
     pub node_registry: Arc<nodes::NodeRegistry>,
     /// Path prefix for reverse-proxy deployments (empty string = no prefix)
@@ -484,6 +441,11 @@ pub async fn run_gateway(
     port: u16,
     config: Config,
     external_event_tx: Option<tokio::sync::broadcast::Sender<serde_json::Value>>,
+    // Reload sender owned by the daemon. /admin/reload writes `true` here;
+    // the daemon's wait loop reacts via `subscribe()` and tears down to
+    // re-init. Cross-platform replacement for the SIGUSR1 hack.
+    reload_tx: Option<tokio::sync::watch::Sender<bool>>,
+    canvas_store: Option<CanvasStore>,
 ) -> Result<()> {
     // ── Security: warn on public bind without tunnel or explicit opt-in ──
     if is_public_bind(host) && config.tunnel.provider == "none" && !config.gateway.allow_public_bind
@@ -513,17 +475,53 @@ pub async fn run_gateway(
     let display_addr = format!("{host}:{actual_port}");
 
     let fallback = config.providers.fallback_provider();
+    let provider_name = config.providers.fallback.as_deref().unwrap_or("openrouter");
     let provider: Arc<dyn Provider> =
         Arc::from(zeroclaw_providers::create_resilient_provider_with_options(
-            config.providers.fallback.as_deref().unwrap_or("openrouter"),
+            provider_name,
             fallback.and_then(|e| e.api_key.as_deref()),
             fallback.and_then(|e| e.base_url.as_deref()),
             &config.reliability,
             &zeroclaw_providers::provider_runtime_options_from_config(&config),
         )?);
-    let model = fallback
-        .and_then(|e| e.model.clone())
-        .unwrap_or_else(|| "anthropic/claude-sonnet-4".into());
+    // Three-step model resolution mirroring agent::Agent::from_config (#6099):
+    // (1) the fallback provider's `model`, (2) the first configured
+    // `[providers.models.*]` model with a WARN naming what to set, (3) leave
+    // the model empty so the gateway boots and the dashboard can complete
+    // browser-based onboarding at /onboard. The chat-dispatch path checks
+    // `state.model.is_empty()` and returns a structured needs-onboarding
+    // error before any provider call, so the original "no silent vendor-
+    // default substitution" guarantee from #6099 is preserved at request-
+    // time rather than at boot.
+    let model = match fallback
+        .and_then(|e| e.model.as_deref())
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        Some(m) => m.to_string(),
+        None => match config.providers.resolve_default_model() {
+            Some(m) => {
+                tracing::warn!(
+                    provider = provider_name,
+                    model = %m,
+                    "fallback provider has no `model` set; using first configured \
+                     providers.models entry as default. Set [providers.models.{provider_name}] \
+                     model = \"...\" to silence this warning.",
+                );
+                m
+            }
+            None => {
+                tracing::warn!(
+                    "Gateway booting without a configured model. Visit \
+                     http://{display_addr}/onboard to complete browser \
+                     onboarding. Chat endpoints will return 503 \
+                     needs_onboarding until at least one \
+                     [providers.models.<name>] model = \"...\" is set."
+                );
+                String::new()
+            }
+        },
+    };
     let temperature = fallback.and_then(|e| e.temperature).unwrap_or(0.7);
     let mem: Arc<dyn Memory> = Arc::from(zeroclaw_memory::create_memory_with_storage_and_routes(
         &config.memory,
@@ -548,7 +546,12 @@ pub async fn run_gateway(
         (None, None)
     };
 
-    let canvas_store = tools::CanvasStore::new();
+    // Reuse the daemon-supplied canvas store when present so channel-
+    // server agents (Telegram/Discord/Slack) push frames into the same
+    // store the gateway's WebSocket and REST endpoints serve (#5356).
+    // Standalone gateway invocations (no daemon supervisor) fall back
+    // to a fresh store.
+    let canvas_store = canvas_store.unwrap_or_default();
 
     let (
         mut tools_registry_raw,
@@ -674,7 +677,7 @@ pub async fn run_gateway(
 
     // WhatsApp app secret for webhook signature verification
     // Priority: environment variable > config file
-    let whatsapp_app_secret: Option<Arc<str>> = std::env::var("OPSCLAW_WHATSAPP_APP_SECRET")
+    let whatsapp_app_secret: Option<Arc<str>> = std::env::var("ZEROCLAW_WHATSAPP_APP_SECRET")
         .ok()
         .and_then(|secret| {
             let secret = secret.trim();
@@ -702,7 +705,7 @@ pub async fn run_gateway(
 
     // Linq signing secret for webhook signature verification
     // Priority: environment variable > config file
-    let linq_signing_secret: Option<Arc<str>> = std::env::var("OPSCLAW_LINQ_SIGNING_SECRET")
+    let linq_signing_secret: Option<Arc<str>> = std::env::var("ZEROCLAW_LINQ_SIGNING_SECRET")
         .ok()
         .and_then(|secret| {
             let secret = secret.trim();
@@ -746,7 +749,7 @@ pub async fn run_gateway(
     // Nextcloud Talk webhook secret for signature verification
     // Priority: environment variable > config file
     let nextcloud_talk_webhook_secret: Option<Arc<str>> =
-        std::env::var("OPSCLAW_NEXTCLOUD_TALK_WEBHOOK_SECRET")
+        std::env::var("ZEROCLAW_NEXTCLOUD_TALK_WEBHOOK_SECRET")
             .ok()
             .and_then(|secret| {
                 let secret = secret.trim();
@@ -772,17 +775,28 @@ pub async fn run_gateway(
         .map(|gp| Arc::new(GmailPushChannel::new(gp.clone())));
 
     // ── Session persistence for WS chat ─────────────────────
+    // Routes through `make_session_backend` so `[channels].session_backend`
+    // is the single source of truth for which backend stores sessions.
+    // Picking `"jsonl"` would otherwise leave gateway WS sessions writing
+    // to SQLite while channel + tool reads went to JSONL — the original
+    // #5769 split, just on a different backend pairing.
     let session_backend: Option<Arc<dyn SessionBackend>> = if config.gateway.session_persistence {
-        match SqliteSessionBackend::new(&config.workspace_dir) {
-            Ok(b) => {
-                tracing::info!("Gateway session persistence enabled (SQLite)");
+        match zeroclaw_infra::make_session_backend(
+            &config.workspace_dir,
+            &config.channels.session_backend,
+        ) {
+            Ok(backend) => {
+                tracing::info!(
+                    "Gateway session persistence enabled (backend={})",
+                    config.channels.session_backend,
+                );
                 if config.gateway.session_ttl_hours > 0
-                    && let Ok(cleaned) = b.cleanup_stale(config.gateway.session_ttl_hours)
+                    && let Ok(cleaned) = backend.cleanup_stale(config.gateway.session_ttl_hours)
                     && cleaned > 0
                 {
                     tracing::info!("Cleaned up {cleaned} stale gateway sessions");
                 }
-                Some(Arc::new(b))
+                Some(backend)
             }
             Err(e) => {
                 tracing::warn!("Session persistence disabled: {e}");
@@ -875,12 +889,12 @@ pub async fn run_gateway(
         tracing::info!("Web dashboard: serving from {}", dir.display());
     } else {
         tracing::info!(
-            "Web dashboard: not available (set gateway.web_dist_dir or OPSCLAW_WEB_DIST_DIR)"
+            "Web dashboard: not available (set gateway.web_dist_dir or ZEROCLAW_WEB_DIST_DIR)"
         );
     }
 
     let pfx = path_prefix.unwrap_or("");
-    println!("📟 OpsClaw Gateway listening on http://{display_addr}{pfx}");
+    println!("🦀 ZeroClaw Gateway listening on http://{display_addr}{pfx}");
     if let Some(ref url) = tunnel_url {
         println!("  🌐 Public URL: {url}");
     }
@@ -894,7 +908,7 @@ pub async fn run_gateway(
         println!("     Send: POST {pfx}/pair with header X-Pairing-Code: {code}");
     } else if pairing.require_pairing() {
         println!("  🔒 Pairing: ACTIVE (bearer token required)");
-        println!("     To pair a new device: opsclaw gateway get-paircode --new");
+        println!("     To pair a new device: zeroclaw gateway get-paircode --new");
         println!();
     } else {
         println!("  ⚠️  Pairing: DISABLED (all requests accepted)");
@@ -988,6 +1002,7 @@ pub async fn run_gateway(
         event_tx,
         event_buffer,
         shutdown_tx,
+        reload_tx,
         node_registry,
         session_backend,
         session_queue: Arc::new(session_queue::SessionActorQueue::new(8, 30, 600)),
@@ -1023,15 +1038,11 @@ pub async fn run_gateway(
         },
     };
 
-    // Config PUT needs larger body limit (1MB)
-    let config_put_router = Router::new()
-        .route("/api/config", put(api::handle_api_config_put))
-        .layer(RequestBodyLimitLayer::new(1_048_576));
-
     // Build router with middleware
     let inner = Router::new()
         // ── Admin routes (for CLI management) ──
         .route("/admin/shutdown", post(handle_admin_shutdown))
+        .route("/admin/reload", post(handle_admin_reload))
         .route("/admin/paircode", get(handle_admin_paircode))
         .route("/admin/paircode/new", post(handle_admin_paircode_new))
         // ── Existing routes ──
@@ -1051,7 +1062,49 @@ pub async fn run_gateway(
         .route("/hooks/claude-code", post(api::handle_claude_code_hook))
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
-        .route("/api/config", get(api::handle_api_config_get))
+        .route(
+            "/api/config",
+            patch(api_config::handle_patch).options(api_config::handle_options_config),
+        )
+        .route(
+            "/api/config/prop",
+            get(api_config::handle_prop_get)
+                .put(api_config::handle_prop_put)
+                .delete(api_config::handle_prop_delete)
+                .options(api_config::handle_options_prop),
+        )
+        .route("/api/config/list", get(api_config::handle_list))
+        .route("/api/config/drift", get(api_config::handle_drift))
+        .route("/api/config/templates", get(api_config::handle_templates))
+        .route("/api/config/map-key", post(api_config::handle_map_key))
+        .route("/api/onboard/catalog", get(api_onboard::handle_catalog))
+        .route(
+            "/api/onboard/catalog/models",
+            get(api_onboard::handle_catalog_models),
+        )
+        .route("/api/onboard/status", get(api_onboard::handle_onboard_status))
+        .route("/api/onboard/sections", get(api_onboard::handle_sections))
+        .route(
+            "/api/onboard/sections/{section}",
+            get(api_onboard::handle_section_picker),
+        )
+        .route(
+            "/api/onboard/sections/{section}/items/{key}",
+            post(api_onboard::handle_section_select),
+        )
+        .route("/api/personality", get(api_personality::handle_index))
+        .route(
+            "/api/personality/templates",
+            get(api_personality::handle_templates),
+        )
+        .route(
+            "/api/personality/{filename}",
+            get(api_personality::handle_get).put(api_personality::handle_put),
+        )
+        .route("/api/config/init", post(api_config::handle_init))
+        .route("/api/config/migrate", post(api_config::handle_migrate))
+        .route("/api/openapi.json", get(openapi::handle_openapi_json))
+        .route("/api/docs", get(openapi::handle_docs))
         .route("/api/tools", get(api::handle_api_tools))
         .route("/api/cron", get(api::handle_api_cron_list))
         .route("/api/cron", post(api::handle_api_cron_add))
@@ -1064,6 +1117,9 @@ pub async fn run_gateway(
             delete(api::handle_api_cron_delete).patch(api::handle_api_cron_patch),
         )
         .route("/api/cron/{id}/runs", get(api::handle_api_cron_runs))
+        // Note: `/api/cron/{id}/run` is registered on a separate router below
+        // with a longer TimeoutLayer — manual cron triggers run the job
+        // synchronously and routinely exceed the 30s gateway-wide default.
         .route("/api/integrations", get(api::handle_api_integrations))
         .route(
             "/api/integrations/settings",
@@ -1093,6 +1149,10 @@ pub async fn run_gateway(
         .route("/api/pairing/initiate", post(api_pairing::initiate_pairing))
         .route("/api/pair", post(api_pairing::submit_pairing_enhanced))
         .route("/api/devices", get(api_pairing::list_devices))
+        .route(
+            "/api/devices/me/capabilities",
+            post(api_pairing::update_my_capabilities),
+        )
         .route("/api/devices/{id}", delete(api_pairing::revoke_device))
         .route(
             "/api/devices/{id}/token/rotate",
@@ -1150,6 +1210,8 @@ pub async fn run_gateway(
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         .route("/api/events/history", get(sse::handle_events_history))
+        // ── ACP client bridge ──
+        .route("/acp", get(acp::handle_ws_acp))
         // ── WebSocket agent chat ──
         .route("/ws/chat", get(ws::handle_ws_chat))
         // ── WebSocket canvas updates ──
@@ -1158,16 +1220,29 @@ pub async fn run_gateway(
         .route("/ws/nodes", get(nodes::handle_ws_nodes))
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))
-        // ── Config PUT with larger body limit ──
-        .merge(config_put_router)
         // ── SPA fallback: non-API GET requests serve index.html ──
         .fallback(get(static_files::handle_spa_fallback))
-        .with_state(state)
+        .with_state(state.clone())
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(gateway_request_timeout_secs()),
         ));
+
+    // Manual cron-trigger route lives on its own sub-router so it can opt out
+    // of the 30s gateway-wide TimeoutLayer. Layers attached here travel with
+    // the route through `merge`, so only this endpoint sees the longer
+    // timeout.
+    let cron_run_router: Router = Router::new()
+        .route("/api/cron/{id}/run", post(api::handle_api_cron_run))
+        .with_state(state)
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(gateway_long_running_request_timeout_secs()),
+        ));
+
+    let inner = inner.merge(cron_run_router);
 
     // Nest under path prefix when configured (axum strips prefix before routing).
     // nest() at "/prefix" handles both "/prefix" and "/prefix/*" but not "/prefix/"
@@ -1240,7 +1315,7 @@ pub async fn run_gateway(
                     });
                 }
                 _ = shutdown_signal.changed() => {
-                    tracing::info!("📟 OpsClaw Gateway shutting down...");
+                    tracing::info!("🦀 ZeroClaw Gateway shutting down...");
                     break;
                 }
             }
@@ -1253,7 +1328,7 @@ pub async fn run_gateway(
         )
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.changed().await;
-            tracing::info!("📟 OpsClaw Gateway shutting down...");
+            tracing::info!("🦀 ZeroClaw Gateway shutting down...");
         })
         .await?;
     }
@@ -1306,14 +1381,7 @@ fn prometheus_observer_from_state(
 }
 
 /// GET /metrics — Prometheus text exposition format
-async fn handle_metrics(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> axum::response::Response {
-    if let Err(resp) = api::require_auth(&state, &headers) {
-        return resp.into_response();
-    }
-
+async fn handle_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let body = {
         #[cfg(feature = "observability-prometheus")]
         {
@@ -1335,7 +1403,6 @@ async fn handle_metrics(
         [(header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
         body,
     )
-        .into_response()
 }
 
 /// POST /pair — exchange one-time code for bearer token
@@ -1430,62 +1497,125 @@ async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGua
     Ok(())
 }
 
-/// Simple chat for webhook endpoint (no tools, for backward compatibility and testing).
-async fn run_gateway_chat_simple(
-    state: &AppState,
-    message: &str,
-) -> anyhow::Result<zeroclaw_api::provider::ChatResponse> {
-    let user_messages = vec![ChatMessage::user(message)];
-
-    // Keep webhook/gateway prompts aligned with channel behavior by injecting
-    // workspace-aware system context before model invocation.
-    let system_prompt = {
-        let config_guard = state.config.lock();
-        zeroclaw_runtime::agent::system_prompt::build_system_prompt(
-            &config_guard.workspace_dir,
-            &state.model,
-            &[], // tools - empty for simple chat
-            &[], // skills
-            Some(&config_guard.identity),
-            None, // bootstrap_max_chars - use default
-        )
-    };
-
-    let mut messages = Vec::with_capacity(1 + user_messages.len());
-    messages.push(ChatMessage::system(system_prompt));
-    messages.extend(user_messages);
-
-    let multimodal_config = state.config.lock().multimodal.clone();
-    let prepared = zeroclaw_providers::multimodal::prepare_messages_for_provider(
-        &messages,
-        &multimodal_config,
-    )
-    .await?;
-
-    state
-        .provider
-        .chat(
-            zeroclaw_api::provider::ChatRequest {
-                messages: &prepared.messages,
-                tools: None,
-            },
-            &state.model,
-            Some(state.temperature),
-        )
-        .await
+/// Result of a gateway chat turn. Carries the response text plus per-turn
+/// token / cost totals captured from the cost-tracking scope (when present)
+/// so callers can populate observer-event annotations without racing
+/// concurrent webhook traffic that shares the same `CostTracker`.
+struct GatewayChatOutcome {
+    response: String,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cost_usd: Option<f64>,
 }
 
-/// Full-featured chat with tools for channel handlers (WhatsApp, Linq, Nextcloud Talk).
+/// Returns a structured `needs_onboarding` error when `model` is empty
+/// or whitespace-only, otherwise `None`. Empty model means the gateway
+/// booted with nothing configured (fresh install). Callers refuse the
+/// dispatch with this marker instead of calling the provider with an
+/// empty model id. Mirrors `agent::Agent::from_config` (#6099) at
+/// request-time so `/onboard` stays reachable.
+fn needs_onboarding_for(model: &str) -> Option<anyhow::Error> {
+    if model.trim().is_empty() {
+        Some(anyhow::anyhow!(
+            "needs_onboarding: gateway has no model configured. Complete \
+             browser onboarding at /onboard, or set [providers.models.<name>] \
+             model = \"...\" before sending messages."
+        ))
+    } else {
+        None
+    }
+}
+
+/// True when `e` carries the marker produced by `needs_onboarding_for`.
+/// Used by chat-dispatch error paths to map the marker to a 503
+/// `needs_onboarding` HTTP response or a more accurate channel-side
+/// reply, instead of the generic 500 / "sorry" catch-all.
+fn is_needs_onboarding_err(e: &anyhow::Error) -> bool {
+    e.to_string().contains("needs_onboarding")
+}
+
+/// Reply text sent over a channel SDK when chat dispatch refuses
+/// because the gateway has no model configured. Resolved through the
+/// shared Fluent catalog (`channel-needs-onboarding-reply` in
+/// `crates/zeroclaw-runtime/locales/<locale>/cli.ftl`) so non-English
+/// operators see localized text instead of a Rust-side English literal.
+fn needs_onboarding_channel_reply() -> String {
+    i18n::get_required_cli_string("channel-needs-onboarding-reply")
+}
+
+/// Full-featured chat with tools for channel and webhook handlers.
 async fn run_gateway_chat_with_tools(
     state: &AppState,
     message: &str,
     session_id: Option<&str>,
-) -> anyhow::Result<String> {
-    let config = state.config.lock().clone();
-    Box::pin(zeroclaw_runtime::agent::process_message(
-        config, message, session_id, None,
-    ))
-    .await
+) -> anyhow::Result<GatewayChatOutcome> {
+    if let Some(err) = needs_onboarding_for(&state.model) {
+        return Err(err);
+    }
+
+    // Tests exercise webhook infrastructure (idempotency, auth, autosave)
+    // through handle_webhook, so dispatch to the mock provider directly
+    // instead of bootstrapping the full agent runtime. The mock path
+    // doesn't go through the cost-tracking scope, so usage stays None.
+    #[cfg(test)]
+    {
+        let _ = session_id;
+        let response = state
+            .provider
+            .chat_with_system(None, message, &state.model, Some(state.temperature))
+            .await?;
+        Ok(GatewayChatOutcome {
+            response,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+        })
+    }
+
+    #[cfg(not(test))]
+    {
+        let config = state.config.lock().clone();
+        // Scope the cost tracking context so per-LLM-call usage flows into the
+        // gateway's cost tracker and costs.jsonl. Without this scope, the
+        // tracker exists on AppState but never receives any records from the
+        // runtime tool loop. The context's per-scope `turn_usage` accumulator
+        // also lets us read out this turn's tokens / cost after the scope
+        // exits without racing concurrent webhook traffic that shares the
+        // same tracker.
+        let cost_tracking_context = state.cost_tracker.as_ref().map(|tracker| {
+            zeroclaw_runtime::agent::loop_::ToolLoopCostTrackingContext::new(
+                tracker.clone(),
+                std::sync::Arc::new(state.config.lock().cost.prices.clone()),
+            )
+        });
+        let captured_usage = cost_tracking_context
+            .as_ref()
+            .map(|ctx| ctx.turn_usage.clone());
+        let response = Box::pin(
+            zeroclaw_runtime::agent::loop_::TOOL_LOOP_COST_TRACKING_CONTEXT.scope(
+                cost_tracking_context,
+                zeroclaw_runtime::agent::process_message(config, message, session_id, None),
+            ),
+        )
+        .await?;
+        let usage = captured_usage
+            .map(|cell| *cell.lock())
+            .filter(|u| u.input_tokens > 0 || u.output_tokens > 0);
+        let (input_tokens, output_tokens, cost_usd) = match usage {
+            Some(u) => (
+                Some(u.input_tokens),
+                Some(u.output_tokens),
+                Some(u.cost_usd),
+            ),
+            None => (None, None, None),
+        };
+        Ok(GatewayChatOutcome {
+            response,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+        })
+    }
 }
 
 /// Webhook request body
@@ -1567,42 +1697,24 @@ async fn handle_webhook(
         }
     };
 
-    let idempotency_key = headers
+    // ── Idempotency (optional) ──
+    if let Some(idempotency_key) = headers
         .get("X-Idempotency-Key")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned);
+        && !state.idempotency_store.record_if_new(idempotency_key)
+    {
+        tracing::info!("Webhook duplicate ignored (idempotency key: {idempotency_key})");
+        let body = serde_json::json!({
+            "status": "duplicate",
+            "idempotent": true,
+            "message": "Request already processed for this idempotency key"
+        });
+        return (StatusCode::OK, Json(body));
+    }
 
     let message = &webhook_body.message;
-    if let Some(idempotency_key) = idempotency_key.as_deref() {
-        match state
-            .idempotency_store
-            .begin(idempotency_key, hash_webhook_payload(message))
-        {
-            IdempotencyBegin::New => {}
-            IdempotencyBegin::Replay(body) => {
-                tracing::info!("Webhook duplicate replayed (idempotency key: {idempotency_key})");
-                return (StatusCode::OK, Json(body));
-            }
-            IdempotencyBegin::InProgress => {
-                tracing::info!(
-                    "Webhook duplicate still processing (idempotency key: {idempotency_key})"
-                );
-                let err = serde_json::json!({
-                    "error": "Request already in progress for this idempotency key"
-                });
-                return (StatusCode::CONFLICT, Json(err));
-            }
-            IdempotencyBegin::Conflict => {
-                tracing::warn!("Webhook idempotency key reused with different payload");
-                let err = serde_json::json!({
-                    "error": "Idempotency key already used with a different request body"
-                });
-                return (StatusCode::CONFLICT, Json(err));
-            }
-        }
-    }
     let session_id = webhook_session_id(&headers);
 
     if state.auto_save && !zeroclaw_memory::should_skip_autosave_content(message) {
@@ -1642,11 +1754,18 @@ async fn handle_webhook(
         },
     );
 
-    match run_gateway_chat_simple(&state, message).await {
-        Ok(chat_response) => {
+    match run_gateway_chat_with_tools(&state, message, session_id.as_deref()).await {
+        Ok(GatewayChatOutcome {
+            response,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+        }) => {
             let duration = started_at.elapsed();
-            let input_tokens = chat_response.usage.as_ref().and_then(|u| u.input_tokens);
-            let output_tokens = chat_response.usage.as_ref().and_then(|u| u.output_tokens);
+            // Per-turn token / cost annotation captured from the cost-tracking
+            // scope inside `run_gateway_chat_with_tools` (None outside of test
+            // / when no LLM call recorded). Cost is also persisted to
+            // /api/cost and costs.jsonl via the same scope.
             let tokens_used = input_tokens
                 .zip(output_tokens)
                 .map(|(i, o)| i + o)
@@ -1659,8 +1778,8 @@ async fn handle_webhook(
                     duration,
                     success: true,
                     error_message: None,
-                    input_tokens,
-                    output_tokens,
+                    input_tokens: None,
+                    output_tokens: None,
                 },
             );
             state.observer.record_metric(
@@ -1672,17 +1791,11 @@ async fn handle_webhook(
                     model: model_label,
                     duration,
                     tokens_used,
-                    cost_usd: None,
+                    cost_usd,
                 },
             );
 
-            let response = chat_response.text.unwrap_or_default();
             let body = serde_json::json!({"response": response, "model": state.model});
-            if let Some(idempotency_key) = idempotency_key.as_deref() {
-                state
-                    .idempotency_store
-                    .complete(idempotency_key, body.clone());
-            }
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
@@ -1719,12 +1832,21 @@ async fn handle_webhook(
                 },
             );
 
-            tracing::error!("Webhook provider error: {}", sanitized);
-            let err = serde_json::json!({"error": "LLM request failed"});
-            if let Some(idempotency_key) = idempotency_key.as_deref() {
-                state.idempotency_store.forget(idempotency_key);
+            if is_needs_onboarding_err(&e) {
+                tracing::warn!(
+                    "Webhook chat refused: gateway has no model configured; \
+                     visit /onboard"
+                );
+                let body = serde_json::json!({
+                    "error": "needs_onboarding",
+                    "url": "/onboard"
+                });
+                (StatusCode::SERVICE_UNAVAILABLE, Json(body))
+            } else {
+                tracing::error!("Webhook provider error: {}", sanitized);
+                let err = serde_json::json!({"error": "LLM request failed"});
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(err))
             }
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(err))
         }
     }
 }
@@ -1847,10 +1969,10 @@ async fn handle_whatsapp_message(
 
     // Process each message
     for msg in &messages {
-        tracing::info!("WhatsApp message received from {}", msg.sender);
-        tracing::debug!(
-            "WhatsApp message content redacted at info level ({} bytes)",
-            msg.content.len()
+        tracing::info!(
+            "WhatsApp message from {}: {}",
+            msg.sender,
+            truncate_with_ellipsis(&msg.content, 50)
         );
 
         // Route approval replies to pending approval requests before dispatching to agent
@@ -1886,7 +2008,7 @@ async fn handle_whatsapp_message(
         ))
         .await
         {
-            Ok(response) => {
+            Ok(GatewayChatOutcome { response, .. }) => {
                 // Send reply via WhatsApp
                 if let Err(e) = wa
                     .send(&SendMessage::new(response, &msg.reply_target))
@@ -1896,13 +2018,17 @@ async fn handle_whatsapp_message(
                 }
             }
             Err(e) => {
-                tracing::error!("LLM error for WhatsApp message: {e:#}");
-                let _ = wa
-                    .send(&SendMessage::new(
-                        "Sorry, I couldn't process your message right now.",
-                        &msg.reply_target,
-                    ))
-                    .await;
+                let reply = if is_needs_onboarding_err(&e) {
+                    tracing::warn!(
+                        "WhatsApp chat refused: gateway has no model configured; \
+                         visit /onboard"
+                    );
+                    needs_onboarding_channel_reply()
+                } else {
+                    tracing::error!("LLM error for WhatsApp message: {e:#}");
+                    "Sorry, I couldn't process your message right now.".to_string()
+                };
+                let _ = wa.send(&SendMessage::new(reply, &msg.reply_target)).await;
             }
         }
     }
@@ -1977,10 +2103,10 @@ async fn handle_linq_webhook(
 
     // Process each message
     for msg in &messages {
-        tracing::info!("Linq message received from {}", msg.sender);
-        tracing::debug!(
-            "Linq message content redacted at info level ({} bytes)",
-            msg.content.len()
+        tracing::info!(
+            "Linq message from {}: {}",
+            msg.sender,
+            truncate_with_ellipsis(&msg.content, 50)
         );
         let session_id = sender_session_id("linq", msg);
 
@@ -2006,7 +2132,7 @@ async fn handle_linq_webhook(
         ))
         .await
         {
-            Ok(response) => {
+            Ok(GatewayChatOutcome { response, .. }) => {
                 // Send reply via Linq
                 if let Err(e) = linq
                     .send(&SendMessage::new(response, &msg.reply_target))
@@ -2016,13 +2142,17 @@ async fn handle_linq_webhook(
                 }
             }
             Err(e) => {
-                tracing::error!("LLM error for Linq message: {e:#}");
-                let _ = linq
-                    .send(&SendMessage::new(
-                        "Sorry, I couldn't process your message right now.",
-                        &msg.reply_target,
-                    ))
-                    .await;
+                let reply = if is_needs_onboarding_err(&e) {
+                    tracing::warn!(
+                        "Linq chat refused: gateway has no model configured; \
+                         visit /onboard"
+                    );
+                    needs_onboarding_channel_reply()
+                } else {
+                    tracing::error!("LLM error for Linq message: {e:#}");
+                    "Sorry, I couldn't process your message right now.".to_string()
+                };
+                let _ = linq.send(&SendMessage::new(reply, &msg.reply_target)).await;
             }
         }
     }
@@ -2056,36 +2186,13 @@ pub struct WatiVerifyQuery {
 }
 
 /// POST /wati — incoming WATI WhatsApp message webhook
-async fn handle_wati_webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
+async fn handle_wati_webhook(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
     let Some(ref wati) = state.wati else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "WATI not configured"})),
         );
     };
-
-    let webhook_secret = {
-        let config = state.config.lock();
-        resolve_wati_webhook_secret(&config)
-    };
-    let Some(webhook_secret) = webhook_secret else {
-        tracing::warn!("WATI webhook rejected because no webhook secret is configured");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Webhook authentication required"})),
-        );
-    };
-    if !verify_shared_webhook_secret(&webhook_secret, &headers) {
-        tracing::warn!("WATI webhook secret verification failed");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Invalid webhook secret"})),
-        );
-    }
 
     // Parse JSON body
     let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
@@ -2115,10 +2222,10 @@ async fn handle_wati_webhook(
 
     // Process each message
     for msg in &messages {
-        tracing::info!("WATI message received from {}", msg.sender);
-        tracing::debug!(
-            "WATI message content redacted at info level ({} bytes)",
-            msg.content.len()
+        tracing::info!(
+            "WATI message from {}: {}",
+            msg.sender,
+            truncate_with_ellipsis(&msg.content, 50)
         );
         let session_id = sender_session_id("wati", msg);
 
@@ -2144,7 +2251,7 @@ async fn handle_wati_webhook(
         ))
         .await
         {
-            Ok(response) => {
+            Ok(GatewayChatOutcome { response, .. }) => {
                 // Send reply via WATI
                 if let Err(e) = wati
                     .send(&SendMessage::new(response, &msg.reply_target))
@@ -2154,13 +2261,17 @@ async fn handle_wati_webhook(
                 }
             }
             Err(e) => {
-                tracing::error!("LLM error for WATI message: {e:#}");
-                let _ = wati
-                    .send(&SendMessage::new(
-                        "Sorry, I couldn't process your message right now.",
-                        &msg.reply_target,
-                    ))
-                    .await;
+                let reply = if is_needs_onboarding_err(&e) {
+                    tracing::warn!(
+                        "WATI chat refused: gateway has no model configured; \
+                         visit /onboard"
+                    );
+                    needs_onboarding_channel_reply()
+                } else {
+                    tracing::error!("LLM error for WATI message: {e:#}");
+                    "Sorry, I couldn't process your message right now.".to_string()
+                };
+                let _ = wati.send(&SendMessage::new(reply, &msg.reply_target)).await;
             }
         }
     }
@@ -2233,10 +2344,10 @@ async fn handle_nextcloud_talk_webhook(
     }
 
     for msg in &messages {
-        tracing::info!("Nextcloud Talk message received from {}", msg.sender);
-        tracing::debug!(
-            "Nextcloud Talk message content redacted at info level ({} bytes)",
-            msg.content.len()
+        tracing::info!(
+            "Nextcloud Talk message from {}: {}",
+            msg.sender,
+            truncate_with_ellipsis(&msg.content, 50)
         );
         let session_id = sender_session_id("nextcloud_talk", msg);
 
@@ -2260,7 +2371,7 @@ async fn handle_nextcloud_talk_webhook(
         ))
         .await
         {
-            Ok(response) => {
+            Ok(GatewayChatOutcome { response, .. }) => {
                 if let Err(e) = nextcloud_talk
                     .send(&SendMessage::new(response, &msg.reply_target))
                     .await
@@ -2269,12 +2380,18 @@ async fn handle_nextcloud_talk_webhook(
                 }
             }
             Err(e) => {
-                tracing::error!("LLM error for Nextcloud Talk message: {e:#}");
+                let reply = if is_needs_onboarding_err(&e) {
+                    tracing::warn!(
+                        "Nextcloud Talk chat refused: gateway has no model configured; \
+                         visit /onboard"
+                    );
+                    needs_onboarding_channel_reply()
+                } else {
+                    tracing::error!("LLM error for Nextcloud Talk message: {e:#}");
+                    "Sorry, I couldn't process your message right now.".to_string()
+                };
                 let _ = nextcloud_talk
-                    .send(&SendMessage::new(
-                        "Sorry, I couldn't process your message right now.",
-                        &msg.reply_target,
-                    ))
+                    .send(&SendMessage::new(reply, &msg.reply_target))
                     .await;
             }
         }
@@ -2394,6 +2511,70 @@ async fn handle_admin_shutdown(
     Ok((StatusCode::OK, Json(body)))
 }
 
+/// POST /admin/reload — reload the daemon in place (localhost only).
+///
+/// Sends `true` on the reload channel the daemon owns. The daemon's main
+/// wait loop sees the change, returns `DaemonExit::Reload`, and the outer
+/// loop in `src/main.rs` re-reads config from disk and re-runs
+/// `daemon::run` — re-instantiating every subsystem (gateway / channels /
+/// heartbeat / scheduler / mqtt) with the fresh config.
+///
+/// Same PID throughout. Brief HTTP downtime while the gateway listener
+/// rebinds — typically sub-second. Clients should poll `/health` to detect
+/// when the new instance is ready.
+///
+/// Cross-platform — works identically on Linux, macOS, and Windows because
+/// the channel is in-process tokio, not an OS signal. The gateway-only
+/// `zeroclaw gateway start` (no daemon supervisor) returns 503 with a
+/// clear message because there's nothing to signal.
+async fn handle_admin_reload(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    require_localhost(&peer)?;
+
+    let Some(reload_tx) = state.reload_tx.clone() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "no daemon supervisor — running as standalone gateway. \
+                          Restart the process to pick up config changes."
+            })),
+        ));
+    };
+
+    tracing::info!("🔄 Admin reload request received");
+    // Trigger graceful shutdown of THIS gateway instance's axum::serve so
+    // its TcpListener releases the port before the daemon supervisor
+    // spawns the new instance. Without this, daemon::run aborts the
+    // gateway tokio task at the next await point — but the OLD listener
+    // can stay bound briefly, racing the NEW gateway's bind. The new
+    // bind then fails and spawn_component_supervisor backs off; in the
+    // meantime the OLD gateway keeps serving requests with stale
+    // in-memory config, and `/api/config/drift` reports drift against
+    // disk because in-memory hasn't been replaced yet. Cold restart
+    // (process exit + start) hits this path differently because the OS
+    // fully releases the listener — that's why the user observes "shut
+    // down + bring up = correct" but "/admin/reload = stale".
+    let shutdown_tx = state.shutdown_tx.clone();
+    // Brief delay so the HTTP response flushes before tear-down begins.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Drain axum first so the listener releases.
+        let _ = shutdown_tx.send(true);
+        // Then signal the daemon to re-read disk and re-spawn subsystems.
+        let _ = reload_tx.send(true);
+    });
+
+    Ok((
+        StatusCode::OK,
+        Json(AdminResponse {
+            success: true,
+            message: "Daemon reload initiated".to_string(),
+        }),
+    ))
+}
+
 /// GET /admin/paircode — fetch current pairing code (localhost only)
 async fn handle_admin_paircode(
     State(state): State<AppState>,
@@ -2454,12 +2635,14 @@ async fn handle_admin_paircode_new(
     }
 }
 
-/// GET /pair/code — fetch the initial pairing code (localhost only).
-async fn handle_pair_code(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    require_localhost(&peer)?;
+/// GET /pair/code — fetch the initial pairing code (no auth, no localhost restriction).
+///
+/// This endpoint is intentionally public so that Docker and remote users can see
+/// the pairing code on the web dashboard without needing terminal access. It only
+/// returns a code when the gateway is in its initial un-paired state (no devices
+/// paired yet and a pairing code exists). Once the first device pairs, this
+/// endpoint stops returning a code.
+async fn handle_pair_code(State(state): State<AppState>) -> impl IntoResponse {
     let require = state.pairing.require_pairing();
     let is_paired = state.pairing.is_paired();
 
@@ -2476,7 +2659,7 @@ async fn handle_pair_code(
         "pairing_code": code,
     });
 
-    Ok((StatusCode::OK, Json(body)))
+    (StatusCode::OK, Json(body))
 }
 
 #[cfg(test)]
@@ -2512,8 +2695,20 @@ mod tests {
     fn gateway_timeout_falls_back_to_default() {
         // When env var is not set, should return the default constant
         // SAFETY: test-only, single-threaded test runner.
-        unsafe { std::env::remove_var("OPSCLAW_GATEWAY_TIMEOUT_SECS") };
+        unsafe { std::env::remove_var("ZEROCLAW_GATEWAY_TIMEOUT_SECS") };
         assert_eq!(gateway_request_timeout_secs(), 30);
+    }
+
+    #[test]
+    fn long_running_request_timeout_default_is_ten_minutes() {
+        assert_eq!(LONG_RUNNING_REQUEST_TIMEOUT_SECS, 600);
+    }
+
+    #[test]
+    fn long_running_request_timeout_falls_back_to_default() {
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::remove_var("ZEROCLAW_GATEWAY_LONG_RUNNING_REQUEST_TIMEOUT_SECS") };
+        assert_eq!(gateway_long_running_request_timeout_secs(), 600);
     }
 
     #[test]
@@ -2573,6 +2768,7 @@ mod tests {
             event_tx: tokio::sync::broadcast::channel(16).0,
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            reload_tx: None,
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -2588,9 +2784,7 @@ mod tests {
             webauthn: None,
         };
 
-        let response = handle_metrics(State(state), HeaderMap::new())
-            .await
-            .into_response();
+        let response = handle_metrics(State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response
@@ -2648,6 +2842,7 @@ mod tests {
             event_tx,
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            reload_tx: None,
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -2663,9 +2858,7 @@ mod tests {
             webauthn: None,
         };
 
-        let response = handle_metrics(State(state), HeaderMap::new())
-            .await
-            .into_response();
+        let response = handle_metrics(State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -2862,6 +3055,65 @@ mod tests {
     }
 
     #[test]
+    fn webhook_session_id_accepts_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-Id", HeaderValue::from_static("abc-DEF_123.foo"));
+        assert_eq!(webhook_session_id(&headers), Some("abc-DEF_123.foo".into()));
+    }
+
+    #[test]
+    fn webhook_session_id_trims_whitespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-Id", HeaderValue::from_static("  my-session  "));
+        assert_eq!(webhook_session_id(&headers), Some("my-session".into()));
+    }
+
+    #[test]
+    fn webhook_session_id_rejects_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-Id", HeaderValue::from_static(""));
+        assert_eq!(webhook_session_id(&headers), None);
+
+        headers.insert("X-Session-Id", HeaderValue::from_static("   "));
+        assert_eq!(webhook_session_id(&headers), None);
+    }
+
+    #[test]
+    fn webhook_session_id_rejects_missing() {
+        let headers = HeaderMap::new();
+        assert_eq!(webhook_session_id(&headers), None);
+    }
+
+    #[test]
+    fn webhook_session_id_rejects_oversized() {
+        let mut headers = HeaderMap::new();
+        let long = "a".repeat(129);
+        headers.insert("X-Session-Id", HeaderValue::from_str(&long).unwrap());
+        assert_eq!(webhook_session_id(&headers), None);
+
+        let at_limit = "b".repeat(128);
+        headers.insert("X-Session-Id", HeaderValue::from_str(&at_limit).unwrap());
+        assert!(webhook_session_id(&headers).is_some());
+    }
+
+    #[test]
+    fn webhook_session_id_rejects_invalid_chars() {
+        let mut headers = HeaderMap::new();
+        for bad in &[
+            "has/slash",
+            "has:colon",
+            "has space",
+            "has@at",
+            "emoji\u{1f600}",
+        ] {
+            if let Ok(val) = HeaderValue::from_str(bad) {
+                headers.insert("X-Session-Id", val);
+                assert_eq!(webhook_session_id(&headers), None, "should reject: {bad}");
+            }
+        }
+    }
+
+    #[test]
     fn whatsapp_memory_key_includes_sender_and_message_id() {
         let msg = ChannelMessage {
             id: "wamid-123".into(),
@@ -3049,6 +3301,7 @@ mod tests {
             event_tx: tokio::sync::broadcast::channel(16).0,
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            reload_tx: None,
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -3090,7 +3343,8 @@ mod tests {
 
         let payload = second.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(parsed["response"], "ok");
+        assert_eq!(parsed["status"], "duplicate");
+        assert_eq!(parsed["idempotent"], true);
         assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 1);
     }
 
@@ -3129,6 +3383,7 @@ mod tests {
             event_tx: tokio::sync::broadcast::channel(16).0,
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            reload_tx: None,
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -3188,45 +3443,6 @@ mod tests {
         assert_eq!(one.len(), 64);
     }
 
-    #[test]
-    fn idempotency_store_replays_success_and_rejects_payload_conflicts() {
-        let store = IdempotencyStore::new(Duration::from_secs(300), 10);
-        let hash = hash_webhook_payload("hello");
-        assert_eq!(store.begin("key-1", hash.clone()), IdempotencyBegin::New);
-        assert_eq!(
-            store.begin("key-1", hash.clone()),
-            IdempotencyBegin::InProgress
-        );
-
-        let response = serde_json::json!({"response": "ok"});
-        store.complete("key-1", response.clone());
-        assert_eq!(
-            store.begin("key-1", hash),
-            IdempotencyBegin::Replay(response)
-        );
-        assert_eq!(
-            store.begin("key-1", hash_webhook_payload("different")),
-            IdempotencyBegin::Conflict
-        );
-    }
-
-    #[test]
-    fn shared_webhook_secret_verification_requires_matching_header() {
-        let secret = generate_test_secret();
-        let mut headers = HeaderMap::new();
-        assert!(!verify_shared_webhook_secret(&secret, &headers));
-
-        let wrong_secret = generate_test_secret();
-        headers.insert(
-            "X-Webhook-Secret",
-            HeaderValue::from_str(&wrong_secret).unwrap(),
-        );
-        assert!(!verify_shared_webhook_secret(&secret, &headers));
-
-        headers.insert("X-Webhook-Secret", HeaderValue::from_str(&secret).unwrap());
-        assert!(verify_shared_webhook_secret(&secret, &headers));
-    }
-
     #[tokio::test]
     async fn webhook_secret_hash_rejects_missing_header() {
         let provider_impl = Arc::new(MockProvider::default());
@@ -3261,6 +3477,7 @@ mod tests {
             event_tx: tokio::sync::broadcast::channel(16).0,
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            reload_tx: None,
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -3326,6 +3543,7 @@ mod tests {
             event_tx: tokio::sync::broadcast::channel(16).0,
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            reload_tx: None,
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -3396,6 +3614,7 @@ mod tests {
             event_tx: tokio::sync::broadcast::channel(16).0,
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            reload_tx: None,
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -3471,6 +3690,7 @@ mod tests {
             event_tx: tokio::sync::broadcast::channel(16).0,
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            reload_tx: None,
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -3543,6 +3763,7 @@ mod tests {
             event_tx: tokio::sync::broadcast::channel(16).0,
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            reload_tx: None,
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -3696,7 +3917,7 @@ mod tests {
     #[test]
     fn whatsapp_signature_unicode_body() {
         let app_secret = generate_test_secret();
-        let body = "Hello 📟 World".as_bytes();
+        let body = "Hello 🦀 World".as_bytes();
 
         let signature_header = compute_whatsapp_signature_header(&app_secret, body);
 
@@ -3994,5 +4215,92 @@ mod tests {
         ));
         let err = require_localhost(&peer).unwrap_err();
         assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn needs_onboarding_for_flags_empty_model() {
+        let err =
+            needs_onboarding_for("").expect("empty model must produce a needs_onboarding error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("needs_onboarding"),
+            "error must carry the needs_onboarding marker for callers to map to 503; got: {msg}"
+        );
+        assert!(
+            msg.contains("/onboard"),
+            "error must point the user at /onboard; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn needs_onboarding_for_flags_whitespace_only_model() {
+        assert!(
+            needs_onboarding_for("   ").is_some(),
+            "whitespace-only model must be treated as empty"
+        );
+        assert!(
+            needs_onboarding_for("\n\t ").is_some(),
+            "tabs and newlines count as empty too"
+        );
+    }
+
+    #[test]
+    fn needs_onboarding_for_passes_real_model() {
+        assert!(
+            needs_onboarding_for("anthropic/claude-sonnet-4").is_none(),
+            "a real model id must not be flagged"
+        );
+        assert!(
+            needs_onboarding_for("  gpt-4  ").is_none(),
+            "leading/trailing whitespace around a real model id must not be flagged"
+        );
+    }
+
+    #[test]
+    fn is_needs_onboarding_err_detects_marker_from_helper() {
+        let err = needs_onboarding_for("").expect("empty model produces marker");
+        assert!(
+            is_needs_onboarding_err(&err),
+            "the marker emitted by needs_onboarding_for must be detected"
+        );
+    }
+
+    #[test]
+    fn is_needs_onboarding_err_ignores_unrelated_errors() {
+        let err = anyhow::anyhow!("upstream timeout: provider returned 504");
+        assert!(
+            !is_needs_onboarding_err(&err),
+            "unrelated errors must not be misclassified as needs_onboarding"
+        );
+        let err = anyhow::anyhow!("invalid api key");
+        assert!(!is_needs_onboarding_err(&err));
+    }
+
+    #[test]
+    fn is_needs_onboarding_err_detects_via_substring() {
+        // Defends the contract that the substring marker is the
+        // detection key — not the exact string. Wrappers (e.g.
+        // anyhow::Error::context) must not break the check.
+        let err = anyhow::anyhow!("provider call failed").context("needs_onboarding: empty model");
+        assert!(is_needs_onboarding_err(&err));
+    }
+
+    #[test]
+    fn needs_onboarding_channel_reply_resolves_via_fluent() {
+        // The Fluent key channel-needs-onboarding-reply must resolve
+        // to real text from the embedded en/cli.ftl, not the missing-
+        // key fallback `{channel-needs-onboarding-reply}` that
+        // `missing_cli_string` produces. Guarding this in a test
+        // keeps the i18n contract from quietly drifting if the key
+        // gets renamed in lib.rs without a matching ftl edit.
+        let reply = needs_onboarding_channel_reply();
+        assert!(
+            !reply.starts_with('{') && !reply.ends_with('}'),
+            "fluent missing-key fallback leaked into channel reply: {reply:?}"
+        );
+        assert!(
+            reply.to_lowercase().contains("onboarding"),
+            "channel reply must mention onboarding so users know what's missing: {reply:?}"
+        );
     }
 }

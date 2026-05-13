@@ -1,4 +1,5 @@
 export interface StatusResponse {
+  version?: string;
   provider: string | null;
   model: string;
   temperature: number;
@@ -68,7 +69,7 @@ export interface Integration {
   name: string;
   description: string;
   category: string;
-  status: 'Available' | 'Active' | 'ComingSoon';
+  status: 'Available' | 'Active';
 }
 
 export interface DiagResult {

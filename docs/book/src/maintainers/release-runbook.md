@@ -1,172 +1,342 @@
 # Release Runbook
 
-The standard procedure for cutting a stable release. Predictable, repeatable, and only ever from `master`.
+> **Interim manual process.** This runbook covers how to ship a stable release
+> today using `release-stable-manual.yml`. It exists only until release-plz
+> lands in v0.7.5 and replaces this entirely.
+>
+> If anything in here feels heavyweight, that is intentional friction — we do
+> not yet have the automation discipline to remove it safely.
 
-## When to release
+Last verified: **May 2026** (v0.7.4 cycle).
 
-- **Patch / minor**: weekly or bi-weekly cadence. Don't wait for huge commit batches to accumulate.
-- **Emergency security fixes**: out-of-band, as needed.
-- The release pipeline never publishes from a feature branch.
+---
 
-## Workflow surface
+## The process in six steps
 
-Release automation lives in:
+1. Generate `CHANGELOG-next.md` using the changelog skill
+2. Open and merge a version bump PR
+3. Dry-run the release workflows locally with `act`
+4. Trigger the `Release Stable` workflow via manual dispatch
+5. Approve the three environment gates when prompted
+6. Verify the release exists and assets are downloadable
 
-| File | Role |
-|---|---|
-| `release-stable-manual.yml` | Full stable release pipeline. Tag-push and `workflow_dispatch` triggers. |
-| `pub-aur.yml` | Pushes the updated PKGBUILD to AUR (workflow_call from release; manual dispatch with `dry_run`). |
-| `pub-homebrew-core.yml` | Opens a PR against `Homebrew/homebrew-core` from the bot fork. |
-| `pub-scoop.yml` | Updates the Scoop bucket manifest. |
-| `discord-release.yml` | Posts the release notes to Discord `#releases` after publish. |
-| `tweet-release.yml` | Posts an announcement tweet. |
-| `sync-marketplace-templates.yml` | Updates downstream marketplace templates (Dokploy, EasyPanel) after publish. |
+That is the entire process. Everything else (Docker, crates.io, Scoop, AUR,
+Homebrew, Discord, tweet) runs automatically as downstream jobs. You do not
+need to do anything for those unless a job explicitly fails.
 
-`release-stable-manual.yml` runs in two modes:
+---
 
-- **Tag push** (`v*` tag) — full publish.
-- **Manual dispatch** — verification-only or publish, controlled by `publish_release` input.
+## Step 1 — Generate CHANGELOG-next.md
 
-A weekly schedule also fires the workflow in verification-only mode, so you'll see green CI on `master` even between releases.
+Use the changelog-generation skill to produce `CHANGELOG-next.md`:
 
-## Publish-mode guardrails
-
-The pipeline refuses to publish unless every guardrail holds:
-
-- Tag matches semver-like `vX.Y.Z[-suffix]`.
-- Tag exists on `origin`.
-- Tag commit is reachable from `origin/master`.
-- Matching GHCR image tag (`ghcr.io/<owner>/<repo>:<tag>`) is available before the GitHub Release is finalized.
-- All artifact files exist before the Release is published.
-
-If any of these fail, the run halts mid-pipeline and reports the specific gate.
-
-## Procedure
-
-### 1. Preflight on `master`
-
-- Required checks are green on the latest `master` commit.
-- No high-priority incidents or known regressions are open.
-- Installer and Docker workflows are healthy on recent `master` commits.
-
-### 2. Verification run (no publish)
-
-Trigger `release-stable-manual.yml` manually with:
-
-- `publish_release: false`
-- `release_ref: master`
-
-Expected outcome:
-
-- Full target matrix builds.
-- `verify-artifacts` confirms every expected archive exists.
-- No GitHub Release is published.
-
-### 3. Cut the release tag
-
-From a clean local checkout synced to `origin/master`:
-
-```bash
-scripts/release/cut_release_tag.sh vX.Y.Z --push
+```text
+.claude/skills/changelog-generation/SKILL.md
 ```
 
-The script enforces:
+The skill generates the changelog from the git log between the last stable tag
+and HEAD, resolves contributors via GitHub GraphQL, and writes the file. Commit
+the result directly to a short-lived branch and include it in the version bump
+PR (step 2), or open it as a separate preceding PR if the diff is large.
 
-- Clean working tree.
-- `HEAD == origin/master`.
-- Non-duplicate tag.
-- Semver-like tag format.
+If `CHANGELOG-next.md` already exists from a previous aborted release cycle,
+review it for accuracy before reusing it.
 
-### 4. Monitor the publish run
+---
 
-After the tag push, monitor:
+## Step 2 — Bump and merge the version PR
 
-1. `release-stable-manual.yml` (publish mode).
-2. The Docker publish job within it.
+Edit the workspace `Cargo.toml`:
 
-Expected outputs:
+```toml
+[workspace.package]
+version = "X.Y.Z"
+```
 
-- Release archives.
-- `SHA256SUMS`.
-- `CycloneDX` and `SPDX` SBOMs.
-- `cosign` signatures and certificates.
-- GitHub Release notes and assets.
+Sync all other version references:
 
-### 5. Post-release validation
+```bash
+bash scripts/release/bump-version.sh X.Y.Z
+```
 
-- GitHub Release assets are downloadable.
-- GHCR tags exist for both `vX.Y.Z` and the release commit (`sha-<12>`).
-- Install paths that depend on release assets work end-to-end (the bootstrap installer's binary download is the most common smoke test).
+This updates README badges, the Tauri config, marketplace templates, and
+workflow description examples. Commit everything together:
 
-### 6. Publish Homebrew Core formula
+```text
+chore: bump version to vX.Y.Z
+```
 
-Trigger `pub-homebrew-core.yml` manually:
+Open a PR. Label it `chore`, `size: XS`. Get one maintainer review. Merge when
+CI is green.
 
-- `release_tag: vX.Y.Z`
-- `dry_run: true` first, then `false`
+**Confirm the merge landed correctly:**
 
-Required configuration for non-dry-run:
+```bash
+git fetch origin
+git show origin/master:Cargo.toml | grep '^version'
+# Must show: version = "X.Y.Z"
+```
 
-- Secret: `HOMEBREW_CORE_BOT_TOKEN` (from a dedicated bot account, not a personal maintainer account).
-- Variable: `HOMEBREW_CORE_BOT_FORK_REPO` (e.g. `zeroclaw-release-bot/homebrew-core`).
-- Optional: `HOMEBREW_CORE_BOT_EMAIL`.
+---
 
-Workflow guardrails:
+## Step 3 — Dry-run the release workflows locally with `act`
 
-- Release tag must match the `Cargo.toml` version.
-- Formula source URL and SHA256 are computed from the tagged tarball.
-- Formula license is normalized to `Apache-2.0 OR MIT`.
-- The PR opens from the bot fork into `Homebrew/homebrew-core:master`.
+The `Release Stable` workflow is a GitHub Actions job graph that consumes
+your environment-gate approval window the moment you click **Run workflow**.
+If a workflow step is broken — a missing build artifact, a stale path, a
+codegen step that someone removed without updating CI — the failure surfaces
+*after* you have committed to a release window, with the version PR already
+merged and master at the new version. Recovery means landing an emergency
+fix branch, re-running CI, and shipping under time pressure on a tree that
+already advertises itself as a fully-released version.
 
-### 7. Publish Scoop manifest (Windows)
+The cheap insurance against this is to run the same job graph locally first,
+on the exact merged master commit, before opening the GitHub Actions form.
+[`act`](https://nektosact.com/) executes GitHub Actions workflows inside
+Docker containers using the same `actions/*` ecosystem GitHub does. It does
+not perfectly mirror the cloud runner — it cannot reach the artifact upload
+runtime, GitHub-issued OIDC tokens, environment secrets, or jobs that depend
+on a real release tag — but it does run the build and test steps that
+account for nearly every release-time CI failure we have ever hit.
 
-Trigger `pub-scoop.yml`:
+This step is a 15–20 minute investment per release. It has caught real
+defects that the regular per-PR CI did not surface (because the failing
+workflow only runs on `workflow_dispatch`, not on `push`).
 
-- `release_tag: vX.Y.Z`
-- `dry_run: true` first, then `false`
+### One-time setup
 
-Required configuration:
+`act` runs the workflows. The cleanest install path is the GitHub CLI
+extension, because it inherits your `gh` authentication and exposes a
+real `GITHUB_TOKEN` to every workflow run:
 
-- Secret: `SCOOP_BUCKET_TOKEN` (PAT with push access to the bucket repo).
-- Variable: `SCOOP_BUCKET_REPO` (e.g. `zeroclaw-labs/scoop-zeroclaw`).
+1. Install the GitHub CLI from <https://cli.github.com> (Linux, macOS,
+   Windows). Authenticate once: `gh auth login`.
+2. Install the `act` extension:
 
-Workflow guardrails:
+   ```bash
+   gh extension install nektos/gh-act
+   ```
 
-- Release tag must be `vX.Y.Z` format.
-- Windows binary SHA256 is extracted from the `SHA256SUMS` release asset.
-- Manifest pushes to `bucket/zeroclaw.json` in the Scoop bucket repo.
+3. Install Docker Engine or Docker Desktop from
+   <https://docs.docker.com/engine/install/>. On Linux, add yourself to
+   the `docker` group so you don't need `sudo`. `act` also works with
+   Podman and Colima — see the
+   [act runners documentation](https://nektosact.com/usage/runners.html).
 
-### 8. Publish AUR package (Arch Linux)
+That's the whole setup. The repository's `.actrc` and
+`scripts/dev/act-local.sh` handle everything else (runner image, secrets
+file, artifact server, action SHA pre-fetching).
 
-Trigger `pub-aur.yml`:
+### Per-release dry-run
 
-- `release_tag: vX.Y.Z`
-- `dry_run: true` first, then `false`
+Make sure your working tree matches the merged master tip from step 2:
 
-Required configuration:
+```bash
+git fetch upstream
+git checkout upstream/master
+```
 
-- Secret: `AUR_SSH_KEY` (SSH private key registered with AUR).
+List what's runnable across every workflow file:
 
-Workflow guardrails:
+```bash
+./scripts/dev/act-local.sh --list
+```
 
-- Release tag must be `vX.Y.Z` format.
-- Source tarball SHA256 is computed from the tagged release.
-- PKGBUILD and `.SRCINFO` push to the AUR `zeroclaw` package.
+Run a specific job, pick interactively, or run every dry-run-safe
+job:
 
-## Recovery: tag-push publish failed after artifacts validated
+```bash
+./scripts/dev/act-local.sh release-stable-manual:web   # one job
+./scripts/dev/act-local.sh                              # interactive picker
+./scripts/dev/act-local.sh --all                        # every dry-run-safe job
+```
 
-If artifacts are good but publishing failed:
+The first run pulls the runner image (~1.5 GB) and primes the Rust build
+cache via `Swatinem/rust-cache`; subsequent runs are much faster. The
+script auto-creates the gitignored `.secrets` file, pre-fetches every
+pinned action SHA into `~/.cache/act/` (act's shallow clone can't
+resolve arbitrary commits otherwise), threads `GITHUB_TOKEN` from your
+`gh` auth into the run via the parent process environment (the token
+value never lands in argv), and sets `--artifact-server-path` so
+`actions/upload-artifact` and `actions/download-artifact` work between
+jobs. All of that is plain `act` underneath — the script just removes
+the flag soup.
 
-1. Fix the workflow or packaging issue on `master`.
-2. Re-run `release-stable-manual.yml` manually with:
-   - `publish_release: true`
-   - `release_tag: <existing tag>`
-   - (`release_ref` is automatically pinned to `release_tag` in publish mode.)
-3. Re-validate the released assets.
+### `--all` only runs jobs on a dry-run-safe allowlist
 
-## Operational principles
+`act` does **not** honor GitHub's environment-protection gates. With
+the maintainer's real `GITHUB_TOKEN` threaded into the run, a
+successful local invocation of a job that writes to GitHub (a `publish`
+that calls `gh release create`, a `docker` job that pushes to GHCR, a
+`docs-deploy` that force-pushes `gh-pages`, a `daily-audit` that opens
+an issue, a `tweet-release` or `discord-release` that posts to a
+webhook) could perform the real-world side effect on first try.
 
-- Keep release changes small and reversible.
-- One release issue/checklist per version so handoff between maintainers is clean.
-- Never publish from an ad-hoc feature branch.
-- Don't extend the release pipeline mid-cycle. Pipeline changes go through their own review and ship in their own release.
+`--all` therefore enforces a hardcoded allowlist of jobs proven safe
+to run locally — currently the artifact-only build steps in
+`release-stable-manual.yml` and `cross-platform-build-manual.yml`
+(`validate`, `web`, `release-notes`, `build`, `build-desktop`).
+Everything else is skipped with a logged reason:
+
+```
+==> skip release-stable-manual:publish (not on dry-run-safe allowlist)
+==> skip release-stable-manual:docker (not on dry-run-safe allowlist)
+==> skip release-stable-manual:redeploy-website (not on dry-run-safe allowlist)
+==> skip docs-deploy:deploy (not on dry-run-safe allowlist)
+==> skip daily-audit:audit (not on dry-run-safe allowlist)
+==> skip tweet-release:tweet (not on dry-run-safe allowlist)
+```
+
+The allowlist is **fail-closed**: a new workflow added to the repo is
+treated as potentially mutating until a maintainer reviews it and adds
+the safe job IDs to `DRY_RUN_SAFE_JOBS` in
+`scripts/dev/act-local.sh`. This matters because `discover_jobs` walks
+every `.github/workflows/*.yml`, not just the release workflows — a
+denylist would silently let a future write-surface workflow through.
+
+Two escape hatches exist for the rare case where you have a reason to
+attempt a non-allowlisted job locally:
+
+- `./scripts/dev/act-local.sh release-stable-manual:publish` — the
+  explicit `<wf>:<job>` form runs what you ask for and prints a loud
+  warning before invoking `act` if the target isn't on the allowlist.
+- `./scripts/dev/act-local.sh --all --no-allowlist` — disables the
+  allowlist filter for an entire `--all` run (used only when you've
+  already verified the workflow steps will not reach a mutation
+  surface, e.g. on a fork with no real registry credentials and an
+  empty `.secrets` file).
+
+### What's expected to fail under `act` (and is fine)
+
+`act` cannot simulate a few GitHub-only surfaces. These failures are
+not real defects:
+
+- Jobs that depend on a real release tag (`publish` creating a GitHub
+  Release).
+- Environment-gated jobs (`crates-io`, `docker`, `publish`) — the
+  approval UI doesn't exist locally.
+- OIDC-based federated identity tokens.
+
+Everything else — a `tsc` error, a missing file, a Rust compile
+failure, a `cargo` lockfile mismatch — is a real defect. Do not click
+**Run workflow** on the GitHub Actions form until those are fixed via a
+standard PR off master.
+
+---
+
+## Step 4 — Trigger the release
+
+Go to:
+
+```
+https://github.com/zeroclaw-labs/zeroclaw/actions/workflows/release-stable-manual.yml
+```
+
+Click **Run workflow**. Fill in:
+
+- **Branch:** `master`
+- **Stable version to release:** `X.Y.Z` — no `v` prefix
+
+Click **Run workflow**.
+
+The first job (`validate`) checks that the version matches `Cargo.toml` and
+that no tag `vX.Y.Z` already exists. If it fails, fix the mismatch and
+re-trigger. Do not try to work around it.
+
+---
+
+## Step 5 — Approve the environment gates
+
+Three jobs are gated by GitHub environment protection rules. When each becomes
+pending you will see a **"Waiting for review"** banner in the workflow run.
+
+Approve all three when they appear:
+
+| Environment | Job | What it does |
+|---|---|---|
+| `github-releases` | `publish` | Creates the GitHub Release and uploads assets |
+| `crates-io` | `crates-io` | Publishes crates to crates.io |
+| `docker` | `docker` | Pushes images to GHCR |
+
+If you miss the approval window and a job times out, re-run only the failed
+job from the workflow run page — you do not need to restart from scratch.
+
+---
+
+## Step 6 — Verify the release
+
+Once `publish` completes, confirm:
+
+```text
+[ ] GitHub Release exists at /releases/tag/vX.Y.Z and is marked Latest
+[ ] Release notes are non-empty
+[ ] SHA256SUMS asset is present and non-empty
+[ ] At least one binary archive is downloadable (spot-check linux x86_64)
+[ ] CHANGELOG-next.md is gone from master (the publish job removes it automatically)
+```
+
+You do not need to manually verify Docker, crates.io, or distribution channels
+unless a job in the workflow run shows red. Check the workflow run summary — if
+all jobs are green, you are done.
+
+---
+
+## If something goes wrong
+
+**validate failed — version mismatch:** The version bump PR was not merged, or
+you typed the wrong version. Fix the mismatch and re-trigger.
+
+**An environment gate timed out:** Re-run only the timed-out job. No need to
+restart the workflow.
+
+**publish succeeded but CHANGELOG-next.md is still on master:** Remove it
+manually:
+
+```bash
+git checkout master && git pull --ff-only origin master
+git rm CHANGELOG-next.md
+git commit -m "chore: remove CHANGELOG-next.md after vX.Y.Z release"
+git push origin master
+```
+
+**A distribution channel job failed (Scoop, AUR, Homebrew):** Each has a
+corresponding manually-triggerable sub-workflow. Re-run the specific one with
+`dry_run: true` first to confirm the fix, then `dry_run: false`. These are
+nice-to-have — a failed Scoop job does not invalidate the release itself.
+
+---
+
+## Workflows you must not touch
+
+The following workflows exist in `.github/workflows/` but are dangerous and
+scheduled for deletion in v0.7.4 (#5915). Do not trigger them. Do not extend
+them.
+
+| Workflow | Why it is dangerous |
+|---|---|
+| `release-beta-on-push.yml` | Publishes automatically on every push to master |
+| `publish-crates-auto.yml` | Auto-publishes to crates.io on any version change — irreversible |
+| `version-sync.yml` | Commits directly to master as a bot, bypasses review |
+| `checks-on-pr.yml` | Duplicate CI — produces confusing conflicting status |
+| `pre-release-validate.yml` | Unused generated checklist — this runbook replaces it |
+
+All other workflows not listed above are either frozen until v0.7.5 or
+actively maintained. See `docs/contributing/ci-map.md` for the full inventory
+once it is rewritten in #5917.
+
+---
+
+## Where this is going
+
+This runbook and `release-stable-manual.yml` are a bridge, not a destination.
+
+In v0.7.5 the goal is:
+
+- release-plz manages version bumps and changelogs automatically
+- A single `release.yml` replaces the current patchwork of sub-workflows
+- SLSA provenance is built into the pipeline
+- The team cuts releases by merging a release PR, not by following a runbook
+
+Until that lands, use this process. Every release you cut manually using this
+runbook is practice that informs what the automation needs to do.
+

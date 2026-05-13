@@ -24,15 +24,15 @@ The key checkpoints:
 
 - **PR template** — `.github/pull_request_template.md`. Fill it out. The summary, validation evidence, and compatibility sections are non-negotiable.
 - **CI** — runs on every PR. `ci.yml` is the composite gate; all legs must pass.
-- **Labels** — scope (`scope:providers`, `scope:channels`, etc.) and risk (`risk:low` / `risk:medium` / `risk:high`) are auto-applied by path-labeler. Double-check they match your change; if not, flag in a comment.
-- **Review** — maintainers review. Findings follow `[blocking]` / `[suggestion]` / `[question]` tiers. Address blockers; suggestions are optional; questions need an answer.
+- **Labels** — scope (`scope:providers`, `scope:channels`, etc.) and risk (`risk:low` / `risk:medium` / `risk:high`) are auto-applied by path-labeler. Double-check they match your change. If they look wrong and you cannot edit labels, flag the mismatch in a comment; maintainers or reviewers with label permissions can correct obvious mismatches directly.
+- **Review** — maintainers review. Findings use the PR review taxonomy: 🔴 blocking, 🟡 warning, 🔵 suggestion, 🟢 praise, and ✅ resolved. Address blockers; warnings should get a response; suggestions are optional.
 
 ## Code style
 
 - `cargo fmt` clean (checked in CI)
 - `cargo clippy -D warnings` clean (checked in CI)
-- No dead code — if it's unused, delete it, don't `#[allow(dead_code)]` it
-- Error handling: `anyhow::Result` at binary boundaries, typed errors in library crates. No `unwrap()` / `expect()` in production code paths — propagate with `?` or convert to a typed error
+- No unused production code — delete it, wire it into behavior, or track a follow-up issue. Do not silence it with underscore prefixes or `#[allow(dead_code)]`; reserve underscore names for required but intentionally unused API, trait, or callback parameters.
+- Error handling: `anyhow::Result` at binary boundaries, typed errors in library crates. No `unwrap()` / `expect()` in production code paths — propagate with `?` or document the invariant that makes panic impossible.
 - Minimal dependencies — every dep adds to binary size; weigh the trade before adding one
 - Trait-first — define the trait in `zeroclaw-api`, then implement in the right edge crate
 - Security by default — allowlists, not blocklists. New external surface defaults closed
@@ -42,7 +42,7 @@ The key checkpoints:
 ## Testing
 
 - Unit tests co-located with the code (`mod tests`)
-- Integration tests in `tests/` — run via `cargo nextest run --locked`
+- Integration tests in `tests/` and crate-local unit tests — run via `cargo nextest run --locked --workspace --exclude zeroclaw-desktop`
 - Feature-gated code needs feature-gated tests
 - Don't mock the database for tests that exercise schema or SQL — integration tests must hit a real SQLite
 
@@ -67,7 +67,7 @@ refactor(runtime): split agent loop into steps
 chore: bump tokio to 1.43
 ```
 
-Co-authoring with AI is encouraged; add `Co-Authored-By:` trailers in commit messages where AI tools materially contributed. See FND-005 (Contribution Culture) for the full norm.
+AI-assisted collaboration is welcome, but do not add bot/AI attribution trailers or generated tool footers to PR bodies or commit-message tails. Human `Co-authored-by:` trailers remain appropriate for incorporated contributor work when they follow the superseding and privacy rules. See FND-005 (Contribution Culture) for the full norm.
 
 ## Pull requests
 

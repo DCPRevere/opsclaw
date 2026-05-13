@@ -20,6 +20,19 @@ pub enum PropKind {
     Enum,
     /// A `Vec<String>` field; set via comma-separated input.
     StringArray,
+    /// A `Vec<T>` field where `T` is a serializable struct (e.g. `Vec<McpServerConfig>`,
+    /// `Vec<PeripheralBoardConfig>`). Round-tripped on the wire as a JSON array of
+    /// objects; the dashboard renders a per-row sub-form using the JSON Schema
+    /// from `OPTIONS /api/config` to discover the element type's field shape.
+    /// Schema v3 / #5947 will migrate the load-bearing ones (mcp.servers etc.)
+    /// to `HashMap<String, T>` keyed tables; until then this kind covers them.
+    ObjectArray,
+    /// A struct-shaped scalar field (e.g. `Option<ModelPricing>`). Round-tripped
+    /// on the wire as a JSON object; the dashboard renders a sub-form for the
+    /// inner fields using the JSON Schema from `OPTIONS /api/config`. Distinct
+    /// from `String`, which inserts the raw value as a TOML string and breaks
+    /// the serde round-trip for typed structs (#6357 review).
+    Object,
 }
 
 /// Maps Rust types to PropKind at compile time.
@@ -79,6 +92,10 @@ pub struct PropFieldInfo {
     /// when the field has no doc comment. Onboard uses this as human-readable
     /// prompt text instead of the raw kebab-case field name.
     pub description: &'static str,
+    /// Whether this field's value is derived from a secret (`#[derived_from_secret]`).
+    /// Subject to the same write-only / no-readback rules as `#[secret]`.
+    /// Reserved for future schema additions; currently no fields are derived.
+    pub derived_from_secret: bool,
 }
 
 impl PropFieldInfo {
@@ -95,6 +112,80 @@ impl std::fmt::Debug for PropFieldInfo {
             .field("is_secret", &self.is_secret)
             .finish_non_exhaustive()
     }
+}
+
+/// Stable wire-form for an addable section — a `HashMap<String, T>` (Map) or
+/// `Vec<T>` (List) field whose value type implements `Configurable`. The
+/// dashboard / CLI use this to surface `+ Add` affordances without
+/// hardcoding the section list. Auto-discovered by the `Configurable` derive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "schema-export",
+    derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)
+)]
+#[cfg_attr(feature = "schema-export", serde(rename_all = "snake_case"))]
+pub enum MapKeyKind {
+    /// `HashMap<String, T>` — key is user-supplied; new value is default.
+    Map,
+    /// `Vec<T>` — entries are appended; the user-supplied "key" is stored
+    /// in the value type's natural identifier field (e.g. `name`, `hint`).
+    List,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(
+    feature = "schema-export",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct MapKeySection {
+    /// Dotted section path, e.g. `providers.models`, `mcp.servers`.
+    pub path: &'static str,
+    /// Whether the section is a map or a list.
+    pub kind: MapKeyKind,
+    /// Rust type name of the value, e.g. `ModelProviderConfig`. For display only.
+    pub value_type: &'static str,
+    /// Doc comment on the field (flattened to one line). What the user sees
+    /// when picking which kind of thing to add.
+    pub description: &'static str,
+}
+
+/// One row emitted by the `Configurable` derive's `nested_option_entries()`
+/// method — every `#[nested] Option<XConfig>` field on a struct shows up here
+/// with its `present` bit and the per-field `#[display_name = "..."]` /
+/// `#[description = "..."]` metadata. The integrations registry consumes
+/// this verbatim instead of carrying its own per-field hand-list.
+#[derive(Debug, Clone, Copy)]
+pub struct NestedOptionEntry {
+    /// snake_case field name on the parent struct (e.g. `"telegram"`,
+    /// `"voice_duplex"`).
+    pub field: &'static str,
+    /// `true` when the parent struct's field is `Some(_)`.
+    pub present: bool,
+    /// Display name from `#[display_name = "..."]`; falls back to a
+    /// title-cased rendering of the snake_case field name when the
+    /// attribute is absent.
+    pub display_name: &'static str,
+    /// One-line summary from `#[description = "..."]`. Empty when the
+    /// attribute is absent.
+    pub description: &'static str,
+}
+
+/// One row emitted by the `Configurable` derive's `integration_descriptor()`
+/// method on structs annotated with `#[integration(...)]`. Used for nested
+/// toggleable configs (e.g. `BrowserConfig`, `CronConfig`) where the
+/// integration is "active" iff a named bool field on the struct is `true`.
+#[derive(Debug, Clone, Copy)]
+pub struct IntegrationDescriptor {
+    pub display_name: &'static str,
+    pub description: &'static str,
+    /// Free-form category label (e.g. `"ToolsAutomation"`). The
+    /// integrations registry maps this string to its own
+    /// `IntegrationCategory` enum so the schema crate doesn't have to
+    /// depend on it.
+    pub category: &'static str,
+    /// Snapshot of the named status field at the moment this descriptor
+    /// was built (`status_field = "enabled"` ⇒ `self.enabled`).
+    pub active: bool,
 }
 
 /// The trait for describing a channel

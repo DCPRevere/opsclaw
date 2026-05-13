@@ -50,6 +50,21 @@ cli-channel-doctor-about = Run health checks for configured channels
 cli-channel-add-about = Add a new channel configuration
 cli-channel-remove-about = Remove a channel configuration
 cli-channel-send-about = Send a one-off message to a configured channel
+cli-wechat-pairing-required = 🔐 WeChat pairing required. One-time bind code: {$code}
+cli-wechat-send-bind-command = Send `{$command} <code>` from your WeChat.
+cli-wechat-qr-login = 📱 WeChat QR Login ({$attempt}/{$max})
+cli-wechat-scan-to-connect = Scan with WeChat to connect.
+cli-wechat-qr-url = QR URL: {$url}
+cli-wechat-qr-expired-giving-up = WeChat QR code expired {$max} times, giving up.
+cli-wechat-qr-fetch-failed = Failed to fetch WeChat QR code.
+cli-wechat-qr-fetch-status-failed = WeChat QR code fetch failed ({$status}): {$body}
+cli-wechat-missing-response-field = Missing {$field} in WeChat response.
+cli-wechat-scanned-confirm = 👀 Scanned! Confirm on your phone...
+cli-wechat-qr-expired-refreshing = ⏳ QR code expired, refreshing...
+cli-wechat-login-confirmed-missing-field = Login confirmed but {$field} missing.
+cli-wechat-connected = ✅ WeChat connected!
+cli-wechat-bound-success = ✅ WeChat account bound successfully. You can talk to ZeroClaw now.
+cli-wechat-invalid-bind-code = ❌ Invalid bind code. Please try again.
 
 cli-skills-list-about = List all installed skills
 cli-skills-audit-about = Audit a skill source directory or installed skill name
@@ -280,3 +295,13 @@ cli-desktop-long-about =
     Examples:
       zeroclaw desktop              # launch the companion app
       zeroclaw desktop --install    # download and install it
+
+# Channel-side reply emitted when chat dispatch refuses because the
+# gateway has no model configured. Used by the gateway crate channel
+# webhook handlers (WhatsApp, Linq, WATI, Nextcloud Talk).
+channel-needs-onboarding-reply = This agent isn't fully set up yet. The operator needs to complete onboarding before I can reply.
+
+channel-whatsapp-web-feature-missing-warning =   ⚠ WhatsApp Web is configured but the 'whatsapp-web' feature is not compiled in.
+channel-whatsapp-web-feature-missing-build =     Build/run with: cargo build --features whatsapp-web
+channel-whatsapp-web-feature-missing-install =     If installed to PATH, reinstall with: cargo install --path . --force --locked --features whatsapp-web
+channel-whatsapp-web-feature-missing-error = WhatsApp Web channel requires the 'whatsapp-web' feature. Enable with: cargo build --features whatsapp-web (or, if installed to PATH: cargo install --path . --force --locked --features whatsapp-web)

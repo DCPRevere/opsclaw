@@ -193,6 +193,19 @@ Override paths and behaviour with environment variables:
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | Provider credentials |
 | `RUST_LOG` | Log level (default `info`) |
 
+For standard OpenAI Codex subscription auth, keep `config.toml` minimal:
+
+```toml
+default_provider = "openai-codex"
+default_model = "gpt-5-codex"
+```
+
+Notes:
+
+- Normal OpenAI Codex subscription auth uses stored auth profiles, not top-level `api_key` / `api_url`.
+- Only set `api_key` / `api_url` when intentionally targeting a custom OpenAI-compatible gateway or endpoint.
+- If you see `provider streaming failed, falling back to non-streaming chat`, ZeroClaw retries the same request in non-streaming mode. Check `zeroclaw auth status` before changing provider config.
+
 ## Architecture
 
 opsclaw is a Cargo workspace. The SRE agent lives in `crates/opsclaw`; the rest is the upstream zeroclaw runtime plus a few independent toolkits.

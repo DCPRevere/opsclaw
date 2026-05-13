@@ -343,6 +343,24 @@ fn expand_user_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Returns `true` if `path` is exactly the OS null device.
+///
+/// `/dev/null` is unconditionally permitted because redirecting output
+/// there is a common, harmless shell pattern. The rest of `/dev` remains
+/// blocked by the default forbidden-path list.
+fn is_null_device(path: &Path) -> bool {
+    #[cfg(not(target_os = "windows"))]
+    {
+        path == Path::new("/dev/null")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let s = path.to_string_lossy();
+        let lower = s.to_ascii_lowercase();
+        lower == "nul" || lower == r"\\.\nul"
+    }
+}
+
 fn rootless_path(path: &Path) -> Option<PathBuf> {
     let mut relative = PathBuf::new();
 
@@ -1162,9 +1180,13 @@ impl SecurityPolicy {
                 return false;
             }
 
-            // Validate arguments for the command
-            let args: Vec<String> = words.map(|w| w.to_ascii_lowercase()).collect();
-            if !self.is_args_safe(base_cmd, &args) {
+            // Validate arguments for the command.
+            // Both case-preserved and lowercased argument lists are provided:
+            //   - `args_cased` for case-sensitive comparisons (e.g. git -C vs -c)
+            //   - `args` (lowercased) for case-insensitive matches (e.g. subcommand names)
+            let args_cased: Vec<String> = words.map(|w| w.to_string()).collect();
+            let args: Vec<String> = args_cased.iter().map(|w| w.to_ascii_lowercase()).collect();
+            if !self.is_args_safe(base_cmd, &args, &args_cased) {
                 return false;
             }
         }
@@ -1186,7 +1208,7 @@ impl SecurityPolicy {
     /// - ZeptoClaw GHSA-5wp8-q9mx-8jx8 (CVSS 9.8): same vulnerability class
     /// - OpenClaw strictInlineEval: blocks python -c, node -e, etc.
     /// - OWASP OS Command Injection Defense Cheat Sheet
-    fn is_args_safe(&self, base: &str, args: &[String]) -> bool {
+    fn is_args_safe(&self, base: &str, args: &[String], args_cased: &[String]) -> bool {
         let base = base.to_ascii_lowercase();
         match base.as_str() {
             "find" => {
@@ -1195,14 +1217,18 @@ impl SecurityPolicy {
             }
             "git" => {
                 // git config, alias, and -c can be used to set dangerous options
-                // (e.g. git config core.editor "rm -rf /")
-                !args.iter().any(|arg| {
-                    arg == "config"
-                        || arg.starts_with("config.")
-                        || arg == "alias"
-                        || arg.starts_with("alias.")
-                        || arg == "-c"
-                })
+                // (e.g. git config core.editor "rm -rf /").
+                // NOTE: `-c` (lowercase) is compared case-sensitively against
+                // `args_cased` because git's `-C` (uppercase, change directory)
+                // is a distinct, benign option that must not be conflated with
+                // `-c` (set config override). See #5809.
+                !args_cased.iter().any(|arg| arg == "-c")
+                    && !args.iter().any(|arg| {
+                        arg == "config"
+                            || arg.starts_with("config.")
+                            || arg == "alias"
+                            || arg.starts_with("alias.")
+                    })
             }
             "python" | "python3" => {
                 // -c executes arbitrary code from argument string
@@ -1354,6 +1380,12 @@ impl SecurityPolicy {
         // Expand "~" for consistent matching with forbidden paths and allowlists.
         let expanded_path = expand_user_path(path);
 
+        // The null device is always permitted regardless of workspace or
+        // forbidden-path config; the rest of /dev remains blocked as usual.
+        if is_null_device(&expanded_path) {
+            return true;
+        }
+
         // When workspace_only is set and the path is absolute, only allow it
         // if it falls within the workspace directory or an explicit allowed
         // root.  The workspace/allowed-root check runs BEFORE the forbidden
@@ -1392,6 +1424,10 @@ impl SecurityPolicy {
     /// Validate that a resolved path is inside the workspace or an allowed root.
     /// Call this AFTER joining `workspace_dir` + relative path and canonicalizing.
     pub fn is_resolved_path_allowed(&self, resolved: &Path) -> bool {
+        if is_null_device(resolved) {
+            return true;
+        }
+
         // Prefer canonical workspace root so `/a/../b` style config paths don't
         // cause false positives or negatives.
         let workspace_root = self
@@ -2631,6 +2667,26 @@ mod tests {
         assert!(p.is_command_allowed("echo \"A&B\""));
         assert!(p.is_command_allowed("echo \"A>B\""));
         assert!(p.is_command_allowed("echo \"A<B\""));
+    }
+
+    #[test]
+    fn git_dash_c_uppercase_is_allowed() {
+        // Regression test for #5809: git -C (change directory) must not be
+        // conflated with git -c (set config override) after arg lowercasing.
+        let p = default_policy();
+        assert!(
+            p.is_command_allowed("git -C /home/user/repo status --short"),
+            "git -C is benign and should be allowed"
+        );
+        assert!(
+            p.is_command_allowed("git -C /home/user/repo log --oneline -1"),
+            "git -C with log should be allowed"
+        );
+        // git -c (lowercase) is still blocked — config override injection
+        assert!(
+            !p.is_command_allowed("git -c core.editor=\"rm -rf /\" commit"),
+            "git -c must remain blocked"
+        );
     }
 
     #[test]

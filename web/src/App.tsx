@@ -1,25 +1,15 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
-import { useState, useEffect, createContext, useContext, Component, type ReactNode, type ErrorInfo } from 'react';
+import { Component, createContext, useContext, useEffect, useState, type ErrorInfo, type ReactNode } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { ThemeProvider } from './contexts/ThemeContext';
-import Layout from './components/layout/Layout';
-import Dashboard from './pages/Dashboard';
-import AgentChat from './pages/AgentChat';
-import Tools from './pages/Tools';
-import Cron from './pages/Cron';
-import Integrations from './pages/Integrations';
-import Memory from './pages/Memory';
-import Config from './pages/Config';
-import Cost from './pages/Cost';
-import Logs from './pages/Logs';
-import Doctor from './pages/Doctor';
-import Pairing from './pages/Pairing';
-import Canvas from './pages/Canvas';
+
+import { loadLocale, saveLocale } from './contexts/ThemeContext';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { DraftContext, useDraftStore } from './hooks/useDraft';
-import { setLocale, type Locale } from './lib/i18n';
-import { loadLocale, saveLocale } from './contexts/ThemeContext';
+import { getAdminPairCode, getOnboardStatus } from './lib/api';
 import { basePath } from './lib/basePath';
-import { getAdminPairCode } from './lib/api';
+import { setLocale, type Locale } from './lib/i18n';
+import { Router } from './router/router';
+import { AgentProvider } from './contexts/AgentContext';
 
 // Locale context
 interface LocaleContextType {
@@ -29,7 +19,7 @@ interface LocaleContextType {
 
 export const LocaleContext = createContext<LocaleContextType>({
   locale: 'en',
-  setAppLocale: () => {},
+  setAppLocale: () => { },
 });
 
 export const useLocaleContext = () => useContext(LocaleContext);
@@ -57,14 +47,14 @@ export class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error('[OpsClaw] Render error:', error, info.componentStack);
+    console.error('[ZeroClaw] Render error:', error, info.componentStack);
   }
 
   render() {
     if (this.state.error) {
       return (
         <div className="p-6">
-          <div className="card p-6 w-full max-w-lg" style={{ borderColor: 'rgba(239, 68, 68, 0.3)' }}>
+          <div className="card p-6 w-full max-w-lg" style={{ borderColor: 'var(--color-status-error-alpha-30)' }}>
             <h2 className="text-lg font-semibold mb-2" style={{ color: 'var(--color-status-error)' }}>
               Something went wrong
             </h2>
@@ -135,12 +125,12 @@ function PairingDialog({ onPair }: { onPair: (code: string) => Promise<void> }) 
 
         <div className="text-center mb-8">
           <img
-            src={`${basePath}/_app/logo.png`}
-            alt="OpsClaw"
+            src={`${basePath}/_app/zeroclaw-trans.png`}
+            alt="ZeroClaw"
             className="h-20 w-20 rounded-2xl object-cover mx-auto mb-4 animate-float"
             onError={(e) => { e.currentTarget.style.display = 'none'; }}
           />
-          <h1 className="text-2xl font-bold mb-2 text-gradient-blue">OpsClaw</h1>
+          <h1 className="text-2xl font-bold mb-2 text-gradient-blue">ZeroClaw</h1>
           <p className="text-sm" style={{ color: 'var(--pc-text-muted)' }}>
             {displayCode ? 'Your pairing code — click Pair to connect' : 'Enter the pairing code from your terminal'}
           </p>
@@ -201,11 +191,8 @@ function AppContent() {
 
   // Listen for 401 events to force logout
   useEffect(() => {
-    const handler = () => {
-      logout();
-    };
-    window.addEventListener('opsclaw-unauthorized', handler);
-    return () => window.removeEventListener('opsclaw-unauthorized', handler);
+    window.addEventListener('opsclaw-unauthorized', logout);
+    return () => window.removeEventListener('opsclaw-unauthorized', logout);
   }, [logout]);
 
   if (loading) {
@@ -224,28 +211,51 @@ function AppContent() {
   }
 
   return (
-    <DraftContext.Provider value={draftStore}>
-      <LocaleContext.Provider value={{ locale, setAppLocale }}>
-        <Routes>
-          <Route element={<Layout />}>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/agent" element={<AgentChat />} />
-            <Route path="/tools" element={<Tools />} />
-            <Route path="/cron" element={<Cron />} />
-            <Route path="/integrations" element={<Integrations />} />
-            <Route path="/memory" element={<Memory />} />
-            <Route path="/config" element={<Config />} />
-            <Route path="/cost" element={<Cost />} />
-            <Route path="/logs" element={<Logs />} />
-            <Route path="/doctor" element={<Doctor />} />
-            <Route path="/pairing" element={<Pairing />} />
-            <Route path="/canvas" element={<Canvas />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Route>
-        </Routes>
-      </LocaleContext.Provider>
-    </DraftContext.Provider>
+    <AgentProvider>
+      <DraftContext.Provider value={draftStore}>
+        <LocaleContext.Provider value={{ locale, setAppLocale }}>
+          <FreshInstallRedirect />
+          <Router />
+        </LocaleContext.Provider>
+      </DraftContext.Provider>
+    </AgentProvider>
   );
+}
+
+// Redirects fresh installs (no completed onboarding sections, no provider
+// configured) from the default `/` landing to `/onboard`. The daemon
+// always writes a default config.toml on init, so file existence isn't
+// the right signal — we ask the gateway via /api/onboard/status which
+// inspects the in-memory config for explicit user-driven markers
+// (`onboard_state.completed_sections`, `providers.fallback`,
+// `providers.models`).
+//
+// Fires once per session. Only redirects when the user lands at `/` —
+// manual navigation to other routes is left alone, so the user can
+// always escape into the existing config editor or chat surfaces if
+// they want.
+function FreshInstallRedirect() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [checked, setChecked] = useState(false);
+
+  useEffect(() => {
+    if (checked) return;
+    setChecked(true);
+    if (location.pathname !== '/') return;
+    void getOnboardStatus()
+      .then((status) => {
+        if (status.needs_onboarding) {
+          navigate('/onboard', { replace: true });
+        }
+      })
+      .catch(() => {
+        // Status check failed (network blip, gateway hiccup); the
+        // dashboard renders normally as the safe default.
+      });
+  }, [checked, location.pathname, navigate]);
+
+  return null;
 }
 
 export default function App() {

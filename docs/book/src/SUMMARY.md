@@ -28,6 +28,7 @@
 - [CLI](./reference/cli.md)
 - [Config](./reference/config.md)
 - [API (rustdoc)](./api.md)
+- [Gateway HTTP API](./gateway/api.md)
 
 # Model Providers
 
@@ -57,6 +58,7 @@
 - [Overview](./tools/overview.md)
 - [MCP (Model Context Protocol)](./tools/mcp.md)
 - [Browser automation](./tools/browser.md)
+- [Skills](./tools/skills.md)
 
 # Security
 
@@ -82,6 +84,7 @@
 - [STM32 Nucleo](./hardware/nucleo-setup.md)
 - [Android](./hardware/android-setup.md)
 - [Aardvark](./hardware/aardvark.md)
+- [Raspberry Pi](./hardware/raspberry-pi-setup.md)
 
 # SOP (Standard Operating Procedures)
 
@@ -96,6 +99,7 @@
 - [Plugin protocol](./developing/plugin-protocol.md)
 - [Extension examples](./developing/extension-examples.md)
 - [Building the docs locally](./developing/building-docs.md)
+- [Building the web dashboard](./developing/web.md)
 
 # Foundations
 

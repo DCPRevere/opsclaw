@@ -19,10 +19,10 @@ You can force a backend:
 
 ```toml
 [security.sandbox]
-backend = "bubblewrap"        # or "landlock", "firejail", "docker", "seatbelt", "noop"
+backend = "bubblewrap"        # or "landlock", "firejail", "docker", "sandbox-exec", "none"
 ```
 
-Set `backend = "noop"` to disable sandboxing entirely (part of [YOLO mode](../getting-started/yolo.md)).
+Set `backend = "none"` to disable sandboxing entirely (part of [YOLO mode](../getting-started/yolo.md)).
 
 ## What the sandbox confines
 
@@ -91,12 +91,24 @@ Firejail's default profile is fairly permissive; we apply a custom profile bundl
 
 ### Docker
 
-Works anywhere Docker does. Runs each tool invocation in an ephemeral container (the `zeroclawlabs/tool-runner` image).
+Works anywhere Docker does. Runs each tool invocation in an ephemeral container. The default image is `alpine:latest` (matches `DockerSandbox::default()` in `crates/zeroclaw-runtime/src/security/docker.rs`); set `image` to any other public image you have access to, or build your own.
 
 ```toml
 [security.sandbox]
 backend = "docker"
-image = "zeroclawlabs/tool-runner:latest"
+image = "alpine:latest"
+```
+
+For a richer toolkit (Node 20, Python 3, build-essentials, common CLIs), this repository ships a Dockerfile under `dev/sandbox/Dockerfile` that you can build locally and reference by tag:
+
+```bash
+docker build -t zeroclaw-sandbox:local dev/sandbox/
+```
+
+```toml
+[security.sandbox]
+backend = "docker"
+image = "zeroclaw-sandbox:local"
 ```
 
 Pros: strong isolation, works on any OS. Cons: per-invocation container startup cost (100–500 ms). Best for production deployments where the overhead is acceptable.
@@ -107,7 +119,7 @@ Native macOS sandbox (`sandbox-exec`). Profiles are SBPL — we bundle one for t
 
 Limitation: some CLI tools (older versions of `git`, some Homebrew-linked binaries) don't cooperate with Seatbelt's file-access rules. If you see "Operation not permitted" errors from the agent's shell calls on macOS, check if the tool needs broader filesystem access and consider switching to Docker.
 
-### `noop`
+### `none`
 
 No sandboxing. Tools run with the full privileges of the ZeroClaw service user. This is what YOLO mode enables. Loud, obvious, intentional.
 
@@ -126,7 +138,7 @@ Lock this down to only the devices your agent actually needs.
 
 - **"Sandbox backend unavailable"** on startup — check `zeroclaw service status` and the journal; the auto-detect logs which backends it tried.
 - **Tools working on dev, failing in service** — the service user often differs from the CLI user. Verify both have whatever sandbox-adjacent permissions are needed (Landlock: nothing; Bubblewrap: userns enabled; Docker: service user in `docker` group).
-- **Slow tool invocations** on Docker — first invocation pulls the image, subsequent are fast. Pre-pull with `docker pull zeroclawlabs/tool-runner`.
+- **Slow tool invocations** on Docker — first invocation pulls the image, subsequent are fast. Pre-pull with `docker pull alpine:latest` (or whatever image you set under `[security.sandbox].image`).
 
 ## Code reference
 

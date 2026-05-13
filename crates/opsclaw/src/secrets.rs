@@ -129,11 +129,12 @@ pub trait KubeSecretFetcher: Send + Sync {
     async fn fetch(&self, namespace: &str, name: &str, key: &str) -> Result<Option<Vec<u8>>>;
 }
 
-/// Null fetcher for test and laptop contexts — always errors. Used as an
-/// explicit opt-out when the caller knows there's no cluster.
+/// Null fetcher for test contexts — always errors.
+#[cfg(test)]
 #[derive(Default)]
 pub struct NullKubeFetcher;
 
+#[cfg(test)]
 #[async_trait]
 impl KubeSecretFetcher for NullKubeFetcher {
     async fn fetch(&self, _ns: &str, _name: &str, _key: &str) -> Result<Option<Vec<u8>>> {
@@ -358,101 +359,8 @@ impl CompositeResolver {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Interactive prompt helper
-// ---------------------------------------------------------------------------
-
-/// How the user wants to supply a secret value during the setup wizard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecretSourceChoice {
-    /// Type the plaintext value — it will be encrypted by `OpsConfig::save`.
-    EncryptedStore,
-    /// Reference an environment variable by name.
-    EnvVar,
-    /// Reference a key inside a Kubernetes Secret.
-    K8sSecret,
-    /// User declined to provide a value.
-    Skip,
-}
-
-/// Interactively prompt for a secret and return the string to store in
-/// config. Offers three sources (encrypted store / env / k8s) plus a
-/// skip option.
-///
-/// - `EncryptedStore` returns the plaintext value; `OpsConfig::save`
-///   will encrypt it to `enc2:<hex>`.
-/// - `EnvVar` returns `env:<NAME>`.
-/// - `K8sSecret` returns `k8s:<namespace>/<name>/<key>`.
-/// - `Skip` returns `Ok(None)`.
-///
-/// `label` describes the secret (e.g. `"Seq API key"`). `optional`
-/// controls whether the Skip option is offered and whether plaintext
-/// input is allowed to be empty.
-pub fn prompt_secret_source(label: &str, optional: bool) -> Result<Option<String>> {
-    let mut items: Vec<&str> = vec![
-        "Enter value now (encrypted at rest)",
-        "Read from environment variable",
-        "Read from Kubernetes Secret",
-    ];
-    if optional {
-        items.push("Skip");
-    }
-
-    let choice_index = dialoguer::Select::new()
-        .with_prompt(format!("How should OpsClaw read {label}?"))
-        .items(&items)
-        .default(0)
-        .interact()
-        .context("failed to read secret-source choice")?;
-
-    let choice = match choice_index {
-        0 => SecretSourceChoice::EncryptedStore,
-        1 => SecretSourceChoice::EnvVar,
-        2 => SecretSourceChoice::K8sSecret,
-        _ => SecretSourceChoice::Skip,
-    };
-
-    match choice {
-        SecretSourceChoice::Skip => Ok(None),
-        SecretSourceChoice::EncryptedStore => {
-            let mut p = dialoguer::Password::new();
-            p = p.with_prompt(format!("{label} (hidden input)"));
-            if optional {
-                p = p.allow_empty_password(true);
-            }
-            let value = p.interact().context("failed to read secret value")?;
-            let value = value.trim().to_string();
-            if value.is_empty() {
-                return Ok(None);
-            }
-            Ok(Some(value))
-        }
-        SecretSourceChoice::EnvVar => {
-            let name: String = dialoguer::Input::new()
-                .with_prompt(format!("Environment variable name holding {label}"))
-                .interact_text()
-                .context("failed to read env var name")?;
-            Ok(Some(build_env_reference(&name)?))
-        }
-        SecretSourceChoice::K8sSecret => {
-            let namespace: String = dialoguer::Input::new()
-                .with_prompt("Namespace")
-                .interact_text()
-                .context("failed to read namespace")?;
-            let name: String = dialoguer::Input::new()
-                .with_prompt("Secret name")
-                .interact_text()
-                .context("failed to read secret name")?;
-            let key: String = dialoguer::Input::new()
-                .with_prompt(format!("Key holding {label}"))
-                .interact_text()
-                .context("failed to read secret key")?;
-            Ok(Some(build_k8s_reference(&namespace, &name, &key)?))
-        }
-    }
-}
-
 /// Build an `env:NAME` reference string, validating the name.
+#[cfg(test)]
 pub fn build_env_reference(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
@@ -462,6 +370,7 @@ pub fn build_env_reference(name: &str) -> Result<String> {
 }
 
 /// Build a `k8s:<ns>/<name>/<key>` reference string, validating each part.
+#[cfg(test)]
 pub fn build_k8s_reference(namespace: &str, name: &str, key: &str) -> Result<String> {
     let ns = namespace.trim();
     let n = name.trim();

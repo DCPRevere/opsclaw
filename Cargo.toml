@@ -1,5 +1,6 @@
 [workspace]
 members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-runtime", "crates/zeroclaw-tui", "crates/zeroclaw-plugins", "crates/zeroclaw-gateway", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/opsclaw", "crates/robot-kit", "crates/aardvark-sys", "crates/zeroclaw-macros", "apps/tauri", "tools/fill-translations", "xtask"]
+default-members = ["crates/opsclaw"]
 resolver = "2"
 exclude = ["plugins/image-gen-fal"]
 
@@ -29,6 +30,7 @@ aardvark-sys = { path = "crates/aardvark-sys", version = "0.1.0" }
 
 [package]
 name = "zeroclawlabs"
+autobins = false
 # Publishing blocked during microkernel workspace transition — see #5811.
 # All 14 workspace sub-crates are publish = false and therefore unresolvable
 # on crates.io. Flip or remove this once the multi-crate publish topology is
@@ -54,10 +56,6 @@ include = [
   "/web/dist/**/*",
   "/locales/**/*",
 ]
-
-[[bin]]
-name = "zeroclaw"
-path = "src/main.rs"
 
 [lib]
 name = "zeroclaw"

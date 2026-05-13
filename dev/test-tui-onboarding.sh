@@ -25,13 +25,13 @@ echo -e "${DIM}Profile: ${PROFILE}${RESET}"
 echo
 
 # ── Step 1: Build ────────────────────────────────────────────────────
-echo -e "${BOLD}[1/3] Building zeroclaw (${PROFILE})...${RESET}"
+echo -e "${BOLD}[1/3] Building opsclaw (${PROFILE})...${RESET}"
 if [[ "$PROFILE" == "release" ]]; then
   cargo build --release 2>&1
-  BIN="$REPO_ROOT/target/release/zeroclaw"
+  BIN="$REPO_ROOT/target/release/opsclaw"
 else
   cargo build 2>&1
-  BIN="$REPO_ROOT/target/debug/zeroclaw"
+  BIN="$REPO_ROOT/target/debug/opsclaw"
 fi
 
 if [[ ! -x "$BIN" ]]; then

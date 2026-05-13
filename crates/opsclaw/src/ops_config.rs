@@ -825,14 +825,10 @@ fn default_posthog_host() -> String {
     "https://app.posthog.com".to_string()
 }
 
-/// Result of resolving a `project::environment::target` address. Autonomy
-/// is already cascaded (target override > environment default > Approve).
+/// Result of resolving a `project::environment::target` address.
 #[derive(Debug, Clone)]
 pub struct ResolvedTarget<'a> {
-    pub project: Option<&'a ProjectConfig>,
-    pub environment: Option<&'a EnvironmentConfig>,
     pub target: &'a TargetConfig,
-    pub autonomy: OpsClawAutonomy,
 }
 
 impl OpsConfig {
@@ -870,12 +866,7 @@ impl OpsConfig {
             .iter()
             .find(|t| t.name == name)
             .ok_or_else(|| anyhow::anyhow!("target '{name}' not found"))?;
-        Ok(ResolvedTarget {
-            project: None,
-            environment: None,
-            target,
-            autonomy: target.autonomy,
-        })
+        Ok(ResolvedTarget { target })
     }
 
     fn lookup_hier(
@@ -907,14 +898,9 @@ impl OpsConfig {
         match matches.as_slice() {
             [] => anyhow::bail!("no target matches '{target_name}'"),
             [one] => {
-                let (project, environment, target) = *one;
-                let autonomy = resolve_autonomy(environment.autonomy, target.autonomy)?;
-                Ok(ResolvedTarget {
-                    project: Some(project),
-                    environment: Some(environment),
-                    target,
-                    autonomy,
-                })
+                let (_project, environment, target) = *one;
+                resolve_autonomy(environment.autonomy, target.autonomy)?;
+                Ok(ResolvedTarget { target })
             }
             many => {
                 let listing: Vec<String> = many
@@ -934,6 +920,7 @@ impl OpsConfig {
     /// - Flat `[[targets]]` and hierarchical `[[projects]]` are mutually exclusive.
     /// - Project names are unique.
     /// - Environment names are unique within a project.
+    #[cfg(test)]
     pub fn validate_hierarchy(&self) -> Result<()> {
         let has_flat = self
             .targets
@@ -998,6 +985,7 @@ impl OpsConfig {
 /// Empty strings and `None` are no-ops. Validation is purely lexical — we
 /// don't touch the filesystem here, the loader resolves relative to the
 /// workspace_dir later.
+#[cfg(test)]
 fn validate_context_file(value: Option<&str>, owner: &str) -> Result<()> {
     let Some(raw) = value else { return Ok(()) };
     if raw.is_empty() {
@@ -1185,9 +1173,6 @@ min_severity = "bogus"
             .resolve_target("shopfront::prod::web-1")
             .expect("must resolve");
         assert_eq!(resolved.target.name, "web-1");
-        assert_eq!(resolved.project.unwrap().name, "shopfront");
-        assert_eq!(resolved.environment.unwrap().name, "prod");
-        assert!(matches!(resolved.autonomy, OpsClawAutonomy::Approve));
     }
 
     #[test]
@@ -1212,8 +1197,6 @@ min_severity = "bogus"
         let cfg = load("full.toml");
         let resolved = cfg.resolve_target("prod-web-1").expect("must resolve");
         assert_eq!(resolved.target.name, "prod-web-1");
-        assert!(resolved.project.is_none());
-        assert!(resolved.environment.is_none());
     }
 
     #[test]
@@ -1290,9 +1273,9 @@ name = "p"
         )
         .expect("parses");
         let tight = cfg.resolve_target("p::prod::tightened").expect("ok");
-        assert!(matches!(tight.autonomy, OpsClawAutonomy::Approve));
+        assert!(matches!(tight.target.autonomy, OpsClawAutonomy::Approve));
         let same = cfg.resolve_target("p::prod::matches").expect("ok");
-        assert!(matches!(same.autonomy, OpsClawAutonomy::Auto));
+        assert!(matches!(same.target.autonomy, OpsClawAutonomy::Auto));
     }
 
     #[test]

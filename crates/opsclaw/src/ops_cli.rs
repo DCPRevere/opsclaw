@@ -8,14 +8,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use tokio::signal;
 use tracing::info;
 
 use crate::ops_config::{ConnectionType, TargetConfig};
 
-// Re-import from the same crate tree the binary uses — discovery/monitoring
-// types are fine because they don't reference Config.
-use crate::ops::probes;
 use crate::ops_config::{OpsClawAutonomy, OpsConfig};
 use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
 use crate::tools::kube_tool::KubeClient;
@@ -217,50 +213,6 @@ pub fn handle_context_print(config: &OpsConfig, target: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// dry-run-log command
-// ---------------------------------------------------------------------------
-
-pub fn handle_dry_run_log(tail: Option<usize>, clear: bool) -> Result<()> {
-    let log_path = opsclaw_dir()?.join("dry-run.log");
-
-    if clear {
-        if log_path.exists() {
-            fs::remove_file(&log_path)?;
-            println!("Dry-run log cleared.");
-        } else {
-            println!("No dry-run log to clear.");
-        }
-        return Ok(());
-    }
-
-    if !log_path.exists() {
-        println!(
-            "No dry-run log yet. Set a project's autonomy to 'dry-run' and run a scan or start the daemon."
-        );
-        return Ok(());
-    }
-
-    let content = fs::read_to_string(&log_path)?;
-    let lines: Vec<&str> = content.lines().collect();
-
-    let output = match tail {
-        Some(n) => lines
-            .iter()
-            .rev()
-            .take(n)
-            .rev()
-            .copied()
-            .collect::<Vec<_>>(),
-        None => lines,
-    };
-
-    for line in output {
-        println!("{line}");
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // scan command
 // ---------------------------------------------------------------------------
 
@@ -280,307 +232,45 @@ pub async fn handle_scan(config: &OpsConfig, target: Option<String>, all: bool) 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// probe command
-// ---------------------------------------------------------------------------
-
-pub async fn handle_probe(
-    config: &OpsConfig,
-    target: Option<String>,
-    all: bool,
-    url: Option<String>,
-) -> Result<()> {
-    // Quick one-off HTTP probe
-    if let Some(url) = url {
-        let runner = crate::tools::ssh_command_runner::LocalCommandRunner::new(
-            OpsClawAutonomy::DryRun,
-            "local".to_string(),
-        );
-        let probe = crate::ops_config::ProbeConfig {
-            name: "one-off-http".to_string(),
-            probe_type: crate::ops_config::ProbeType::Http {
-                url,
-                expected_status: Some(200),
-                timeout_secs: 10,
-            },
-        };
-        let result = probes::run_probe(&runner, &probe).await?;
-        print_probe_result(&result);
-        return Ok(());
-    }
-
-    let targets = resolve_targets(config, target.as_deref(), all)?;
-
-    for t in &targets {
-        println!("--- Probes for project: {} ---", t.name);
-        let runner = make_runner(config, t).await?;
-
-        // Gather configured + auto-discovered probes
-        let configured = t.probes.clone().unwrap_or_default();
-        let discovered = match scan_target(config, t).await {
-            Ok(snap) => probes::discover_probes(&snap, t.host.as_deref()),
-            Err(_) => vec![],
-        };
-
-        if configured.is_empty() && discovered.is_empty() {
-            println!("  No probes configured or discovered for '{}'", t.name);
-            continue;
-        }
-
-        for probe in configured.iter().chain(discovered.iter()) {
-            match probes::run_probe(runner.as_ref(), probe).await {
-                Ok(result) => print_probe_result(&result),
-                Err(e) => eprintln!("  [ERR] {}: {e}", probe.name),
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn print_probe_result(r: &probes::ProbeResult) {
-    let icon = if r.success { "OK" } else { "FAIL" };
-    println!(
-        "  [{icon}] {name} ({ptype}): {msg}",
-        name = r.probe_name,
-        ptype = r.probe_type,
-        msg = r.message,
-    );
-    if let Some(ref d) = r.details {
-        if !d.is_empty() && !r.success {
-            println!("        Details: {d}");
-        }
-    }
-}
-
-pub async fn handle_sources(config: &OpsConfig, target: Option<String>, all: bool) -> Result<()> {
-    let targets = resolve_targets(config, target.as_deref(), all)?;
-
-    for t in &targets {
-        println!("━━ {} ━━", t.name);
-
-        let ds_cfg = t.data_sources.clone().unwrap_or_default();
-
-        let runner: Option<Box<dyn CommandRunner>> = match make_runner(config, t).await {
-            Ok(r) => Some(r),
-            Err(e) => {
-                tracing::warn!("could not create runner for {}: {e:#}", t.name);
-                None
-            }
-        };
-
-        let snap =
-            crate::ops::data_sources::collect_all(&ds_cfg, runner.as_ref().map(|r| r.as_ref()))
-                .await;
-
-        crate::ops::data_sources::print_summary(&snap);
-        println!();
-    }
-
-    Ok(())
-}
-
 fn resolve_targets<'a>(
     config: &'a OpsConfig,
     target_name: Option<&str>,
     all: bool,
 ) -> Result<Vec<&'a TargetConfig>> {
-    let projects = config.targets.as_deref().unwrap_or_default();
+    let targets = configured_targets(config);
 
-    if projects.is_empty() {
-        bail!("No [[projects]] defined in config. Add at least one project.");
+    if targets.is_empty() {
+        bail!("No targets defined in config. Add at least one target.");
     }
 
     if let Some(name) = target_name {
-        let t = projects
-            .iter()
-            .find(|t| t.name == name)
-            .with_context(|| format!("Project '{name}' not found in config"))?;
-        Ok(vec![t])
+        let resolved = config
+            .resolve_target(name)
+            .with_context(|| format!("Target '{name}' not found in config"))?;
+        Ok(vec![resolved.target])
     } else if all {
-        Ok(projects.iter().collect())
+        Ok(targets)
     } else {
-        bail!("Specify a project name or use --all");
+        bail!("Specify a target name or use --all");
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shutdown signal
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// infra setup-user
-// ---------------------------------------------------------------------------
-
-/// Provision a restricted `opsclaw` SSH service account on a remote project.
-///
-/// Connects to the project as the currently configured user, creates the
-/// `opsclaw` user, generates a local ed25519 keypair, uploads the public
-/// key, and configures a minimal sudoers policy.
-pub async fn handle_infra_setup_user(config: &OpsConfig, target_name: &str) -> Result<()> {
-    let projects = config.targets.as_deref().unwrap_or_default();
-    let target = projects
-        .iter()
-        .find(|t| t.name == target_name)
-        .with_context(|| format!("Project '{target_name}' not found in config"))?;
-
-    if target.connection_type != ConnectionType::Ssh {
-        bail!(
-            "infra setup-user only works on SSH projects (project '{target_name}' is {:?})",
-            target.connection_type
-        );
+fn configured_targets(config: &OpsConfig) -> Vec<&TargetConfig> {
+    if !config.projects.is_empty() {
+        return config
+            .projects
+            .iter()
+            .flat_map(|project| &project.environments)
+            .flat_map(|environment| &environment.targets)
+            .collect();
     }
 
-    // Build a runner that bypasses dry-run (this is an explicit admin action).
-    let runner = make_runner_for_setup(config, target).await?;
-
-    println!("Connecting to {target_name}…");
-
-    // 1. Create the opsclaw user (skip if it already exists).
-    println!("  Creating user 'opsclaw'…");
-    let out = runner
-        .run("id -u opsclaw >/dev/null 2>&1 || useradd -m -s /bin/bash opsclaw")
-        .await?;
-    if !out.stderr.is_empty() {
-        info!("useradd stderr: {}", out.stderr.trim());
-    }
-
-    // 2. Ensure .ssh directory exists with correct permissions.
-    println!("  Setting up /home/opsclaw/.ssh…");
-    runner
-        .run("mkdir -p /home/opsclaw/.ssh && chmod 700 /home/opsclaw/.ssh")
-        .await?;
-
-    // 3. Generate a local ed25519 keypair.
-    let keys_dir = opsclaw_dir()?.join("keys");
-    fs::create_dir_all(&keys_dir)
-        .with_context(|| format!("failed to create {}", keys_dir.display()))?;
-
-    let key_stem = format!("{target_name}_opsclaw_ed25519");
-    let private_key_path = keys_dir.join(&key_stem);
-    let public_key_path = keys_dir.join(format!("{key_stem}.pub"));
-
-    if private_key_path.exists() {
-        println!("  Keypair already exists at {}", private_key_path.display());
-    } else {
-        println!("  Generating ed25519 keypair…");
-        let status = std::process::Command::new("ssh-keygen")
-            .args([
-                "-t",
-                "ed25519",
-                "-f",
-                &private_key_path.to_string_lossy(),
-                "-N",
-                "",
-                "-C",
-                &format!("opsclaw@{target_name}"),
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .context("failed to run ssh-keygen")?;
-        if !status.success() {
-            bail!("ssh-keygen exited with status {status}");
-        }
-    }
-
-    // 4. Upload the public key.
-    let pubkey = fs::read_to_string(&public_key_path)
-        .with_context(|| format!("failed to read {}", public_key_path.display()))?;
-    let pubkey = pubkey.trim();
-
-    println!("  Uploading public key…");
-    // Append if not already present, then fix ownership.
-    let escaped_pubkey = pubkey.replace('\'', "'\\''");
-    let upload_cmd = format!(
-        "grep -qF '{escaped_pubkey}' /home/opsclaw/.ssh/authorized_keys 2>/dev/null \
-         || echo '{escaped_pubkey}' >> /home/opsclaw/.ssh/authorized_keys"
-    );
-    runner.run(&upload_cmd).await?;
-
-    // 5. Set permissions.
-    println!("  Setting permissions…");
-    runner
-        .run("chown -R opsclaw:opsclaw /home/opsclaw/.ssh && chmod 600 /home/opsclaw/.ssh/authorized_keys")
-        .await?;
-
-    // 6. Add sudoers rule.
-    println!("  Configuring sudoers…");
-    runner
-        .run(
-            "echo 'opsclaw ALL=(ALL) NOPASSWD: /usr/bin/docker, /bin/journalctl, /bin/systemctl status *' \
-             > /etc/sudoers.d/opsclaw && chmod 440 /etc/sudoers.d/opsclaw",
-        )
-        .await?;
-
-    println!();
-    println!("Done! The opsclaw service account is ready on '{target_name}'.");
-    println!();
-    println!("Private key: {}", private_key_path.display());
-    println!();
-    println!("Update your project config to use the new account:");
-    println!("  [[projects]]");
-    println!("  name = \"{target_name}\"");
-    println!("  user = \"opsclaw\"");
-    println!("  key_file = \"~/.opsclaw/keys/{key_stem}\"");
-
-    Ok(())
-}
-
-/// Build an [`SshCommandRunner`] for infra provisioning.
-///
-/// Uses `Auto` autonomy so that write commands are not blocked — this is an
-/// explicit administrator action, not an autonomous agent decision.
-async fn make_runner_for_setup(
-    config: &OpsConfig,
-    target: &TargetConfig,
-) -> Result<Box<dyn CommandRunner>> {
-    let host = target.host.clone().unwrap_or_default();
-    let user = target.user.clone().unwrap_or_default();
-    let port = target.port.unwrap_or(22);
-
-    let raw_key = target
-        .key_secret
+    config
+        .targets
         .as_deref()
-        .context("SSH project requires key_secret (encrypted PEM in config)")?;
-    let key_pem = config
-        .decrypt_secret(raw_key)
-        .await
-        .context("Failed to decrypt SSH private key")?;
-
-    let entry = TargetEntry {
-        name: target.name.clone(),
-        host,
-        port,
-        user,
-        private_key_pem: key_pem,
-        autonomy: OpsClawAutonomy::Auto,
-    };
-
-    Ok(Box::new(SshCommandRunner::new(
-        entry,
-        Box::new(RealSshExecutor),
-    )))
-}
-
-/// Wait for SIGINT (Ctrl+C) or SIGTERM (Unix only).
-async fn shutdown_signal() {
-    let ctrl_c = signal::ctrl_c();
-
-    #[cfg(unix)]
-    {
-        let mut sigterm =
-            signal::unix::signal(signal::unix::SignalKind::terminate()).expect("SIGTERM listener");
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = sigterm.recv() => {}
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        ctrl_c.await.ok();
-    }
+        .unwrap_or_default()
+        .iter()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -685,14 +375,14 @@ pub fn handle_target_show(config: &OpsConfig, name: &str) -> Result<()> {
 pub fn handle_target_list(config: &OpsConfig) -> Result<()> {
     use console::style;
 
-    let targets = config.targets.as_deref().unwrap_or_default();
+    let targets = configured_targets(config);
     if targets.is_empty() {
-        println!("No projects configured. Run 'opsclaw project add' to add one.");
+        println!("No targets configured. Run 'opsclaw config target add' to add one.");
         return Ok(());
     }
 
     println!();
-    println!("  {}", style("Configured projects:").white().bold());
+    println!("  {}", style("Configured targets:").white().bold());
     println!();
     for t in targets {
         let kind = format!("{:?}", t.connection_type);
@@ -1036,6 +726,68 @@ mod tests {
             environments: Vec::new(),
         });
         cfg
+    }
+
+    fn local_target(name: &str) -> TargetConfig {
+        TargetConfig {
+            name: name.into(),
+            connection_type: ConnectionType::Local,
+            host: None,
+            port: None,
+            user: None,
+            key_secret: None,
+            autonomy: OpsClawAutonomy::Approve,
+            context_file: None,
+            probes: None,
+            data_sources: None,
+            escalation: None,
+            kubeconfig: None,
+            context: None,
+            namespace: None,
+        }
+    }
+
+    #[test]
+    fn resolve_targets_supports_hierarchical_target() {
+        let mut cfg = OpsConfig::default();
+        cfg.projects.push(ProjectConfig {
+            name: "sacra".into(),
+            description: None,
+            context_file: None,
+            owners: None,
+            environments: vec![EnvironmentConfig {
+                name: "prod".into(),
+                targets: vec![local_target("sacra")],
+                ..EnvironmentConfig::default()
+            }],
+        });
+
+        let targets = resolve_targets(&cfg, Some("sacra"), false).expect("resolve");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "sacra");
+    }
+
+    #[test]
+    fn resolve_targets_all_flattens_hierarchical_targets() {
+        let mut cfg = OpsConfig::default();
+        cfg.projects.push(ProjectConfig {
+            name: "sacra".into(),
+            description: None,
+            context_file: None,
+            owners: None,
+            environments: vec![EnvironmentConfig {
+                name: "prod".into(),
+                targets: vec![local_target("web"), local_target("db")],
+                ..EnvironmentConfig::default()
+            }],
+        });
+
+        let targets = resolve_targets(&cfg, None, true).expect("resolve all");
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].name, "web");
+        assert_eq!(targets[1].name, "db");
     }
 
     #[tokio::test]

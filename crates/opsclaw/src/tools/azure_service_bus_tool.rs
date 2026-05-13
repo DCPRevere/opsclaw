@@ -65,6 +65,7 @@ impl AzureServiceBusTool {
         }
     }
 
+    #[cfg(test)]
     pub fn with_audit_dir(mut self, dir: PathBuf) -> Self {
         self.audit_dir = Some(dir);
         self

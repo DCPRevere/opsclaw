@@ -140,9 +140,9 @@ fi
 
 # Test 8: Binary size check
 print_test "Binary size verification"
-if [ -f "target/release/zeroclaw" ]; then
-    BINARY_SIZE=$(ls -lh target/release/zeroclaw | awk '{print $5}')
-    SIZE_BYTES=$(stat -f%z target/release/zeroclaw 2>/dev/null || stat -c%s target/release/zeroclaw)
+if [ -f "target/release/opsclaw" ]; then
+    BINARY_SIZE=$(ls -lh target/release/opsclaw | awk '{print $5}')
+    SIZE_BYTES=$(stat -f%z target/release/opsclaw 2>/dev/null || stat -c%s target/release/opsclaw)
     SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
 
     if [ $SIZE_MB -le 10 ]; then
@@ -202,7 +202,7 @@ print_header "Phase 4: Health Check Tests"
 # Test 13: Health check timeout
 print_test "Health check timeout (should complete in <5s)"
 START_TIME=$(date +%s)
-HEALTH_OUTPUT=$(timeout 10 target/release/zeroclaw channel doctor 2>&1 || true)
+HEALTH_OUTPUT=$(timeout 10 target/release/opsclaw channel doctor 2>&1 || true)
 END_TIME=$(date +%s)
 HEALTH_TIME=$((END_TIME - START_TIME))
 

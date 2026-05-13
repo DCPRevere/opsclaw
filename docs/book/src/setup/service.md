@@ -23,7 +23,7 @@ The unit:
 - `User=` set to the invoking user
 - `SupplementaryGroups=gpio spi i2c` (enabled if hardware feature is compiled in)
 - `Restart=on-failure` with a 10-second backoff
-- `ExecStart=/home/$USER/.cargo/bin/zeroclaw daemon`
+- `ExecStart=/home/$USER/.cargo/bin/opsclaw daemon`
 
 ### Manual control
 

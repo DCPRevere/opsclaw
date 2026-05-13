@@ -24,7 +24,7 @@ cd zeroclaw
 
 1. Detects your distribution and architecture
 2. Asks whether you want a prebuilt binary or to build from source (the default is interactive — non-interactive shells default to prebuilt when available)
-3. Places the binary at `~/.cargo/bin/zeroclaw`
+3. Places the binary at `~/.cargo/bin/opsclaw`
 4. Runs `zeroclaw onboard` to complete first-time setup
 
 Flags:
@@ -136,7 +136,7 @@ Remove the binary:
 
 ```bash
 # cargo install / bootstrap
-rm ~/.cargo/bin/zeroclaw
+rm ~/.cargo/bin/opsclaw
 
 # Homebrew
 brew uninstall zeroclaw

@@ -38,7 +38,6 @@ pub struct PostgresToolConfig {
 }
 
 pub struct PostgresTool {
-    config: PostgresToolConfig,
     instances: HashMap<String, PostgresInstance>,
     audit_dir: Option<PathBuf>,
 }
@@ -52,15 +51,9 @@ impl PostgresTool {
             .map(|i| (i.name.clone(), i))
             .collect();
         Self {
-            config,
             instances,
             audit_dir: None,
         }
-    }
-
-    pub fn with_audit_dir(mut self, dir: PathBuf) -> Self {
-        self.audit_dir = Some(dir);
-        self
     }
 
     fn instance_names(&self) -> Vec<String> {

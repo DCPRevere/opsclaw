@@ -239,7 +239,7 @@ Expected values after all fixes:
 | First response time    | <3s        | Time from sending to receiving   |
 | Message split overhead | <50ms      | Check logs for timing            |
 | Memory usage           | <10MB      | `ps aux \| grep zeroclaw`        |
-| Binary size            | ~3-4MB     | `ls -lh target/release/zeroclaw` |
+| Binary size            | ~3-4MB     | `ls -lh target/release/opsclaw` |
 | Unit test coverage     | 61/61 pass | `cargo test telegram --lib`      |
 
 ## 🐛 Debugging Failed Tests

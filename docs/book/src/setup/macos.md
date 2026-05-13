@@ -23,7 +23,7 @@ cd zeroclaw
 ### What the installer does
 
 1. Asks whether you want a prebuilt binary or to build from source
-2. Installs to `~/.cargo/bin/zeroclaw`
+2. Installs to `~/.cargo/bin/opsclaw`
 3. Runs `zeroclaw onboard` to complete first-time setup
 
 Flags:
@@ -45,7 +45,7 @@ brew install zeroclaw
 zeroclaw onboard
 ```
 
-Gets you `brew services` integration. Binary lives at `$HOMEBREW_PREFIX/bin/zeroclaw`.
+Gets you `brew services` integration. Binary lives at `$HOMEBREW_PREFIX/bin/opsclaw`.
 
 **Workspace location gotcha:** with Homebrew, the service user and the CLI user may be different, so the workspace lives at `$HOMEBREW_PREFIX/var/zeroclaw/` rather than `~/.zeroclaw/`. Point CLI invocations at the same workspace:
 
@@ -127,7 +127,7 @@ zeroclaw service uninstall
 brew uninstall zeroclaw
 
 # bootstrap / cargo
-rm ~/.cargo/bin/zeroclaw
+rm ~/.cargo/bin/opsclaw
 ```
 
 Remove config and workspace (optional — this deletes conversation history):

@@ -73,7 +73,7 @@ cd zeroclaw
 cargo build --release --features hardware
 
 # Install
-sudo cp target/release/zeroclaw /usr/local/bin/
+sudo cp target/release/opsclaw /usr/local/bin/
 ```
 
 ### Option B: Cross-Compile on Mac (Faster)
@@ -183,7 +183,7 @@ Now when you message your Telegram bot *"Turn on the LED"* or *"Set pin 13 high"
 
 ## Troubleshooting
 
-- **"command not found: zeroclaw"** — Use full path: `/usr/local/bin/zeroclaw` or ensure `~/.cargo/bin` is in PATH.
+- **"command not found: opsclaw"** — Use full path: `/usr/local/bin/opsclaw` or ensure `~/.cargo/bin` is in PATH.
 - **Telegram not responding** — Check bot_token, allowed_users, and that the Uno Q has internet (WiFi).
 - **Out of memory** — Keep features minimal (`--features hardware` for Uno Q); consider `compact_context = true`.
 - **GPIO commands ignored** — Ensure Bridge app is running (`zeroclaw peripheral setup-uno-q` deploys and starts it). Config must have `board = "arduino-uno-q"` and `transport = "bridge"`.

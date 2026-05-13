@@ -80,11 +80,6 @@ impl PostHogTool {
         }
     }
 
-    pub fn with_audit_dir(mut self, dir: PathBuf) -> Self {
-        self.audit_dir = Some(dir);
-        self
-    }
-
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!(
             "{}/api/projects/{}/{}",

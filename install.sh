@@ -6,7 +6,7 @@ set -eu
 # All feature lists and version info read from Cargo.toml — nothing hardcoded.
 # POSIX sh — no bash required. Works on Alpine, Debian, macOS, everywhere.
 
-REPO_URL="https://github.com/zeroclaw-labs/zeroclaw.git"
+REPO_URL="https://github.com/dcprevere/opsclaw.git"
 
 # ── Output helpers (terminal-aware) ──────────────────────────────
 
@@ -171,19 +171,19 @@ install_prebuilt() {
     *) die "Invalid release version $version. Expected X.Y.Z or vX.Y.Z." ;;
   esac
 
-  asset_name="zeroclaw-${triple}.tar.gz"
-  asset_url="https://github.com/zeroclaw-labs/zeroclaw/releases/download/${version}/${asset_name}"
-  sha256_url="https://github.com/zeroclaw-labs/zeroclaw/releases/download/${version}/SHA256SUMS"
+  asset_name="opsclaw-${triple}.tar.gz"
+  asset_url="https://github.com/dcprevere/opsclaw/releases/download/${version}/${asset_name}"
+  sha256_url="https://github.com/dcprevere/opsclaw/releases/download/${version}/SHA256SUMS"
 
   echo
-  printf "%s\n" "$(bold "Installing ZeroClaw ${version} (pre-built)")"
+  printf "%s\n" "$(bold "Installing OpsClaw ${version} (pre-built)")"
   info "Platform: $triple"
   info "Source:   $asset_url"
   echo
 
   if [ "$DRY_RUN" = true ]; then
     info "[dry-run] Would download $asset_url"
-    info "[dry-run] Would install to $CARGO_HOME/bin/zeroclaw"
+    info "[dry-run] Would install to $CARGO_HOME/bin/opsclaw"
     return 0
   fi
 
@@ -223,7 +223,7 @@ install_prebuilt() {
 
   tar -xzf "$tmp_dir/$asset_name" -C "$tmp_dir"
   mkdir -p "$CARGO_HOME/bin"
-  install -m 755 "$tmp_dir/zeroclaw" "$CARGO_HOME/bin/zeroclaw"
+  install -m 755 "$tmp_dir/opsclaw" "$CARGO_HOME/bin/opsclaw"
 
   rm -rf "$tmp_dir"
   trap - EXIT
@@ -262,7 +262,7 @@ Examples:
   $0 --skip-onboard                            # install only, configure later
   $0 --prefix ./zc-test --skip-onboard         # isolated test install
   $0 --dry-run --prebuilt                      # preview without installing
-  $0 --uninstall                               # remove ZeroClaw
+  $0 --uninstall                               # remove OpsClaw
 
 Environment:
   ZEROCLAW_INSTALL_DIR     Source checkout override (default: PREFIX/.zeroclaw/src)
@@ -276,10 +276,10 @@ EOF
 
 do_uninstall() {
   echo
-  printf "%s\n" "$(bold "Uninstalling ZeroClaw")"
+  printf "%s\n" "$(bold "Uninstalling OpsClaw")"
   echo
 
-  local bin="$CARGO_HOME/bin/zeroclaw"
+  local bin="$CARGO_HOME/bin/opsclaw"
 
   if [ -f "$bin" ]; then
     "$bin" service stop 2>/dev/null || true
@@ -304,19 +304,19 @@ do_uninstall() {
     fi
   fi
 
-  # Check if another zeroclaw still lurks in PATH
+  # Check if another opsclaw still lurks in PATH
   local other_bin
-  other_bin=$(PATH="$ORIGINAL_PATH" command -v zeroclaw 2>/dev/null || true)
+  other_bin=$(PATH="$ORIGINAL_PATH" command -v opsclaw 2>/dev/null || true)
   if [ -n "$other_bin" ]; then
     local other_version
     other_version=$("$other_bin" --version 2>/dev/null | awk '{print $NF}' || echo "unknown")
     echo
-    warn "Another zeroclaw found at $other_bin (v$other_version)"
+    warn "Another opsclaw found at $other_bin (v$other_version)"
     warn "Remove it manually if you want a full uninstall"
   fi
 
   echo
-  info "ZeroClaw uninstalled"
+  info "OpsClaw uninstalled"
   exit 0
 }
 
@@ -443,7 +443,7 @@ if [ "$INSTALL_MODE" = "prebuilt" ]; then
 fi
 
 [ "${PREBUILT_OK:-false}" = true ] && [ "$DRY_RUN" != true ] && {
-  BIN="$CARGO_HOME/bin/zeroclaw"
+  BIN="$CARGO_HOME/bin/opsclaw"
   if [ -f "$BIN" ]; then
     NEW_VERSION=$("$BIN" --version 2>/dev/null | awk '{print $NF}' || echo "?")
     SIZE=$(du -h "$BIN" | awk '{print $1}')
@@ -563,12 +563,12 @@ fi
 
 # ── Detect existing installs ──────────────────────────────────────
 
-PATH_BIN=$(PATH="$ORIGINAL_PATH" command -v zeroclaw 2>/dev/null || true)
+PATH_BIN=$(PATH="$ORIGINAL_PATH" command -v opsclaw 2>/dev/null || true)
 if [ -n "$PATH_BIN" ]; then
   PATH_VERSION=$("$PATH_BIN" --version 2>/dev/null | awk '{print $NF}' || echo "unknown")
-  TARGET_BIN="$CARGO_HOME/bin/zeroclaw"
+  TARGET_BIN="$CARGO_HOME/bin/opsclaw"
   if [ "$PATH_BIN" != "$TARGET_BIN" ]; then
-    warn "zeroclaw found at $PATH_BIN (v$PATH_VERSION)"
+    warn "opsclaw found at $PATH_BIN (v$PATH_VERSION)"
     warn "This install targets $TARGET_BIN"
     warn "The old binary will shadow the new one unless removed or PATH is reordered"
   else
@@ -592,14 +592,14 @@ if [ "$DRY_RUN" = true ]; then
   printf "%s\n" "$(bold "Dry run — nothing will be built or installed")"
   echo
   info "Source:   $INSTALL_DIR"
-  info "Binary:   $CARGO_HOME/bin/zeroclaw"
+  info "Binary:   $CARGO_HOME/bin/opsclaw"
   info "Config:   $PREFIX/.zeroclaw/"
   info "Rust:     $CARGO_HOME (CARGO_HOME), $RUSTUP_HOME (RUSTUP_HOME)"
   echo
   if [ -n "$CARGO_FLAGS" ]; then
-    info "cargo install --path . --locked --force $CARGO_FLAGS"
+    info "cargo install --path crates/opsclaw --locked --force $CARGO_FLAGS"
   else
-    info "cargo install --path . --locked --force"
+    info "cargo install --path crates/opsclaw --locked --force"
   fi
 
   EXPORT_LINE=$(shell_export_syntax)
@@ -614,7 +614,7 @@ fi
 # ── Build and install ─────────────────────────────────────────────
 
 echo
-printf "%s\n" "$(bold "Building ZeroClaw v$VERSION")"
+printf "%s\n" "$(bold "Building OpsClaw v$VERSION")"
 if [ -n "$CARGO_FLAGS" ]; then
   info "Feature flags: $CARGO_FLAGS"
 else
@@ -623,22 +623,22 @@ fi
 echo
 
 # shellcheck disable=SC2086
-cargo install --path . --locked --force $CARGO_FLAGS
+cargo install --path crates/opsclaw --locked --force $CARGO_FLAGS
 
 # ── Summary ───────────────────────────────────────────────────────
 
-BIN="$CARGO_HOME/bin/zeroclaw"
+BIN="$CARGO_HOME/bin/opsclaw"
 if [ -f "$BIN" ]; then
   SIZE=$(du -h "$BIN" | awk '{print $1}')
   NEW_VERSION=$("$BIN" --version 2>/dev/null | awk '{print $NF}' || echo "$VERSION")
   echo
   info "Installed: $BIN (v$NEW_VERSION, $SIZE)"
 
-  ACTIVE_BIN=$(PATH="$ORIGINAL_PATH" command -v zeroclaw 2>/dev/null || true)
+  ACTIVE_BIN=$(PATH="$ORIGINAL_PATH" command -v opsclaw 2>/dev/null || true)
   if [ -n "$ACTIVE_BIN" ] && [ "$ACTIVE_BIN" != "$BIN" ]; then
     ACTIVE_VERSION=$("$ACTIVE_BIN" --version 2>/dev/null | awk '{print $NF}' || echo "unknown")
     echo
-    warn "$(bold "WARNING:") zeroclaw in your PATH is $ACTIVE_BIN (v$ACTIVE_VERSION)"
+    warn "$(bold "WARNING:") opsclaw in your PATH is $ACTIVE_BIN (v$ACTIVE_VERSION)"
     warn "It will shadow the v$NEW_VERSION binary you just installed at $BIN"
     warn "Fix: remove the old binary or put $CARGO_HOME/bin earlier in your PATH"
   fi
@@ -648,7 +648,7 @@ fi
 
 fi  # end source build block
 
-BIN="$CARGO_HOME/bin/zeroclaw"
+BIN="$CARGO_HOME/bin/opsclaw"
 
 # ── PATH guidance ─────────────────────────────────────────────────
 
@@ -683,12 +683,12 @@ if [ "$SKIP_ONBOARD" = false ] && [ "$DRY_RUN" != true ] && [ -f "$BIN" ]; then
     echo
     printf "%s\n" "$(bold "Running setup wizard...")"
     echo
-    "$BIN" onboard || warn "Onboard wizard exited with an error — run 'zeroclaw onboard' manually"
+    "$BIN" onboard || warn "Onboard wizard exited with an error — run 'opsclaw onboard' manually"
   else
-    info "Non-interactive — skipping onboard wizard. Run 'zeroclaw onboard' to configure."
+    info "Non-interactive — skipping onboard wizard. Run 'opsclaw onboard' to configure."
   fi
 fi
 
 echo
-info "Done. Run $(bold "zeroclaw agent") to start chatting."
+info "Done. Run $(bold "opsclaw agent") to start chatting."
 echo

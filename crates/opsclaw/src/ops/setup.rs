@@ -8,14 +8,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use console::style;
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Input, Select};
 
 use crate::ops_config::OpsConfig;
 use crate::ops_config::{ConnectionType, OpsClawAutonomy, TargetConfig};
-use crate::tools::discovery::{self, CommandRunner, TargetSnapshot};
-use crate::tools::ssh_command_runner::{LocalCommandRunner, SshCommandRunner};
-use crate::tools::ssh_tool::RealSshExecutor;
-use crate::tools::ssh_tool::TargetEntry;
 
 fn print_bullet(text: &str) {
     println!("  {} {}", style("›").cyan(), text);
@@ -124,7 +120,6 @@ async fn test_ssh_connection(host: &str, user: &str, port: u16, key_path: Option
 
 pub struct TargetResult {
     pub config: TargetConfig,
-    pub runner: Option<Box<dyn CommandRunner>>,
 }
 
 pub fn step_connection_type() -> Result<ConnectionType> {
@@ -193,31 +188,13 @@ pub async fn step_ssh_target() -> Result<TargetResult> {
     // Read the SSH key content — stored inline (encrypted by Config::save()).
     let key_pem_result = fs::read_to_string(expand_tilde(&key_path));
 
-    let runner: Box<dyn CommandRunner> = match &key_pem_result {
-        Ok(key_pem) => {
-            let entry = TargetEntry {
-                name: name.clone(),
-                host: host.clone(),
-                port,
-                user: user.clone(),
-                private_key_pem: key_pem.clone(),
-                autonomy: OpsClawAutonomy::DryRun,
-            };
-            Box::new(SshCommandRunner::new(entry, Box::new(RealSshExecutor)))
-        }
-        Err(e) => {
-            println!(
-                "  {} Could not read SSH key ({}): using stub for scan",
-                style("\u{26a0}").yellow(),
-                e
-            );
-            // Graceful fallback: scan will be skipped, not crash
-            Box::new(LocalCommandRunner::new(
-                OpsClawAutonomy::DryRun,
-                name.clone(),
-            ))
-        }
-    };
+    if let Err(e) = &key_pem_result {
+        println!(
+            "  {} Could not read SSH key ({}): target will be saved without a key",
+            style("\u{26a0}").yellow(),
+            e
+        );
+    }
 
     // Store key PEM content (plain text here; Config::save() encrypts it as enc2:...).
     let key_secret = key_pem_result.ok();
@@ -239,10 +216,7 @@ pub async fn step_ssh_target() -> Result<TargetResult> {
         namespace: None,
     };
 
-    Ok(TargetResult {
-        config,
-        runner: Some(runner),
-    })
+    Ok(TargetResult { config })
 }
 
 pub fn step_local_target() -> Result<TargetResult> {
@@ -250,11 +224,6 @@ pub fn step_local_target() -> Result<TargetResult> {
         .with_prompt("Target name")
         .default("this-box".into())
         .interact_text()?;
-
-    let runner: Box<dyn CommandRunner> = Box::new(LocalCommandRunner::new(
-        OpsClawAutonomy::DryRun,
-        name.clone(),
-    ));
 
     let config = TargetConfig {
         name,
@@ -273,10 +242,7 @@ pub fn step_local_target() -> Result<TargetResult> {
         namespace: None,
     };
 
-    Ok(TargetResult {
-        config,
-        runner: Some(runner),
-    })
+    Ok(TargetResult { config })
 }
 
 pub fn step_kubernetes_target() -> Result<TargetResult> {
@@ -320,10 +286,7 @@ pub fn step_kubernetes_target() -> Result<TargetResult> {
         },
     };
 
-    Ok(TargetResult {
-        config,
-        runner: None,
-    })
+    Ok(TargetResult { config })
 }
 
 /// Ask the user for optional project context and persist it to a file.
@@ -390,115 +353,6 @@ pub fn step_autonomy() -> Result<OpsClawAutonomy> {
         1 => OpsClawAutonomy::Approve,
         _ => OpsClawAutonomy::Auto,
     })
-}
-
-pub async fn step_discovery_scan(
-    target_name: &str,
-    runner: &dyn CommandRunner,
-) -> Option<TargetSnapshot> {
-    print_bullet(&format!("Running discovery scan on {target_name}..."));
-
-    match discovery::run_discovery_scan(runner).await {
-        Ok(snapshot) => {
-            println!("  {} Scan complete", style("✓").green().bold());
-            print_bullet(&format!(
-                "OS: {} {}",
-                snapshot.os.distro_name, snapshot.os.distro_version
-            ));
-            print_bullet(&format!(
-                "Containers: {} ({})",
-                snapshot.containers.len(),
-                snapshot
-                    .containers
-                    .iter()
-                    .map(|c| c.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-            print_bullet(&format!("Services: {} active", snapshot.services.len()));
-            print_bullet(&format!(
-                "Ports: {}",
-                snapshot
-                    .listening_ports
-                    .iter()
-                    .map(|p| p.port.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-            // Summarise disk from the root mount or first entry
-            if let Some(d) = snapshot.disk.first() {
-                print_bullet(&format!(
-                    "Disk: {} / {} ({}% used)",
-                    d.used, d.size, d.use_percent
-                ));
-            }
-
-            Some(snapshot)
-        }
-        Err(e) => {
-            println!("  {} Scan failed: {}", style("✗").yellow().bold(), e);
-            print_bullet("You can re-run later with: opsclaw scan");
-            None
-        }
-    }
-}
-
-pub fn step_data_sources() -> Result<Option<crate::ops::data_sources::DataSourcesConfig>> {
-    use crate::ops::data_sources::{DataSourcesConfig, JaegerConfig, PrometheusConfig, SeqConfig};
-
-    println!();
-    println!(
-        "  {}",
-        style("Configure endpoints for observability services (all optional).").dim()
-    );
-
-    let mut config = DataSourcesConfig::default();
-    let mut any = false;
-
-    // Prometheus
-    if Confirm::new()
-        .with_prompt("Do you have Prometheus running?")
-        .default(false)
-        .interact()?
-    {
-        let url: String = Input::new()
-            .with_prompt("Prometheus URL")
-            .default("http://localhost:9090".into())
-            .interact_text()?;
-        config.prometheus = Some(PrometheusConfig { url, token: None });
-        any = true;
-    }
-
-    // Seq
-    if Confirm::new()
-        .with_prompt("Do you have Seq running?")
-        .default(false)
-        .interact()?
-    {
-        let url: String = Input::new()
-            .with_prompt("Seq URL")
-            .default("http://localhost:5341".into())
-            .interact_text()?;
-        let api_key = crate::secrets::prompt_secret_source("the Seq API key", true)?;
-        config.seq = Some(SeqConfig { url, api_key });
-        any = true;
-    }
-
-    // Jaeger
-    if Confirm::new()
-        .with_prompt("Do you have Jaeger running?")
-        .default(false)
-        .interact()?
-    {
-        let url: String = Input::new()
-            .with_prompt("Jaeger URL")
-            .default("http://localhost:16686".into())
-            .interact_text()?;
-        config.jaeger = Some(JaegerConfig { url });
-        any = true;
-    }
-
-    if any { Ok(Some(config)) } else { Ok(None) }
 }
 
 // ---------------------------------------------------------------------------

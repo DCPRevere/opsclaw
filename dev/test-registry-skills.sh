@@ -24,25 +24,25 @@ fail() { TESTS=$((TESTS + 1)); FAILURES=$((FAILURES + 1)); printf "  ${RED}✗${
 info() { printf "\n${BOLD}%s${RESET}\n" "$*"; }
 warn() { printf "  ${YELLOW}⚠${RESET} %s\n" "$*"; }
 
-# ── Resolve zeroclaw binary ─────────────────────────────────────
-ZEROCLAW=""
+# ── Resolve opsclaw binary ──────────────────────────────────────
+OPSCLAW=""
 for candidate in \
-  "$REPO_ROOT/target/debug/zeroclaw" \
-  "$REPO_ROOT/target/release/zeroclaw" \
-  "$(command -v zeroclaw 2>/dev/null || true)"; do
+  "$REPO_ROOT/target/debug/opsclaw" \
+  "$REPO_ROOT/target/release/opsclaw" \
+  "$(command -v opsclaw 2>/dev/null || true)"; do
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    ZEROCLAW="$candidate"
+    OPSCLAW="$candidate"
     break
   fi
 done
 
-if [ -z "$ZEROCLAW" ]; then
-  printf "${RED}Error: No zeroclaw binary found. Run 'cargo build' first.${RESET}\n"
+if [ -z "$OPSCLAW" ]; then
+  printf "${RED}Error: No opsclaw binary found. Run 'cargo build' first.${RESET}\n"
   exit 1
 fi
 
 printf "\n${BOLD}Registry Skills E2E Test${RESET}\n"
-printf "${DIM}Binary:  %s${RESET}\n" "$ZEROCLAW"
+printf "${DIM}Binary:  %s${RESET}\n" "$OPSCLAW"
 printf "${DIM}Branch:  %s${RESET}\n" "$(git branch --show-current 2>/dev/null || echo 'unknown')"
 
 # ── Discover skills from the registry cache ──────────────────────
@@ -53,7 +53,7 @@ REGISTRY_DIR="$HOME/.zeroclaw/workspace/skills-registry"
 # clones/pulls the registry even though it fails).
 if [ ! -d "$REGISTRY_DIR/skills" ]; then
   info "=== Bootstrap registry cache ==="
-  "$ZEROCLAW" skills install __bootstrap_probe__ 2>&1 || true
+  "$OPSCLAW" skills install __bootstrap_probe__ 2>&1 || true
 fi
 
 if [ -d "$REGISTRY_DIR/skills" ]; then
@@ -73,7 +73,7 @@ info "=== Install (bare name → registry) ==="
 
 INSTALLED_SKILLS=""
 for skill in $REGISTRY_SKILLS; do
-  OUTPUT=$("$ZEROCLAW" skills install "$skill" 2>&1) || true
+  OUTPUT=$("$OPSCLAW" skills install "$skill" 2>&1) || true
   if printf '%s' "$OUTPUT" | grep -q "✓"; then
     pass "install $skill"
     INSTALLED_SKILLS="$INSTALLED_SKILLS $skill"
@@ -118,7 +118,7 @@ done
 # ══════════════════════════════════════════════════════════════════
 info "=== Verify skills list ==="
 
-LIST_OUTPUT=$("$ZEROCLAW" skills list 2>&1)
+LIST_OUTPUT=$("$OPSCLAW" skills list 2>&1)
 INSTALLED_COUNT=$(printf '%s' "$LIST_OUTPUT" | grep -c "v[0-9]" || true)
 INSTALLED_COUNT=$(printf '%s' "$INSTALLED_COUNT" | tr -d ' ')
 
@@ -141,7 +141,7 @@ done
 # ══════════════════════════════════════════════════════════════════
 info "=== Error handling ==="
 
-ERR_OUTPUT=$("$ZEROCLAW" skills install nonexistent-skill-xyz 2>&1 || true)
+ERR_OUTPUT=$("$OPSCLAW" skills install nonexistent-skill-xyz 2>&1 || true)
 if printf '%s' "$ERR_OUTPUT" | grep -q "not found in the registry"; then
   pass "nonexistent skill gives clear error"
 else
@@ -159,7 +159,7 @@ fi
 # ══════════════════════════════════════════════════════════════════
 info "=== Duplicate install ==="
 
-DUP_OUTPUT=$("$ZEROCLAW" skills install auto-coder 2>&1 || true)
+DUP_OUTPUT=$("$OPSCLAW" skills install auto-coder 2>&1 || true)
 if printf '%s' "$DUP_OUTPUT" | grep -q "already exists"; then
   pass "duplicate install blocked"
 else
@@ -197,7 +197,7 @@ fi
 info "=== Cleanup ==="
 
 for skill in $INSTALLED_SKILLS; do
-  REMOVE_OUTPUT=$("$ZEROCLAW" skills remove "$skill" 2>&1) || true
+  REMOVE_OUTPUT=$("$OPSCLAW" skills remove "$skill" 2>&1) || true
   if printf '%s' "$REMOVE_OUTPUT" | grep -q "removed"; then
     pass "removed $skill"
   else

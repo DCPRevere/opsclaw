@@ -41,11 +41,13 @@ impl SshCommandRunner {
         }
     }
 
+    #[cfg(test)]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    #[cfg(test)]
     pub fn with_audit_dir(mut self, dir: PathBuf) -> Self {
         self.audit_dir = Some(dir);
         self
@@ -138,11 +140,7 @@ impl LocalCommandRunner {
         }
     }
 
-    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
-        self.timeout_secs = secs;
-        self
-    }
-
+    #[cfg(test)]
     pub fn with_audit_dir(mut self, dir: PathBuf) -> Self {
         self.audit_dir = Some(dir);
         self

@@ -129,7 +129,6 @@ pub const JSONRPC_PARSE_ERROR: i32 = -32700;
 pub const JSONRPC_INVALID_REQUEST: i32 = -32600;
 pub const JSONRPC_METHOD_NOT_FOUND: i32 = -32601;
 pub const JSONRPC_INVALID_PARAMS: i32 = -32602;
-pub const JSONRPC_INTERNAL_ERROR: i32 = -32603;
 
 /// Application-level: task not found.
 pub const A2A_TASK_NOT_FOUND: i32 = -32000;

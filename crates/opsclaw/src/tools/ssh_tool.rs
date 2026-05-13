@@ -158,6 +158,10 @@ pub struct TargetEntry {
     pub autonomy: OpsClawAutonomy,
 }
 
+pub(crate) fn target_matches(entry: &TargetEntry, name: &str) -> bool {
+    entry.name == name || entry.host == name
+}
+
 /// Configuration bundle passed to [`SshTool`] at construction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshToolConfig {
@@ -497,67 +501,6 @@ fn sanitize_audit_field(value: &str) -> String {
     out
 }
 
-// ── SshCommandRunner ────────────────────────────────────
-
-/// A resolved, ready-to-use SSH runner for a single project.
-/// Created by `OpsClawContext::ssh_runner_for` with the key already resolved.
-pub struct SshCommandRunner {
-    project: TargetEntry,
-    executor: Box<dyn SshExecutor>,
-    timeout: Duration,
-}
-
-impl std::fmt::Debug for SshCommandRunner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SshCommandRunner")
-            .field("project", &self.project)
-            .field("timeout", &self.timeout)
-            .finish_non_exhaustive()
-    }
-}
-
-impl SshCommandRunner {
-    pub fn new(project: TargetEntry) -> Self {
-        Self {
-            project,
-            executor: Box::new(RealSshExecutor),
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-        }
-    }
-
-    /// Construct with a custom executor (for testing).
-    pub fn with_executor(project: TargetEntry, executor: Box<dyn SshExecutor>) -> Self {
-        Self {
-            project,
-            executor,
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-        }
-    }
-
-    pub fn project(&self) -> &TargetEntry {
-        &self.project
-    }
-
-    pub fn host(&self) -> &str {
-        &self.project.host
-    }
-
-    pub fn port(&self) -> u16 {
-        self.project.port
-    }
-
-    pub fn user(&self) -> &str {
-        &self.project.user
-    }
-
-    /// Execute a command on this project.
-    pub async fn run(&self, command: &str, pty: bool) -> anyhow::Result<SshOutput> {
-        self.executor
-            .run(&self.project, command, self.timeout, pty)
-            .await
-    }
-}
-
 // ── SshTool ─────────────────────────────────────────────
 
 /// Tool trait implementation for SSH command execution.
@@ -579,30 +522,8 @@ impl SshTool {
         }
     }
 
-    /// Construct with a custom executor (for testing).
-    pub fn with_executor(config: SshToolConfig, executor: Box<dyn SshExecutor>) -> Self {
-        Self {
-            config,
-            executor,
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-            audit_dir: None,
-        }
-    }
-
-    /// Override the command timeout.
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-
-    /// Override the audit log directory.
-    pub fn with_audit_dir(mut self, dir: PathBuf) -> Self {
-        self.audit_dir = Some(dir);
-        self
-    }
-
     fn resolve_project(&self, name: &str) -> Option<&TargetEntry> {
-        self.config.targets.iter().find(|t| t.name == name)
+        self.config.targets.iter().find(|t| target_matches(t, name))
     }
 }
 

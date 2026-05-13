@@ -683,19 +683,6 @@ impl KubeTool {
         }
     }
 
-    pub fn with_factory(config: KubeToolConfig, factory: Box<dyn KubeClientFactory>) -> Self {
-        Self {
-            config,
-            factory,
-            audit_dir: None,
-        }
-    }
-
-    pub fn with_audit_dir(mut self, dir: PathBuf) -> Self {
-        self.audit_dir = Some(dir);
-        self
-    }
-
     /// Build Kubernetes target entries from the OpsConfig.
     pub fn targets_from_config(config: &OpsConfig) -> Vec<KubeTarget> {
         let mut all: Vec<&TargetConfig> = Vec::new();

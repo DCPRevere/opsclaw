@@ -15,7 +15,6 @@ pub mod jaeger_tool;
 pub mod kube_tool;
 pub mod loki_tool;
 pub mod monitor_tool;
-pub mod monitoring;
 pub mod opsclaw_notify;
 pub mod pagerduty_tool;
 pub mod postgres_tool;

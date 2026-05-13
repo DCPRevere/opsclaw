@@ -178,14 +178,6 @@ pub fn parse_os_release(raw: &str) -> (String, String) {
     (name, version)
 }
 
-pub fn parse_ps_aux(raw: &str) -> Vec<String> {
-    raw.lines()
-        .skip(1) // header
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.to_string())
-        .collect()
-}
-
 pub fn parse_ss(raw: &str) -> Vec<PortInfo> {
     let mut ports = Vec::new();
     for line in raw.lines().skip(1) {

@@ -37,6 +37,7 @@ impl SystemdTool {
         }
     }
 
+    #[cfg(test)]
     pub fn with_executor(config: SystemdToolConfig, executor: Box<dyn SshExecutor>) -> Self {
         Self {
             config,
@@ -46,13 +47,17 @@ impl SystemdTool {
         }
     }
 
+    #[cfg(test)]
     pub fn with_audit_dir(mut self, dir: PathBuf) -> Self {
         self.audit_dir = Some(dir);
         self
     }
 
     fn resolve<'a>(&'a self, name: &str) -> Option<&'a TargetEntry> {
-        self.config.targets.iter().find(|p| p.name == name)
+        self.config
+            .targets
+            .iter()
+            .find(|p| crate::tools::ssh_tool::target_matches(p, name))
     }
 }
 

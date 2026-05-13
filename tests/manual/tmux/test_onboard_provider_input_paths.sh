@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-BIN_PATH="${1:-$ROOT_DIR/target/debug/zeroclaw}"
+BIN_PATH="${1:-$ROOT_DIR/target/debug/opsclaw}"
 TMP_ROOT="/tmp/zeroclaw-tmux-onboard-$$"
 
 cleanup() {
@@ -19,8 +19,8 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 if [[ ! -x "$BIN_PATH" ]]; then
-  echo "Building zeroclaw..."
-  cargo build --bin zeroclaw >/dev/null
+  echo "Building opsclaw..."
+  cargo build --bin opsclaw >/dev/null
 fi
 
 mkdir -p "$TMP_ROOT"

@@ -103,7 +103,6 @@ pub use zeroclaw::{
 mod daemon_ext;
 mod oap;
 mod onboard;
-mod openshell;
 mod ops;
 mod ops_cli;
 mod ops_config;
@@ -592,7 +591,7 @@ Examples:
   opsclaw scan sacra              # scan a single target
   opsclaw scan --all              # scan all configured targets")]
     Scan {
-        /// Target name to scan (from config [[targets]])
+        /// Target name or address to scan (for example: target or project::env::target)
         target: Option<String>,
         /// Scan all configured targets
         #[arg(long)]
@@ -1125,6 +1124,10 @@ async fn main() -> Result<()> {
             let extra_tools = crate::tools::registry::create_opsclaw_tools(&ops_config)
                 .await
                 .ok();
+
+            zeroclaw_runtime::agent::loop_::register_cli_channel_fn(Box::new(|| {
+                Box::new(zeroclaw_channels::cli::CliChannel::new())
+            }));
 
             Box::pin(agent::run(
                 config,

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use zeroclaw::tools::traits::{Tool, ToolResult};
 
-use crate::ops_config::OpsConfig;
+use crate::ops_config::{OpsConfig, TargetConfig};
 use crate::tools::discovery;
 
 /// A tool that scans a project's current state via SSH or Kubernetes and
@@ -17,6 +17,61 @@ pub struct MonitorTool {
 impl MonitorTool {
     pub fn new(config: OpsConfig) -> Self {
         Self { config }
+    }
+
+    fn resolve_targets(&self, name: &str) -> Result<Vec<&TargetConfig>, String> {
+        if name.trim().is_empty() {
+            return Err(format!(
+                "Unknown project/target '{name}'. {}",
+                self.available()
+            ));
+        }
+
+        if !self.config.projects.is_empty() {
+            if let Some(project) = self.config.projects.iter().find(|p| p.name == name) {
+                let targets: Vec<&TargetConfig> = project
+                    .environments
+                    .iter()
+                    .flat_map(|env| env.targets.iter())
+                    .collect();
+                if targets.is_empty() {
+                    return Err(format!("Project '{name}' has no targets configured"));
+                }
+                return Ok(targets);
+            }
+        }
+
+        match self.config.resolve_target(name) {
+            Ok(resolved) => Ok(vec![resolved.target]),
+            Err(_) => Err(format!(
+                "Unknown project/target '{name}'. {}",
+                self.available()
+            )),
+        }
+    }
+
+    fn available(&self) -> String {
+        let mut entries = Vec::new();
+        for project in &self.config.projects {
+            entries.push(project.name.clone());
+            for env in &project.environments {
+                for target in &env.targets {
+                    entries.push(format!("{}::{}::{}", project.name, env.name, target.name));
+                    entries.push(target.name.clone());
+                }
+            }
+        }
+        if let Some(targets) = self.config.targets.as_ref() {
+            entries.extend(targets.iter().map(|target| target.name.clone()));
+        }
+        entries.sort();
+        entries.dedup();
+
+        if entries.is_empty() {
+            "Available: none".to_string()
+        } else {
+            format!("Available: {}", entries.join(", "))
+        }
     }
 }
 
@@ -51,34 +106,35 @@ impl Tool for MonitorTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'project' parameter"))?;
 
-        let projects = self.config.targets.as_deref().unwrap_or_default();
-        let project = match projects.iter().find(|p| p.name == project_name) {
-            Some(p) => p,
-            None => {
-                let available: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+        let targets = match self.resolve_targets(project_name) {
+            Ok(targets) => targets,
+            Err(error) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!(
-                        "Unknown project '{project_name}'. Available: {}",
-                        available.join(", ")
-                    )),
+                    error: Some(error),
                 });
             }
         };
 
-        let snapshot = match crate::ops_cli::scan_target(&self.config, project).await {
-            Ok(snap) => snap,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Scan failed for '{project_name}': {e}")),
-                });
+        let mut output = String::new();
+        for target in targets {
+            let snapshot = match crate::ops_cli::scan_target(&self.config, target).await {
+                Ok(snap) => snap,
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Scan failed for '{}': {e}", target.name)),
+                    });
+                }
+            };
+            if !output.is_empty() {
+                output.push_str("\n\n");
             }
-        };
-
-        let output = discovery::snapshot_to_markdown(&snapshot);
+            output.push_str(&format!("## Target: {}\n\n", target.name));
+            output.push_str(&discovery::snapshot_to_markdown(&snapshot));
+        }
 
         Ok(ToolResult {
             success: true,
@@ -91,7 +147,7 @@ impl Tool for MonitorTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops_config::{ConnectionType, OpsClawAutonomy, TargetConfig};
+    use crate::ops_config::{ConnectionType, EnvironmentConfig, OpsClawAutonomy, ProjectConfig};
 
     fn project(name: &str, connection_type: ConnectionType) -> TargetConfig {
         TargetConfig {
@@ -117,6 +173,22 @@ mod tests {
             targets: Some(targets),
             ..OpsConfig::default()
         }
+    }
+
+    fn hierarchical_config(project_name: &str, target: TargetConfig) -> OpsConfig {
+        let mut config = OpsConfig::default();
+        config.projects.push(ProjectConfig {
+            name: project_name.to_string(),
+            description: None,
+            context_file: None,
+            owners: None,
+            environments: vec![EnvironmentConfig {
+                name: "prod".to_string(),
+                targets: vec![target],
+                ..EnvironmentConfig::default()
+            }],
+        });
+        config
     }
 
     #[test]
@@ -162,6 +234,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_project_lists_hierarchical_projects_and_targets() {
+        let tool = MonitorTool::new(hierarchical_config(
+            "sacra",
+            project("vega", ConnectionType::Ssh),
+        ));
+
+        let r = tool.execute(json!({"project": "ghost"})).await.unwrap();
+
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("ghost"));
+        assert!(err.contains("sacra"));
+        assert!(err.contains("sacra::prod::vega"));
+        assert!(err.contains("vega"));
+    }
+
+    #[tokio::test]
     async fn scan_failure_surfaces_structured_error() {
         // A Kubernetes project with an intentionally bad kubeconfig path —
         // scan_target will fail to build the client, and the tool must wrap
@@ -170,6 +259,20 @@ mod tests {
         p.kubeconfig = Some("/nonexistent/kubeconfig/path".into());
         let tool = MonitorTool::new(config_with(vec![p]));
         let r = tool.execute(json!({"project": "k8s"})).await.unwrap();
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("Scan failed"));
+        assert!(err.contains("k8s"));
+    }
+
+    #[tokio::test]
+    async fn hierarchical_project_name_resolves_to_project_target() {
+        let mut p = project("k8s", ConnectionType::Kubernetes);
+        p.kubeconfig = Some("/nonexistent/kubeconfig/path".into());
+        let tool = MonitorTool::new(hierarchical_config("sacra", p));
+
+        let r = tool.execute(json!({"project": "sacra"})).await.unwrap();
+
         assert!(!r.success);
         let err = r.error.unwrap();
         assert!(err.contains("Scan failed"));

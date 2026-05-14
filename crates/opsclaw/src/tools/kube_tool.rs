@@ -12,6 +12,7 @@ use kube::Client;
 use kube::api::{Api, ListParams, LogParams, Patch, PatchParams};
 use kube::config::KubeConfigOptions;
 use serde::Serialize;
+use serde_json::Value;
 use tracing::{debug, error};
 
 use super::discovery::{
@@ -65,8 +66,9 @@ impl KubeClient {
         };
         let config = match kubeconfig {
             Some(path) => {
-                let kubeconfig = kube::config::Kubeconfig::read_from(path)
-                    .context("failed to read kubeconfig")?;
+                let expanded = expand_home_kubeconfig_path(path);
+                let kubeconfig = kube::config::Kubeconfig::read_from(&expanded)
+                    .with_context(|| format!("failed to read kubeconfig {}", expanded.display()))?;
                 kube::Config::from_custom_kubeconfig(kubeconfig, &options)
                     .await
                     .context("failed to build kube config")?
@@ -257,6 +259,37 @@ impl KubeClient {
             .collect())
     }
 
+    /// Return a pretty JSON representation of a supported Kubernetes resource.
+    /// When `name` is absent, returns a list for that resource type.
+    pub async fn get_json(
+        &self,
+        resource: &str,
+        namespace: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<String> {
+        match resource {
+            "namespace" | "namespaces" => {
+                json_for(Api::<Namespace>::all(self.client.clone()), name).await
+            }
+            "node" | "nodes" => json_for(Api::<Node>::all(self.client.clone()), name).await,
+            "pod" | "pods" => {
+                let ns = namespace.context("pods JSON requires 'namespace'")?;
+                json_for(Api::<Pod>::namespaced(self.client.clone(), ns), name).await
+            }
+            "deployment" | "deployments" => {
+                let ns = namespace.context("deployments JSON requires 'namespace'")?;
+                json_for(Api::<Deployment>::namespaced(self.client.clone(), ns), name).await
+            }
+            "service" | "services" => {
+                let ns = namespace.context("services JSON requires 'namespace'")?;
+                json_for(Api::<Service>::namespaced(self.client.clone(), ns), name).await
+            }
+            other => anyhow::bail!(
+                "unsupported resource '{other}' (supported: namespace, node, pod, deployment, service)"
+            ),
+        }
+    }
+
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
@@ -311,6 +344,34 @@ impl KubeClient {
         let list = nodes.list(&ListParams::default()).await?;
         Ok(list.items.into_iter().map(node_to_snapshot).collect())
     }
+}
+
+async fn json_for<K>(api: Api<K>, name: Option<&str>) -> Result<String>
+where
+    K: kube::Resource
+        + Clone
+        + std::fmt::Debug
+        + serde::de::DeserializeOwned
+        + Serialize
+        + Send
+        + Sync
+        + 'static,
+    <K as kube::Resource>::DynamicType: Default,
+{
+    let value = match name {
+        Some(name) => serde_json::to_value(api.get(name).await?)?,
+        None => serde_json::to_value(api.list(&ListParams::default()).await?)?,
+    };
+    Ok(serde_json::to_string_pretty(&value)?)
+}
+
+fn expand_home_kubeconfig_path(path: &str) -> std::path::PathBuf {
+    let Some(rest) = path.strip_prefix("~/") else {
+        return std::path::PathBuf::from(path);
+    };
+    directories::UserDirs::new()
+        .map(|dirs| dirs.home_dir().join(rest))
+        .unwrap_or_else(|| std::path::PathBuf::from(path))
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +505,47 @@ fn node_to_snapshot(node: Node) -> K8sNode {
             })
         })
         .unwrap_or("Unknown");
+    let pressure = status
+        .conditions
+        .as_ref()
+        .map(|conds| {
+            conds
+                .iter()
+                .filter_map(|c| {
+                    if c.type_ != "Ready" && c.status == "True" {
+                        Some(c.type_.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "<none>".to_string());
+    let conditions = status
+        .conditions
+        .as_ref()
+        .map(|conditions| {
+            conditions
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}={}({}, {})",
+                        c.type_,
+                        c.status,
+                        c.reason.clone().unwrap_or_default(),
+                        c.last_transition_time
+                            .as_ref()
+                            .map(|t| t.0.to_rfc3339())
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "<none>".to_string());
 
     let labels = meta.labels.clone().unwrap_or_default();
     let roles: Vec<String> = labels
@@ -459,21 +561,71 @@ fn node_to_snapshot(node: Node) -> K8sNode {
         roles.join(",")
     };
 
-    let version = status
-        .node_info
-        .map(|ni| ni.kubelet_version)
-        .unwrap_or_default();
+    let spec = node.spec.unwrap_or_default();
+    let schedulable = if spec.unschedulable.unwrap_or(false) {
+        "cordoned"
+    } else {
+        "schedulable"
+    };
+    let taints = spec
+        .taints
+        .unwrap_or_default()
+        .iter()
+        .map(|taint| match taint.value.as_deref() {
+            Some(value) if !value.is_empty() => format!("{}={}:{}", taint.key, value, taint.effect),
+            _ => format!("{}:{}", taint.key, taint.effect),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let taints = if taints.is_empty() {
+        "<none>".to_string()
+    } else {
+        taints
+    };
+
+    let capacity = format_quantity_map(status.capacity.as_ref());
+    let allocatable = format_quantity_map(status.allocatable.as_ref());
+
+    let node_info = status.node_info.unwrap_or_default();
 
     K8sNode {
         name: meta.name.unwrap_or_default(),
         status: node_status.to_string(),
+        pressure,
+        schedulable: schedulable.to_string(),
         roles,
         age: meta
             .creation_timestamp
             .map(|t| t.0.to_rfc3339())
             .unwrap_or_default(),
-        version,
+        version: node_info.kubelet_version,
+        os_image: node_info.os_image,
+        kernel_version: node_info.kernel_version,
+        container_runtime: node_info.container_runtime_version,
+        architecture: node_info.architecture,
+        capacity,
+        allocatable,
+        taints,
+        conditions,
     }
+}
+
+fn format_quantity_map(
+    map: Option<
+        &std::collections::BTreeMap<
+            String,
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity,
+        >,
+    >,
+) -> String {
+    let Some(map) = map else {
+        return "<unknown>".to_string();
+    };
+    ["cpu", "memory", "pods", "ephemeral-storage"]
+        .into_iter()
+        .filter_map(|key| map.get(key).map(|quantity| format!("{key}={}", quantity.0)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -631,8 +783,53 @@ mod tests {
         let snap = node_to_snapshot(node);
         assert_eq!(snap.name, "node-1");
         assert_eq!(snap.status, "Ready");
+        assert_eq!(snap.pressure, "<none>");
         assert_eq!(snap.roles, "control-plane");
         assert_eq!(snap.version, "v1.31.0");
+    }
+
+    #[test]
+    fn node_to_snapshot_reports_pressure_conditions() {
+        use k8s_openapi::api::core::v1::{NodeCondition, NodeStatus};
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+        let node = Node {
+            metadata: ObjectMeta {
+                name: Some("node-pressure".into()),
+                ..Default::default()
+            },
+            spec: None,
+            status: Some(NodeStatus {
+                conditions: Some(vec![
+                    NodeCondition {
+                        type_: "Ready".into(),
+                        status: "True".into(),
+                        ..Default::default()
+                    },
+                    NodeCondition {
+                        type_: "MemoryPressure".into(),
+                        status: "True".into(),
+                        ..Default::default()
+                    },
+                    NodeCondition {
+                        type_: "DiskPressure".into(),
+                        status: "False".into(),
+                        ..Default::default()
+                    },
+                    NodeCondition {
+                        type_: "PIDPressure".into(),
+                        status: "True".into(),
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            }),
+        };
+
+        let snap = node_to_snapshot(node);
+
+        assert_eq!(snap.status, "Ready");
+        assert_eq!(snap.pressure, "MemoryPressure,PIDPressure");
     }
 }
 
@@ -647,7 +844,7 @@ use crate::ops_config::{ConnectionType, OpsClawAutonomy, OpsConfig, TargetConfig
 use crate::tools::approval_gate::mutating_action_block_reason;
 use crate::tools::ssh_tool::write_audit_entry;
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use zeroclaw::tools::traits::{Tool, ToolResult};
@@ -753,9 +950,14 @@ impl Tool for KubeTool {
                     "enum": [
                         "cluster_info", "list_namespaces", "list_pods",
                         "list_deployments", "list_services", "list_nodes",
-                        "logs", "events",
+                        "logs", "events", "get_json",
                         "restart_deployment", "scale_deployment", "delete_pod"
                     ]
+                },
+                "resource": {
+                    "type": "string",
+                    "description": "resource for get_json",
+                    "enum": ["namespace", "node", "pod", "deployment", "service"]
                 },
                 "namespace": {"type": "string"},
                 "name": {"type": "string", "description": "resource name"},
@@ -915,9 +1117,28 @@ impl KubeTool {
                 Ok(nodes) => {
                     let mut out = String::new();
                     writeln!(out, "count: {}", nodes.len()).ok();
-                    writeln!(out, "NAME\tSTATUS\tROLES\tVERSION").ok();
+                    writeln!(
+                        out,
+                        "NAME\tSTATUS\tPRESSURE\tSCHEDULABLE\tALLOCATABLE\tCAPACITY\tRUNTIME\tOS\tROLES\tVERSION"
+                    )
+                    .ok();
                     for n in nodes {
-                        writeln!(out, "{}\t{}\t{}\t{}", n.name, n.status, n.roles, n.version).ok();
+                        writeln!(
+                            out,
+                            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{} {}\t{}\t{}",
+                            n.name,
+                            n.status,
+                            n.pressure,
+                            n.schedulable,
+                            n.allocatable,
+                            n.capacity,
+                            n.container_runtime,
+                            n.os_image,
+                            n.architecture,
+                            n.roles,
+                            n.version
+                        )
+                        .ok();
                     }
                     Ok(kube_ok(out))
                 }
@@ -955,6 +1176,17 @@ impl KubeTool {
                 }
                 Err(e) => Ok(kube_err(format!("{e}"))),
             },
+            "get_json" => {
+                let resource = match args.get("resource").and_then(|v| v.as_str()) {
+                    Some(resource) => resource,
+                    None => return Ok(kube_err("get_json requires 'resource'")),
+                };
+                let name = args.get("name").and_then(|v| v.as_str());
+                match client.get_json(resource, namespace, name).await {
+                    Ok(json) => Ok(kube_ok(json)),
+                    Err(e) => Ok(kube_err(format!("{e}"))),
+                }
+            }
             "restart_deployment" => {
                 let name = match args.get("name").and_then(|v| v.as_str()) {
                     Some(n) if is_valid_k8s_name(n) => n,
@@ -1059,6 +1291,24 @@ mod kube_tool_tests {
         assert!(!tool.description().is_empty());
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["action"].is_object());
+    }
+
+    #[test]
+    fn expands_home_relative_kubeconfig_path() {
+        let expanded = expand_home_kubeconfig_path("~/.kube/config");
+        if let Some(home) = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) {
+            assert_eq!(expanded, home.join(".kube/config"));
+        } else {
+            assert_eq!(expanded, std::path::PathBuf::from("~/.kube/config"));
+        }
+    }
+
+    #[test]
+    fn leaves_non_home_kubeconfig_path_unchanged() {
+        assert_eq!(
+            expand_home_kubeconfig_path("/tmp/kubeconfig"),
+            std::path::PathBuf::from("/tmp/kubeconfig")
+        );
     }
 
     #[test]

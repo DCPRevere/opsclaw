@@ -252,7 +252,12 @@ pub fn step_kubernetes_target() -> Result<TargetResult> {
         .interact_text()?;
 
     let kubeconfig: String = Input::new()
-        .with_prompt("Path to kubeconfig (leave blank for default)")
+        .with_prompt("Path to kubeconfig (leave blank for default lookup: KUBECONFIG, ~/.kube/config, or in-cluster)")
+        .allow_empty(true)
+        .interact_text()?;
+
+    let context: String = Input::new()
+        .with_prompt("Kubernetes context (leave blank for kubeconfig current-context)")
         .allow_empty(true)
         .interact_text()?;
 
@@ -273,16 +278,20 @@ pub fn step_kubernetes_target() -> Result<TargetResult> {
         probes: None,
         data_sources: None,
         escalation: None,
-        kubeconfig: if kubeconfig.is_empty() {
+        kubeconfig: if kubeconfig.trim().is_empty() {
             None
         } else {
-            Some(kubeconfig)
+            Some(kubeconfig.trim().to_string())
         },
-        context: None,
-        namespace: if namespace.is_empty() {
+        context: if context.trim().is_empty() {
             None
         } else {
-            Some(namespace)
+            Some(context.trim().to_string())
+        },
+        namespace: if namespace.trim().is_empty() {
+            None
+        } else {
+            Some(namespace.trim().to_string())
         },
     };
 

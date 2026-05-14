@@ -273,6 +273,33 @@ fn configured_targets(config: &OpsConfig) -> Vec<&TargetConfig> {
         .collect()
 }
 
+fn configured_target_entries(config: &OpsConfig) -> Vec<(String, &TargetConfig)> {
+    if !config.projects.is_empty() {
+        return config
+            .projects
+            .iter()
+            .flat_map(|project| {
+                project.environments.iter().flat_map(move |environment| {
+                    environment.targets.iter().map(move |target| {
+                        (
+                            format!("{}::{}::{}", project.name, environment.name, target.name),
+                            target,
+                        )
+                    })
+                })
+            })
+            .collect();
+    }
+
+    config
+        .targets
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|target| (target.name.clone(), target))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // SkillForge
 // ---------------------------------------------------------------------------
@@ -321,6 +348,9 @@ pub fn handle_target_show(config: &OpsConfig, name: &str) -> Result<()> {
 
     if let Some(kube) = &project.kubeconfig {
         println!("  {} kubeconfig: {}", style("›").cyan(), kube);
+    }
+    if let Some(context) = &project.context {
+        println!("  {} context: {}", style("›").cyan(), context);
     }
     if let Some(ns) = &project.namespace {
         println!("  {} namespace: {}", style("›").cyan(), ns);
@@ -375,7 +405,7 @@ pub fn handle_target_show(config: &OpsConfig, name: &str) -> Result<()> {
 pub fn handle_target_list(config: &OpsConfig) -> Result<()> {
     use console::style;
 
-    let targets = configured_targets(config);
+    let targets = configured_target_entries(config);
     if targets.is_empty() {
         println!("No targets configured. Run 'opsclaw config target add' to add one.");
         return Ok(());
@@ -384,14 +414,14 @@ pub fn handle_target_list(config: &OpsConfig) -> Result<()> {
     println!();
     println!("  {}", style("Configured targets:").white().bold());
     println!();
-    for t in targets {
+    for (address, t) in targets {
         let kind = format!("{:?}", t.connection_type);
         let host = t.host.as_deref().unwrap_or("—");
         let autonomy = format!("{:?}", t.autonomy);
         println!(
             "  {} {}  [{}]  host: {}  autonomy: {}",
             style("›").cyan(),
-            style(&t.name).white().bold(),
+            style(address).white().bold(),
             style(&kind).dim(),
             host,
             autonomy,

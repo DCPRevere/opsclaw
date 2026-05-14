@@ -151,9 +151,19 @@ pub struct K8sService {
 pub struct K8sNode {
     pub name: String,
     pub status: String,
+    pub pressure: String,
+    pub schedulable: String,
     pub roles: String,
     pub age: String,
     pub version: String,
+    pub os_image: String,
+    pub kernel_version: String,
+    pub container_runtime: String,
+    pub architecture: String,
+    pub capacity: String,
+    pub allocatable: String,
+    pub taints: String,
+    pub conditions: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +541,35 @@ pub fn parse_k8s_nodes_json(raw: &str) -> Vec<K8sNode> {
                 })
                 .unwrap_or("Unknown");
             let labels = metadata["labels"].as_object();
+            let conditions = status["conditions"]
+                .as_array()
+                .map(|conditions| format_node_conditions_json(conditions))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "<none>".to_string());
+            let pressure = status["conditions"]
+                .as_array()
+                .map(|conds| {
+                    conds
+                        .iter()
+                        .filter_map(|c| {
+                            let type_ = c["type"].as_str()?;
+                            let condition_status = c["status"].as_str()?;
+                            if type_ != "Ready" && condition_status == "True" {
+                                Some(type_.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "<none>".to_string());
+            let schedulable = if item["spec"]["unschedulable"].as_bool().unwrap_or(false) {
+                "cordoned"
+            } else {
+                "schedulable"
+            };
             let roles = labels
                 .map(|l| {
                     l.keys()
@@ -543,9 +582,24 @@ pub fn parse_k8s_nodes_json(raw: &str) -> Vec<K8sNode> {
                 })
                 .unwrap_or_default();
             let version = status["nodeInfo"]["kubeletVersion"].as_str().unwrap_or("");
+            let os_image = status["nodeInfo"]["osImage"].as_str().unwrap_or("");
+            let kernel_version = status["nodeInfo"]["kernelVersion"].as_str().unwrap_or("");
+            let container_runtime = status["nodeInfo"]["containerRuntimeVersion"]
+                .as_str()
+                .unwrap_or("");
+            let architecture = status["nodeInfo"]["architecture"].as_str().unwrap_or("");
+            let capacity = format_quantity_map_json(&status["capacity"]);
+            let allocatable = format_quantity_map_json(&status["allocatable"]);
+            let taints = item["spec"]["taints"]
+                .as_array()
+                .map(|taints| format_taints_json(taints))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "<none>".to_string());
             K8sNode {
                 name: metadata["name"].as_str().unwrap_or("").to_string(),
                 status: node_status.to_string(),
+                pressure,
+                schedulable: schedulable.to_string(),
                 roles: if roles.is_empty() {
                     "<none>".to_string()
                 } else {
@@ -556,9 +610,62 @@ pub fn parse_k8s_nodes_json(raw: &str) -> Vec<K8sNode> {
                     .unwrap_or("")
                     .to_string(),
                 version: version.to_string(),
+                os_image: os_image.to_string(),
+                kernel_version: kernel_version.to_string(),
+                container_runtime: container_runtime.to_string(),
+                architecture: architecture.to_string(),
+                capacity,
+                allocatable,
+                taints,
+                conditions,
             }
         })
         .collect()
+}
+
+fn format_quantity_map_json(value: &serde_json::Value) -> String {
+    let Some(map) = value.as_object() else {
+        return "<unknown>".to_string();
+    };
+    ["cpu", "memory", "pods", "ephemeral-storage"]
+        .into_iter()
+        .filter_map(|key| {
+            map.get(key)
+                .and_then(|v| v.as_str())
+                .map(|v| format!("{key}={v}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_taints_json(taints: &[serde_json::Value]) -> String {
+    taints
+        .iter()
+        .filter_map(|taint| {
+            let key = taint["key"].as_str()?;
+            let effect = taint["effect"].as_str().unwrap_or("");
+            let value = taint["value"].as_str();
+            Some(match value {
+                Some(value) if !value.is_empty() => format!("{key}={value}:{effect}"),
+                _ => format!("{key}:{effect}"),
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_node_conditions_json(conditions: &[serde_json::Value]) -> String {
+    conditions
+        .iter()
+        .filter_map(|condition| {
+            let type_ = condition["type"].as_str()?;
+            let status = condition["status"].as_str().unwrap_or("Unknown");
+            let reason = condition["reason"].as_str().unwrap_or("");
+            let transition = condition["lastTransitionTime"].as_str().unwrap_or("");
+            Some(format!("{type_}={status}({reason}, {transition})"))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub async fn discover_kubernetes(runner: &dyn CommandRunner) -> Option<KubernetesInfo> {
@@ -805,18 +912,41 @@ pub fn snapshot_to_markdown(snap: &TargetSnapshot) -> String {
 
         if !k8s.nodes.is_empty() {
             md.push_str("### Nodes\n\n");
-            md.push_str("| Name | Status | Roles | Version |\n");
-            md.push_str("|---|---|---|---|\n");
+            md.push_str("| Name | Status | Pressure | Schedulable | Allocatable | Capacity | Runtime | OS | Roles | Version |\n");
+            md.push_str("|---|---|---|---|---|---|---|---|---|---|\n");
             for n in &k8s.nodes {
-                let highlight = if n.status == "Ready" {
+                let highlight = if n.status == "Ready" && n.pressure == "<none>" {
                     ""
                 } else {
                     " **UNHEALTHY**"
                 };
                 let _ = writeln!(
                     md,
-                    "| {} | {}{} | {} | {} |",
-                    n.name, n.status, highlight, n.roles, n.version
+                    "| {} | {}{} | {} | {} | {} | {} | {} | {} {} | {} | {} |",
+                    n.name,
+                    n.status,
+                    highlight,
+                    n.pressure,
+                    n.schedulable,
+                    n.allocatable,
+                    n.capacity,
+                    n.container_runtime,
+                    n.os_image,
+                    n.architecture,
+                    n.roles,
+                    n.version
+                );
+            }
+            md.push('\n');
+
+            md.push_str("#### Node Details\n\n");
+            md.push_str("| Name | Kernel | Taints | Conditions |\n");
+            md.push_str("|---|---|---|---|\n");
+            for n in &k8s.nodes {
+                let _ = writeln!(
+                    md,
+                    "| {} | {} | {} | {} |",
+                    n.name, n.kernel_version, n.taints, n.conditions
                 );
             }
             md.push('\n');

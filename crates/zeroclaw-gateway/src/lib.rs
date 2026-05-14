@@ -43,7 +43,7 @@ use axum::{
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -339,6 +339,19 @@ fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
         .and_then(parse_client_ip)
 }
 
+fn resolve_bind_addr(host: &str, port: u16) -> Result<SocketAddr> {
+    let lookup_host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+
+    (lookup_host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve gateway bind address {host}:{port}"))?
+        .next()
+        .with_context(|| format!("gateway bind address {host}:{port} resolved to no addresses"))
+}
+
 fn client_key_from_request(
     peer_addr: Option<SocketAddr>,
     headers: &HeaderMap,
@@ -469,7 +482,7 @@ pub async fn run_gateway(
         None
     };
 
-    let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    let addr = resolve_bind_addr(host, port)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual_port = listener.local_addr()?.port();
     let display_addr = format!("{host}:{actual_port}");
@@ -2689,6 +2702,18 @@ mod tests {
     #[test]
     fn security_timeout_default_is_30_seconds() {
         assert_eq!(REQUEST_TIMEOUT_SECS, 30);
+    }
+
+    #[test]
+    fn resolve_bind_addr_accepts_hostnames() {
+        let addr = resolve_bind_addr("localhost", 42617).expect("localhost should resolve");
+        assert_eq!(addr.port(), 42617);
+    }
+
+    #[test]
+    fn resolve_bind_addr_accepts_bracketed_ipv6_unspecified() {
+        let addr = resolve_bind_addr("[::]", 42617).expect("bracketed IPv6 should resolve");
+        assert_eq!(addr, SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 42617)));
     }
 
     #[test]

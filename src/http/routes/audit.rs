@@ -54,7 +54,11 @@ fn record_json(r: &crate::audit::AuditRecord) -> Value {
 }
 
 /// GET /api/audit?from_seq=&limit= — page through the chain in seq order.
-async fn range(State(state): State<AppState>, Authed(_ctx): Authed, Query(q): Query<RangeQuery>) -> Result<Json<Value>> {
+async fn range(
+    State(state): State<AppState>,
+    Authed(_ctx): Authed,
+    Query(q): Query<RangeQuery>,
+) -> Result<Json<Value>> {
     let records = state.repos.range(q.from_seq, q.limit).await?;
     Ok(Json(json!({ "records": records.iter().map(record_json).collect::<Vec<_>>() })))
 }

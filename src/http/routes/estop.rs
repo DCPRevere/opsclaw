@@ -28,8 +28,15 @@ pub struct EngageReq {
 
 /// POST /api/estop/engage — nothing executes anywhere after this returns
 /// (`policy::Policy::execute` re-reads the e-stop before every command).
-async fn engage(State(state): State<AppState>, Authed(ctx): Authed, Json(req): Json<EngageReq>) -> Result<Json<Value>> {
-    let reason = req.reason.filter(|r| !r.trim().is_empty()).unwrap_or_else(|| format!("engaged by operator {}", ctx.account_id));
+async fn engage(
+    State(state): State<AppState>,
+    Authed(ctx): Authed,
+    Json(req): Json<EngageReq>,
+) -> Result<Json<Value>> {
+    let reason = req
+        .reason
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| format!("engaged by operator {}", ctx.account_id));
     state.estop.engage(&reason).await?;
     tracing::warn!(operator = %ctx.account_id, reason = %reason, "e-stop engaged via HTTP");
     Ok(Json(json!({ "estop_engaged": true })))

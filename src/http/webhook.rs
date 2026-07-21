@@ -98,8 +98,14 @@ const REPLAY_WINDOW_SECS: i64 = 300;
 /// bytes the signature was computed over. Returns `Ok(())` when the
 /// signature is valid AND its timestamp is within [`REPLAY_WINDOW_SECS`]
 /// of `now`.
-pub fn verify_signature(secret: &[u8], header: &str, body: &[u8], now: chrono::DateTime<chrono::Utc>) -> Result<()> {
-    let (t, v1) = parse_sig(header).ok_or_else(|| Error::unauthorized("unparseable webhook signature"))?;
+pub fn verify_signature(
+    secret: &[u8],
+    header: &str,
+    body: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let (t, v1) =
+        parse_sig(header).ok_or_else(|| Error::unauthorized("unparseable webhook signature"))?;
     let signed_payload = [t.as_bytes(), b".", body].concat();
     let expected = hmac_sha256_hex(secret, &signed_payload);
     if !constant_time_eq(expected.as_bytes(), v1.as_bytes()) {

@@ -2,6 +2,7 @@
 //! `src/http/state.rs`, collapsed to opsclaw's single-tenant shape — no
 //! household-scoped fields).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -15,7 +16,7 @@ use crate::http::cli_auth::CliAuthCodes;
 use crate::http::ratelimit::RateLimiter;
 use crate::http::webhook::{IngestAlert, NoopIngest};
 use crate::policy::{EStop, ExecuteApproved, PolicyExecute};
-use crate::scheduler::SchedulerHandle;
+use crate::scheduler::{JobComposer, NoopComposer, SchedulerHandle};
 
 /// Shared application state. Every handler reaches persistence, policy, and
 /// cross-cutting auth/rate-limit state through this one `Clone` struct
@@ -24,6 +25,20 @@ use crate::scheduler::SchedulerHandle;
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
+    /// The path `config` was actually loaded from (or would be written to
+    /// if it doesn't exist yet) — what `routes::config_ui::update_config`
+    /// writes to. NOT derived from `config::default_dir()` internally by
+    /// any handler: it is passed in explicitly by the caller (`main.rs`
+    /// passes the exact path `Config::load` resolved; `AppState::fake`/
+    /// `fake_with_config` point it at a per-instance, non-existent tempdir
+    /// path so a fakes-mode config write can never reach a real machine's
+    /// `~/.opsclaw`). This field exists because of a real incident: an
+    /// earlier version of the config-write route resolved
+    /// `config::default_dir()` itself, and a test run overwrote the
+    /// developer's real `~/.opsclaw/config.toml`. Never reintroduce a
+    /// direct `default_dir()` call on the write path — always go through
+    /// this field.
+    pub config_path: PathBuf,
     /// Resolved once at boot (`Config::resolve_jwt_secret`) — never
     /// re-resolved per-request. A `SecretRef::Store` value would otherwise
     /// mean a disk read (through the encrypted store) on every single
@@ -57,6 +72,10 @@ pub struct AppState {
     /// webhook hands its parsed payload to. Defaults to a no-op until the
     /// agent-loop/incident-opening integration wires the real one.
     pub ingest: Arc<dyn IngestAlert>,
+    /// What a fired scan job composes with. Boot-safe default is the
+    /// NoopComposer; `boot::daemon_state` swaps in the real
+    /// `AgentJobComposer` once the dispatch deps exist.
+    pub composer: Arc<dyn JobComposer>,
     pub auth_limiter: Arc<RateLimiter>,
     /// Single-use replay guard for SSE stream tickets (gianna's
     /// `used_stream_tickets`) — token string -> expiry unix seconds, swept
@@ -76,8 +95,14 @@ impl AppState {
     /// `ingest`; `main.rs` wires the real engine once Wave 2/3 modules are
     /// available to depend on). `secret_store` resolves `config.http.
     /// jwt_secret` (or the fakes-mode dev default) exactly once here.
+    /// `config_path` must be the EXACT path the caller loaded (or intends
+    /// to create) `config` from/at — `main.rs` passes what `Config::load`
+    /// resolved; see the field's own doc comment for why this is a
+    /// constructor parameter rather than derived internally.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
+        config_path: PathBuf,
         secret_store: &SecretStore,
         repos: Arc<dyn AllRepos>,
         policy: Arc<dyn PolicyExecute>,
@@ -93,6 +118,7 @@ impl AppState {
         let web = Arc::new(WebHub::new());
         Ok(AppState {
             config: Arc::new(config),
+            config_path,
             jwt_secret,
             webhook_secret,
             repos,
@@ -103,6 +129,7 @@ impl AppState {
             web: web.clone(),
             channel: web,
             ingest: Arc::new(NoopIngest),
+            composer: Arc::new(NoopComposer),
             auth_limiter: Arc::new(RateLimiter::new(10, 60)),
             used_stream_tickets: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cli_auth_codes: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -140,8 +167,8 @@ impl AppState {
         // dependency needed): the e-stop file is never actually written
         // unless a test calls `estop.engage`, so collisions are harmless
         // even if two fake states happened to share a path.
-        let sentinel = std::env::temp_dir()
-            .join(format!("opsclaw-fake-estop-{}", uuid::Uuid::new_v4()));
+        let sentinel =
+            std::env::temp_dir().join(format!("opsclaw-fake-estop-{}", uuid::Uuid::new_v4()));
         let policy = Arc::new(crate::policy::Policy::new(
             Arc::new(config.clone()),
             std::collections::HashMap::new(),
@@ -154,8 +181,17 @@ impl AppState {
         let jwt_secret: Arc<str> = resolve_jwt_secret_without_store(&config).into();
         let web = Arc::new(WebHub::new());
         let repos: Arc<dyn AllRepos> = db;
+        // A per-instance, GUARANTEED-non-existent path under the system
+        // temp dir — never `config::default_dir()`. This is the fix for
+        // the incident in `config_path`'s doc comment: a fakes-mode config
+        // write must be physically incapable of reaching a real machine's
+        // `~/.opsclaw`, not just conventionally discouraged from it.
+        let config_path = std::env::temp_dir()
+            .join(format!("opsclaw-fake-config-{}", uuid::Uuid::new_v4()))
+            .join("config.toml");
         AppState {
             config: Arc::new(config),
+            config_path,
             jwt_secret,
             webhook_secret: None,
             repos,
@@ -166,6 +202,7 @@ impl AppState {
             web: web.clone(),
             channel: web,
             ingest: Arc::new(NoopIngest),
+            composer: Arc::new(NoopComposer),
             auth_limiter: Arc::new(RateLimiter::new(10, 60)),
             used_stream_tickets: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cli_auth_codes: Arc::new(Mutex::new(std::collections::HashMap::new())),

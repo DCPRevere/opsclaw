@@ -47,7 +47,12 @@ pub fn router() -> Router<AppState> {
 async fn create_invite(State(state): State<AppState>, Authed(ctx): Authed) -> Result<Json<Value>> {
     let code = cli_auth::challenge_for(&Uuid::new_v4().to_string())[..16].to_string();
     let now = Utc::now();
-    let invite = Invite { code: code.clone(), issued_by: ctx.account_id, created_at: now, expires_at: now + INVITE_TTL };
+    let invite = Invite {
+        code: code.clone(),
+        issued_by: ctx.account_id,
+        created_at: now,
+        expires_at: now + INVITE_TTL,
+    };
     state.repos.create_invite(&invite).await?;
     Ok(Json(json!({ "code": code, "expires_at": invite.expires_at })))
 }
@@ -69,7 +74,11 @@ async fn list_invites(State(state): State<AppState>, Authed(_ctx): Authed) -> Re
 }
 
 /// DELETE /api/invites/{code} — revoke one open invite.
-async fn revoke_invite(State(state): State<AppState>, Authed(_ctx): Authed, Path(code): Path<String>) -> Result<Json<Value>> {
+async fn revoke_invite(
+    State(state): State<AppState>,
+    Authed(_ctx): Authed,
+    Path(code): Path<String>,
+) -> Result<Json<Value>> {
     if !state.repos.revoke_invite(&code).await? {
         return Err(Error::NotFound("no such open invite".into()));
     }
@@ -87,7 +96,11 @@ pub struct JoinReq {
 /// POST /api/join — consume an invite code and create a new operator
 /// account. Unauthenticated by nature (the invite code IS the proof), so
 /// it shares the per-IP auth rate limit with login.
-async fn join(State(state): State<AppState>, headers: axum::http::HeaderMap, Json(req): Json<JoinReq>) -> Result<axum::response::Response> {
+async fn join(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<JoinReq>,
+) -> Result<axum::response::Response> {
     check_auth_rate(&state, &headers)?;
     if !crate::http::handlers::plausible_email(&req.email) {
         return Err(Error::validation("that doesn't look like a valid email address"));

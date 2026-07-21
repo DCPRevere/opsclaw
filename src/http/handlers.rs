@@ -66,7 +66,11 @@ pub(crate) async fn authenticate(state: &AppState, headers: &HeaderMap) -> Resul
     // a 401; any other repo failure propagates as-is (a 500), never
     // collapsed into "please sign in again" — that would hide an outage
     // behind a message that doesn't help and masks the real problem.
-    let account = state.repos.by_id(account_id).await?.ok_or_else(|| Error::unauthorized("unknown account"))?;
+    let account = state
+        .repos
+        .by_id(account_id)
+        .await?
+        .ok_or_else(|| Error::unauthorized("unknown account"))?;
     if claims.ver != account.token_version {
         return Err(Error::unauthorized("session revoked — please sign in again"));
     }
@@ -122,7 +126,11 @@ pub(crate) fn check_auth_rate(state: &AppState, headers: &HeaderMap) -> Result<(
 /// POST /api/login — email + password, returning a fresh session cookie. A
 /// uniform error for both unknown-email and wrong-password avoids leaking
 /// which emails are registered operators.
-pub async fn login(State(state): State<AppState>, headers: HeaderMap, axum::Json(req): axum::Json<LoginReq>) -> Result<Response> {
+pub async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<LoginReq>,
+) -> Result<Response> {
     check_auth_rate(&state, &headers)?;
     let invalid = || Error::unauthorized("invalid email or password");
     let account = state.repos.by_email(&req.email).await?.ok_or_else(invalid)?;
@@ -135,10 +143,17 @@ pub async fn login(State(state): State<AppState>, headers: HeaderMap, axum::Json
 /// Build the auth response: set the HttpOnly session cookie and return the
 /// (token-free) JSON body. The token lives only in the cookie, never in the
 /// body or JavaScript.
-pub(crate) fn session_response(state: &AppState, account_id: Uuid, token_version: i64) -> Result<Response> {
+pub(crate) fn session_response(
+    state: &AppState,
+    account_id: Uuid,
+    token_version: i64,
+) -> Result<Response> {
     let token = auth::issue_token(&state.jwt_secret, account_id, token_version)?;
     let cookie = auth::session_cookie(&token, state.config.http.cookies_secure);
-    Ok(([(axum::http::header::SET_COOKIE, cookie)], axum::Json(json!({ "account_id": account_id })))
+    Ok((
+        [(axum::http::header::SET_COOKIE, cookie)],
+        axum::Json(json!({ "account_id": account_id })),
+    )
         .into_response())
 }
 
@@ -154,7 +169,11 @@ pub async fn logout(State(state): State<AppState>) -> Response {
 /// GET /api/me — whose session this is (for the SPA to confirm sign-in
 /// state on load).
 pub async fn me(State(state): State<AppState>, Authed(ctx): Authed) -> Result<axum::Json<Value>> {
-    let account = state.repos.by_id(ctx.account_id).await?.ok_or_else(|| Error::unauthorized("unknown account"))?;
+    let account = state
+        .repos
+        .by_id(ctx.account_id)
+        .await?
+        .ok_or_else(|| Error::unauthorized("unknown account"))?;
     Ok(axum::Json(json!({
         "account_id": account.id,
         "email": account.email,

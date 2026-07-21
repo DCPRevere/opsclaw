@@ -63,14 +63,24 @@ fn default_limit() -> i64 {
 
 /// GET /api/incidents?include_closed=&limit= — newest first (repo's own
 /// ordering contract).
-async fn list(State(state): State<AppState>, Authed(_ctx): Authed, Query(q): Query<ListQuery>) -> Result<Json<Value>> {
+async fn list(
+    State(state): State<AppState>,
+    Authed(_ctx): Authed,
+    Query(q): Query<ListQuery>,
+) -> Result<Json<Value>> {
     let incidents = IncidentRepo::list(&*state.repos, q.include_closed, q.limit).await?;
     Ok(Json(json!({ "incidents": incidents.iter().map(incident_json).collect::<Vec<_>>() })))
 }
 
 /// GET /api/incidents/{id}
-async fn get_one(State(state): State<AppState>, Authed(_ctx): Authed, Path(id): Path<Uuid>) -> Result<Json<Value>> {
-    let incident = IncidentRepo::get(&*state.repos, id).await?.ok_or_else(|| Error::NotFound("incident".into()))?;
+async fn get_one(
+    State(state): State<AppState>,
+    Authed(_ctx): Authed,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
+    let incident = IncidentRepo::get(&*state.repos, id)
+        .await?
+        .ok_or_else(|| Error::NotFound("incident".into()))?;
     Ok(Json(incident_json(&incident)))
 }
 
@@ -78,8 +88,15 @@ async fn get_one(State(state): State<AppState>, Authed(_ctx): Authed, Path(id): 
 /// stored state before writing (never trust the client's idea of the
 /// current state — a stale UI retrying a click must not silently coerce an
 /// already-resolved incident back through a transition).
-async fn transition(state: &AppState, id: Uuid, to: IncidentState, by: Option<Uuid>) -> Result<crate::domain::Incident> {
-    let current = IncidentRepo::get(&*state.repos, id).await?.ok_or_else(|| Error::NotFound("incident".into()))?;
+async fn transition(
+    state: &AppState,
+    id: Uuid,
+    to: IncidentState,
+    by: Option<Uuid>,
+) -> Result<crate::domain::Incident> {
+    let current = IncidentRepo::get(&*state.repos, id)
+        .await?
+        .ok_or_else(|| Error::NotFound("incident".into()))?;
     lifecycle::validate_transition(current.state, to)?;
     state.repos.set_state(id, to, by).await?;
     IncidentRepo::get(&*state.repos, id).await?.ok_or_else(|| Error::NotFound("incident".into()))
@@ -87,14 +104,22 @@ async fn transition(state: &AppState, id: Uuid, to: IncidentState, by: Option<Uu
 
 /// POST /api/incidents/{id}/ack — acknowledge (Active -> Acknowledged).
 /// `acked_by` is the signed-in operator, never trusted from the body.
-async fn ack(State(state): State<AppState>, Authed(ctx): Authed, Path(id): Path<Uuid>) -> Result<Json<Value>> {
+async fn ack(
+    State(state): State<AppState>,
+    Authed(ctx): Authed,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
     let updated = transition(&state, id, IncidentState::Acknowledged, Some(ctx.account_id)).await?;
     Ok(Json(incident_json(&updated)))
 }
 
 /// POST /api/incidents/{id}/resolve — force-resolve (valid from both
 /// Active and Acknowledged per `lifecycle::validate_transition`).
-async fn resolve(State(state): State<AppState>, Authed(ctx): Authed, Path(id): Path<Uuid>) -> Result<Json<Value>> {
+async fn resolve(
+    State(state): State<AppState>,
+    Authed(ctx): Authed,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
     let updated = transition(&state, id, IncidentState::Resolved, Some(ctx.account_id)).await?;
     Ok(Json(incident_json(&updated)))
 }
@@ -104,8 +129,14 @@ async fn resolve(State(state): State<AppState>, Authed(ctx): Authed, Path(id): P
 /// the incident's target (the closest available linkage — there is no
 /// direct incident->audit-record foreign key by design, since not every
 /// audited command that touches a target is incident-caused).
-async fn postmortem(State(state): State<AppState>, Authed(_ctx): Authed, Path(id): Path<Uuid>) -> Result<Json<Value>> {
-    let incident = IncidentRepo::get(&*state.repos, id).await?.ok_or_else(|| Error::NotFound("incident".into()))?;
+async fn postmortem(
+    State(state): State<AppState>,
+    Authed(_ctx): Authed,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
+    let incident = IncidentRepo::get(&*state.repos, id)
+        .await?
+        .ok_or_else(|| Error::NotFound("incident".into()))?;
     let fq = incident.target.to_string();
     let mut records = Vec::new();
     let mut from_seq = 1i64;

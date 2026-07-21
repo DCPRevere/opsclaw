@@ -48,11 +48,23 @@ pub struct AuthorizeReq {
 
 /// POST /api/cli/authorize — the signed-in web operator approves a CLI
 /// login, minting a one-time code bound to the CLI's challenge.
-async fn authorize(State(state): State<AppState>, Authed(ctx): Authed, Json(req): Json<AuthorizeReq>) -> Result<Json<Value>> {
+async fn authorize(
+    State(state): State<AppState>,
+    Authed(ctx): Authed,
+    Json(req): Json<AuthorizeReq>,
+) -> Result<Json<Value>> {
     if req.challenge.len() != 64 || !req.challenge.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(Error::validation("challenge must be a sha256 hex digest"));
     }
-    let name = req.name.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("opsclaw-cli").chars().take(80).collect::<String>();
+    let name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("opsclaw-cli")
+        .chars()
+        .take(80)
+        .collect::<String>();
 
     let code = cli_auth::generate_code();
     {
@@ -60,7 +72,15 @@ async fn authorize(State(state): State<AppState>, Authed(ctx): Authed, Json(req)
         let now = Utc::now();
         // Sweep expired entries on insert (same stance as invites).
         codes.retain(|_, p| (now - p.issued_at).num_seconds() < cli_auth::CODE_TTL_SECS);
-        codes.insert(code.clone(), cli_auth::PendingCliAuth { account_id: ctx.account_id, challenge: req.challenge, name, issued_at: now });
+        codes.insert(
+            code.clone(),
+            cli_auth::PendingCliAuth {
+                account_id: ctx.account_id,
+                challenge: req.challenge,
+                name,
+                issued_at: now,
+            },
+        );
     }
     Ok(Json(json!({ "code": code })))
 }
@@ -74,7 +94,11 @@ pub struct ExchangeReq {
 /// POST /cli/v1/auth/token — exchange a one-time code + verifier for a
 /// long-lived CLI token. Unauthenticated by nature; shares the per-IP auth
 /// rate limit with login.
-async fn exchange(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<ExchangeReq>) -> Result<Json<Value>> {
+async fn exchange(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ExchangeReq>,
+) -> Result<Json<Value>> {
     handlers::check_auth_rate(&state, &headers)?;
     let denied = || Error::unauthorized("invalid or expired authorization code");
 
@@ -88,12 +112,22 @@ async fn exchange(State(state): State<AppState>, headers: HeaderMap, Json(req): 
         return Err(denied());
     }
 
-    let account = state.repos.by_id(pending.account_id).await?.ok_or_else(|| Error::unauthorized("unknown account"))?;
+    let account = state
+        .repos
+        .by_id(pending.account_id)
+        .await?
+        .ok_or_else(|| Error::unauthorized("unknown account"))?;
     let token = cli_auth::generate_token();
     state
         .repos
         .create_cli_token(
-            CliToken { id: Uuid::new_v4(), account: account.id, name: pending.name, created_at: Utc::now(), last_used_at: None },
+            CliToken {
+                id: Uuid::new_v4(),
+                account: account.id,
+                name: pending.name,
+                created_at: Utc::now(),
+                last_used_at: None,
+            },
             &cli_auth::token_hash(&token),
         )
         .await?;
@@ -119,7 +153,11 @@ async fn authenticate_cli(state: &AppState, headers: &HeaderMap) -> Result<(Uuid
 /// GET /cli/v1/me — whose session this is.
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>> {
     let (account_id, _token_id) = authenticate_cli(&state, &headers).await?;
-    let account = state.repos.by_id(account_id).await?.ok_or_else(|| Error::unauthorized("unknown account"))?;
+    let account = state
+        .repos
+        .by_id(account_id)
+        .await?
+        .ok_or_else(|| Error::unauthorized("unknown account"))?;
     Ok(Json(json!({ "account_id": account.id, "email": account.email })))
 }
 
@@ -162,7 +200,11 @@ async fn list_tokens(State(state): State<AppState>, Authed(ctx): Authed) -> Resu
 
 /// DELETE /api/cli-tokens/{id} — revoke one CLI session. 404 if it isn't
 /// this account's (never leaks another account's token existence).
-async fn revoke_token(State(state): State<AppState>, Authed(ctx): Authed, Path(id): Path<Uuid>) -> Result<Json<Value>> {
+async fn revoke_token(
+    State(state): State<AppState>,
+    Authed(ctx): Authed,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
     if !state.repos.revoke_cli_token(ctx.account_id, id).await? {
         return Err(Error::NotFound("no such CLI session".into()));
     }

@@ -18,7 +18,12 @@ pub async fn run(state: AppState) -> Result<()> {
     let shutdown = tokio_util::sync::CancellationToken::new();
     let tracker = tokio_util::task::TaskTracker::new();
 
-    crate::scheduler::spawn(scheduler_deps(&state), state.scheduler.clone(), shutdown.clone(), &tracker);
+    crate::scheduler::spawn(
+        scheduler_deps(&state),
+        state.scheduler.clone(),
+        shutdown.clone(),
+        &tracker,
+    );
 
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(&listen)
@@ -62,12 +67,12 @@ pub async fn run(state: AppState) -> Result<()> {
 /// `composer` is `scheduler::NoopComposer` until the agent-loop integration
 /// wires a real one (same "seam, not a hard dependency" reasoning as
 /// `http::webhook::IngestAlert` — see that module's doc comment).
-fn scheduler_deps(state: &AppState) -> crate::scheduler::SchedulerDeps {
+pub(crate) fn scheduler_deps(state: &AppState) -> crate::scheduler::SchedulerDeps {
     crate::scheduler::SchedulerDeps {
         jobs: state.repos.clone(),
         control: state.repos.clone(),
         channel: state.channel.clone(),
-        composer: std::sync::Arc::new(crate::scheduler::NoopComposer),
+        composer: state.composer.clone(),
         config: state.config.clone(),
     }
 }

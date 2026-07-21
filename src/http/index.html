@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>OpsClaw</title>
+<meta name="theme-color" content="#1a1d23" />
+<meta name="opsclaw-version" content="__VERSION__" />
+<link rel="manifest" href="/static/manifest.json" />
+<link rel="icon" href="/static/img/icon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="/static/img/icon-192.svg" />
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --border: #2a2f3a;
+    --text: #e6e8eb; --text-dim: #9aa1ad; --accent: #4f8cff; --danger: #e5484d;
+    --warn: #e5a84d; --ok: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: .75rem; padding: .6rem 1rem;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex: none;
+  }
+  header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  #estop-banner {
+    display: none; background: var(--danger); color: #fff; padding: .5rem 1rem;
+    font-weight: 600; text-align: center; flex: none;
+  }
+  #estop-banner.show { display: block; }
+  nav { display: flex; gap: .25rem; margin-left: auto; }
+  nav button {
+    background: none; border: 1px solid transparent; color: var(--text-dim);
+    padding: .4rem .7rem; border-radius: .4rem; cursor: pointer; font: inherit;
+  }
+  nav button.active { background: var(--panel-2); color: var(--text); border-color: var(--border); }
+  main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .view { display: none; flex: 1; overflow: auto; padding: 1rem; }
+  .view.active { display: flex; flex-direction: column; }
+  #auth-view.active { display: flex; align-items: center; justify-content: center; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: .6rem;
+    padding: 1rem; margin-bottom: .75rem;
+  }
+  .card h2, .card h3 { margin-top: 0; }
+  form.stack { display: flex; flex-direction: column; gap: .6rem; max-width: 360px; width: 100%; }
+  label { font-size: .85rem; color: var(--text-dim); }
+  input, select, textarea {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: .5rem .6rem; border-radius: .4rem; font: inherit; width: 100%;
+  }
+  button.primary {
+    background: var(--accent); color: #fff; border: none; padding: .55rem 1rem;
+    border-radius: .4rem; cursor: pointer; font: inherit; font-weight: 600;
+  }
+  button.primary:disabled { opacity: .6; cursor: default; }
+  button.danger { background: var(--danger); }
+  button.ghost { background: none; border: 1px solid var(--border); color: var(--text); padding: .4rem .7rem; border-radius: .4rem; cursor: pointer; font: inherit; }
+  .err { color: var(--danger); font-size: .85rem; min-height: 1.2em; }
+  .muted { color: var(--text-dim); font-size: .85rem; }
+  .badge { display: inline-block; padding: .1rem .5rem; border-radius: 1rem; font-size: .75rem; font-weight: 600; }
+  .badge.severity-critical, .badge.state-active { background: var(--danger); color: #fff; }
+  .badge.severity-warning { background: var(--warn); color: #1a1200; }
+  .badge.severity-info, .badge.state-acknowledged { background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--border); }
+  .badge.state-resolved, .badge.ok { background: var(--ok); color: #06210c; }
+  .list-item {
+    display: flex; align-items: center; gap: .6rem; padding: .6rem .2rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .list-item:last-child { border-bottom: none; }
+  .list-item .title { flex: 1; min-width: 0; }
+  .list-item .title strong { display: block; }
+  .list-item .title span { color: var(--text-dim); font-size: .85rem; }
+  #chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .5rem; margin-bottom: .6rem; }
+  .msg { max-width: 80%; padding: .5rem .7rem; border-radius: .6rem; background: var(--panel); border: 1px solid var(--border); }
+  .msg.out { align-self: flex-end; background: var(--accent); border-color: var(--accent); }
+  #chat-form { display: flex; gap: .5rem; flex: none; }
+  #chat-form input { flex: 1; }
+  .approval-actions, .incident-actions { display: flex; gap: .5rem; margin-top: .5rem; }
+  .cmd { font-family: ui-monospace, monospace; background: var(--panel-2); padding: .5rem; border-radius: .4rem; word-break: break-all; display: block; margin: .4rem 0; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--border); }
+  #reload-banner {
+    display: none; position: fixed; bottom: 0; left: 0; right: 0; background: var(--accent);
+    color: #fff; padding: .6rem 1rem; text-align: center; z-index: 10;
+  }
+  #reload-banner.show { display: flex; justify-content: center; gap: 1rem; align-items: center; }
+</style>
+</head>
+<body>
+
+<div id="estop-banner">E-STOP ENGAGED — nothing will execute. <button class="ghost" id="estop-resume-inline">Resume</button></div>
+
+<header>
+  <h1>OpsClaw</h1>
+  <nav id="nav" style="display:none">
+    <button data-view="chat" class="active">Chat</button>
+    <button data-view="incidents">Incidents</button>
+    <button data-view="approvals">Approvals</button>
+    <button data-view="status">Status</button>
+    <button data-view="settings">Settings</button>
+  </nav>
+  <button class="ghost" id="logout-btn" style="display:none;margin-left:.5rem">Sign out</button>
+</header>
+
+<main>
+
+  <section id="auth-view" class="view active">
+    <div class="card" style="max-width:360px;width:100%">
+      <h2 id="auth-title">Sign in</h2>
+      <form class="stack" id="login-form">
+        <div><label for="login-email">Email</label><input id="login-email" type="email" autocomplete="username" required /></div>
+        <div><label for="login-password">Password</label><input id="login-password" type="password" autocomplete="current-password" required /></div>
+        <div class="err" id="login-err"></div>
+        <button class="primary" type="submit">Sign in</button>
+      </form>
+      <p class="muted">Have an invite code? <a href="#" id="show-join">Join with a code</a></p>
+    </div>
+    <div class="card" id="join-card" style="max-width:360px;width:100%;display:none">
+      <h2>Join OpsClaw</h2>
+      <form class="stack" id="join-form">
+        <div><label for="join-code">Invite code</label><input id="join-code" required /></div>
+        <div><label for="join-name">Display name</label><input id="join-name" required /></div>
+        <div><label for="join-email">Email</label><input id="join-email" type="email" autocomplete="username" required /></div>
+        <div><label for="join-password">Password</label><input id="join-password" type="password" autocomplete="new-password" minlength="8" required /></div>
+        <div class="err" id="join-err"></div>
+        <button class="primary" type="submit">Create account</button>
+      </form>
+      <p class="muted"><a href="#" id="show-login">Back to sign in</a></p>
+    </div>
+  </section>
+
+  <section id="chat-view" class="view">
+    <div id="chat-log"></div>
+    <form id="chat-form">
+      <input id="chat-input" placeholder="Ask the agent…" autocomplete="off" />
+      <button class="primary" type="submit">Send</button>
+    </form>
+  </section>
+
+  <section id="incidents-view" class="view">
+    <div class="card">
+      <h2>Incidents</h2>
+      <label><input type="checkbox" id="incidents-include-closed" /> include closed</label>
+      <div id="incidents-list"></div>
+    </div>
+    <div class="card" id="incident-detail" style="display:none"></div>
+  </section>
+
+  <section id="approvals-view" class="view">
+    <div class="card">
+      <h2>Approval queue</h2>
+      <div id="approvals-list"></div>
+    </div>
+  </section>
+
+  <section id="status-view" class="view">
+    <div class="card" id="status-card"></div>
+  </section>
+
+  <section id="settings-view" class="view">
+    <div class="card">
+      <h2>Invites</h2>
+      <button class="primary" id="create-invite-btn">Generate invite code</button>
+      <div id="new-invite-code" class="muted"></div>
+      <div id="invites-list"></div>
+    </div>
+    <div class="card">
+      <h2>CLI sessions</h2>
+      <div id="cli-tokens-list"></div>
+    </div>
+    <div class="card">
+      <h2>Config</h2>
+      <p class="muted">The daemon's <code>config.toml</code> — hand-editable on disk; this view reads and writes the same file.</p>
+      <textarea id="config-toml" rows="16" style="font-family:ui-monospace,monospace"></textarea>
+      <div class="err" id="config-err"></div>
+      <div class="approval-actions">
+        <button class="primary" id="config-save-btn">Save</button>
+        <button class="ghost" id="config-reload-btn">Reload</button>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div id="reload-banner"><span>A new version is available.</span><button class="ghost" id="reload-btn">Reload</button></div>
+
+<script type="module" src="/app/main.js"></script>
+</body>
+</html>

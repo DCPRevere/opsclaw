@@ -383,3 +383,185 @@ async fn jwt_secret_never_appears_in_any_response_body() {
     let body = status.text().await.unwrap();
     assert!(!body.contains("sekrit-marker-value-do-not-leak"), "{body}");
 }
+
+// ---- embedded web UI ----
+//
+// The UI's own JS is not testable here (no browser in this test process —
+// `pages.rs`'s unit tests already cover the served bytes/headers
+// structurally). What IS tested: the app shell serves publicly with the
+// no-cache header this whole mechanism exists for, and every JSON route
+// the four surfaces' JS consumes round-trips correctly on the fakes spine
+// — the exact contract the UI is built against.
+
+#[tokio::test]
+async fn app_shell_serves_with_no_cache_and_no_auth_required() {
+    let state = AppState::fake();
+    let base = spawn_server(state).await;
+    // No cookie at all — the shell itself is a PUBLIC route (DESIGN §3:
+    // login lives inside it, so "the login page is public" holds without
+    // a separate server-side redirect; see routes/mod.rs's module doc).
+    let resp = reqwest::get(format!("{base}/app")).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.headers().get(reqwest::header::CACHE_CONTROL).unwrap(), "no-cache");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("login-form"), "shell must contain the login form");
+}
+
+#[tokio::test]
+async fn unauthed_api_request_against_a_ui_backed_route_is_401_not_the_shell() {
+    // The four surfaces' JS all call JSON routes under /api — an unauthed
+    // request to one of them must 401 (never silently serve HTML or an
+    // empty 200 the JS would misinterpret as "no data").
+    let state = AppState::fake();
+    let base = spawn_server(state).await;
+    for path in ["/api/me", "/api/incidents", "/api/approvals", "/api/status", "/api/invites", "/api/cli-tokens", "/api/config"] {
+        let resp = reqwest::get(format!("{base}{path}")).await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn app_modules_manifest_and_service_worker_serve_publicly() {
+    let state = AppState::fake();
+    let base = spawn_server(state).await;
+    for path in ["/app/main.js", "/app/api.js", "/app/state.js", "/app/auth.js", "/app/chat.js", "/app/incidents.js", "/app/approvals.js", "/app/status.js", "/app/settings.js", "/sw.js", "/static/manifest.json", "/static/img/icon.svg"] {
+        let resp = reqwest::get(format!("{base}{path}")).await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn incidents_and_approvals_backing_routes_round_trip_for_an_authed_operator() {
+    let state = AppState::fake();
+    seed_account(&state, "ui@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = SessionClient::new();
+    client.post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "ui@example.com", "password": "some-password-123" })).await;
+
+    let incidents: serde_json::Value = client.get(&format!("{base}/api/incidents")).await.json().await.unwrap();
+    assert!(incidents["incidents"].as_array().unwrap().is_empty());
+
+    let approvals: serde_json::Value = client.get(&format!("{base}/api/approvals")).await.json().await.unwrap();
+    assert!(approvals["approvals"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn settings_surface_backing_routes_round_trip_invites_and_cli_tokens() {
+    let state = AppState::fake();
+    seed_account(&state, "settings@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = SessionClient::new();
+    client
+        .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "settings@example.com", "password": "some-password-123" }))
+        .await;
+
+    let invite: serde_json::Value = client.post(&format!("{base}/api/invites")).await.json().await.unwrap();
+    assert!(invite["code"].as_str().is_some());
+
+    let invites: serde_json::Value = client.get(&format!("{base}/api/invites")).await.json().await.unwrap();
+    assert_eq!(invites["invites"].as_array().unwrap().len(), 1);
+
+    let tokens: serde_json::Value = client.get(&format!("{base}/api/cli-tokens")).await.json().await.unwrap();
+    assert!(tokens["tokens"].as_array().unwrap().is_empty());
+}
+
+/// `POST /api/config` writes to `config::default_dir()` (honours
+/// `$OPSCLAW_HOME`) — there is no `AppState`-level seam to redirect it
+/// (see `routes::config_ui::update_config`'s doc comment for why, and the
+/// contract gap flagged in this task's report). `$OPSCLAW_HOME` is a
+/// process-global env var, so any test that sets it to actually exercise
+/// the write path MUST serialize against every other such test — this
+/// mutex is that guard. Found the hard way: an earlier version of this
+/// test suite exercised the write path against the REAL, UNGUARDED
+/// `~/.opsclaw/config.toml` on the dev machine running the suite, which
+/// turned out to hold a legacy zeroclaw-fork config containing unencrypted
+/// SSH private keys — this guard plus an isolated tempdir is what stops
+/// that from ever happening again, in this suite or a future one that
+/// copies this pattern.
+static CONFIG_WRITE_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Point `$OPSCLAW_HOME` at a fresh, isolated tempdir for the duration of
+/// the returned guard (which also holds `CONFIG_WRITE_TEST_GUARD` so no
+/// other config-writing test can interleave). Restores the previous value
+/// (or removes the var if it was unset) on drop.
+struct IsolatedOpsclawHome {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl IsolatedOpsclawHome {
+    fn set() -> Self {
+        let lock = CONFIG_WRITE_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("OPSCLAW_HOME");
+        let dir = tempfile::tempdir().expect("tempdir for isolated OPSCLAW_HOME");
+        unsafe { std::env::set_var("OPSCLAW_HOME", dir.path()) };
+        IsolatedOpsclawHome { _lock: lock, _dir: dir, previous }
+    }
+}
+
+impl Drop for IsolatedOpsclawHome {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(v) => unsafe { std::env::set_var("OPSCLAW_HOME", v) },
+            None => unsafe { std::env::remove_var("OPSCLAW_HOME") },
+        }
+    }
+}
+
+#[tokio::test]
+async fn config_surface_round_trips_read_then_validated_write() {
+    let _home = IsolatedOpsclawHome::set();
+    let state = AppState::fake();
+    seed_account(&state, "config@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = SessionClient::new();
+    client
+        .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "config@example.com", "password": "some-password-123" }))
+        .await;
+
+    let got: serde_json::Value = client.get(&format!("{base}/api/config")).await.json().await.unwrap();
+    let toml_text = got["toml"].as_str().expect("toml field").to_string();
+    // The read-back text must itself parse as valid opsclaw config — the
+    // settings tab's textarea is seeded with exactly this.
+    let _: opsclaw::config::Config = toml::from_str(&toml_text).expect("round-tripped config must parse");
+
+    let saved = client.post_json(&format!("{base}/api/config"), &serde_json::json!({ "toml": toml_text })).await;
+    assert_eq!(saved.status(), reqwest::StatusCode::OK);
+    let saved_body: serde_json::Value = saved.json().await.unwrap();
+    assert_eq!(saved_body["ok"], true);
+
+    // The write actually landed at the isolated path — never the real
+    // machine's ~/.opsclaw regardless of what this assertion finds.
+    let written = std::fs::read_to_string(opsclaw::config::default_dir().join("config.toml")).unwrap();
+    assert_eq!(written, toml_text);
+}
+
+#[tokio::test]
+async fn config_surface_rejects_invalid_toml_and_invalid_config() {
+    let state = AppState::fake();
+    seed_account(&state, "badconfig@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = SessionClient::new();
+    client
+        .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "badconfig@example.com", "password": "some-password-123" }))
+        .await;
+
+    let garbage = client.post_json(&format!("{base}/api/config"), &serde_json::json!({ "toml": "not valid toml {{{" })).await;
+    assert_eq!(garbage.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Valid TOML, but a config `Config::validate()` itself would refuse
+    // (an unset http.jwt_secret while llm.api_key is set — see
+    // config::tests::live_mode_requires_jwt_secret) must be rejected too,
+    // not just a parse failure — the API route runs the SAME validation
+    // the daemon boots with.
+    let invalid_but_parseable = r#"
+[llm]
+api_key = "env:OPSCLAW_E2E_NEVER_SET"
+models = ["some/model"]
+[memory]
+hindsight_url = "http://localhost:1"
+"#;
+    let rejected = client.post_json(&format!("{base}/api/config"), &serde_json::json!({ "toml": invalid_but_parseable })).await;
+    assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
+}

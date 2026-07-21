@@ -31,7 +31,11 @@ const SIGNATURE_HEADER: &str = "x-opsclaw-signature";
 /// POST /webhooks/alertmanager — verify the HMAC, frame the payload as DATA
 /// (never instructions — brief invariant, see `http::webhook`'s module
 /// doc), and hand off to the ingestion seam.
-async fn alertmanager(State(state): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Result<Json<Value>> {
+async fn alertmanager(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>> {
     match &state.webhook_secret {
         None => {
             // No secret configured: accept only in fakes mode (no real
@@ -43,18 +47,22 @@ async fn alertmanager(State(state): State<AppState>, headers: HeaderMap, body: a
             }
         }
         Some(secret) => {
-            let sig = headers.get(SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).ok_or_else(|| {
-                tracing::warn!("alertmanager webhook rejected: missing signature header");
-                Error::unauthorized("missing webhook signature")
-            })?;
-            if let Err(e) = webhook::verify_signature(secret.as_bytes(), sig, &body, chrono::Utc::now()) {
+            let sig =
+                headers.get(SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).ok_or_else(|| {
+                    tracing::warn!("alertmanager webhook rejected: missing signature header");
+                    Error::unauthorized("missing webhook signature")
+                })?;
+            if let Err(e) =
+                webhook::verify_signature(secret.as_bytes(), sig, &body, chrono::Utc::now())
+            {
                 tracing::warn!("alertmanager webhook rejected: {e}");
                 return Err(e);
             }
         }
     }
 
-    let payload: Value = serde_json::from_slice(&body).map_err(|e| Error::validation(format!("malformed JSON body: {e}")))?;
+    let payload: Value = serde_json::from_slice(&body)
+        .map_err(|e| Error::validation(format!("malformed JSON body: {e}")))?;
     state.ingest.ingest("alertmanager", &payload).await?;
     Ok(Json(json!({ "ok": true })))
 }

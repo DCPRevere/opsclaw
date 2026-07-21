@@ -9,6 +9,7 @@
 pub mod approvals;
 pub mod audit;
 pub mod cli;
+pub mod config_ui;
 pub mod estop;
 pub mod incidents;
 pub mod invites;
@@ -20,13 +21,32 @@ use axum::routing::get;
 use tower_http::cors::CorsLayer;
 
 use super::handlers;
+use super::pages;
 use super::sse;
 use super::state::AppState;
 
 /// Build the application router from already-constructed state.
+///
+/// The embedded UI (DESIGN §3 + decision 9): the app shell (`/app`), its ES
+/// modules (`/app/{name}`), the service worker (`/sw.js`, root-scoped —
+/// see `pages::service_worker`'s doc comment), and the PWA manifest/icons
+/// (`/static/*`, `include_str!`'d — see `pages`, NOT `ServeDir`: a
+/// deployed daemon must be one self-contained binary with no `static/`
+/// directory to ship or mount alongside it) are all PUBLIC routes — same
+/// as gianna's `app_spa`. The shell contains no secrets; it renders a
+/// login form client-side when `GET /api/me` 401s, and every actual
+/// surface (chat/incidents/approvals/status/settings) is backed by
+/// `Authed`-gated JSON routes underneath it, so "login page public,
+/// everything else authed" holds at the API layer where it's enforced,
+/// not by gating the static shell itself.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/ready", get(ready))
+        .route("/app", get(pages::app_shell))
+        .route("/app/{name}", get(pages::app_module))
+        .route("/sw.js", get(pages::service_worker))
+        .route("/static/manifest.json", get(pages::manifest))
+        .route("/static/img/{name}", get(pages::icon))
         .route("/api/login", axum::routing::post(handlers::login))
         .route("/api/logout", axum::routing::post(handlers::logout))
         .route("/api/me", get(handlers::me))
@@ -40,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .merge(invites::router())
         .merge(cli::router())
         .merge(webhooks::router())
+        .merge(config_ui::router())
         .layer(cors_layer())
         // Operability: every request runs inside a `trace_id`-bearing span
         // so downstream logs for one turn share an id an operator can grep
@@ -59,7 +80,9 @@ pub fn router(state: AppState) -> Router {
                     )
                 })
                 .on_response(
-                    |res: &axum::http::Response<_>, latency: std::time::Duration, _: &tracing::Span| {
+                    |res: &axum::http::Response<_>,
+                     latency: std::time::Duration,
+                     _: &tracing::Span| {
                         let status = res.status().as_u16();
                         let latency_ms = latency.as_millis() as u64;
                         const SLOW_MS: u64 = 3000;
@@ -79,18 +102,29 @@ pub fn router(state: AppState) -> Router {
         // reachable (DESIGN §3: VPN/tunnel-only), but that's a network
         // property, not a browser one — a compromised operator laptop still
         // benefits from CSP/frame-deny/nosniff the same way any web app does.
-        .layer(security_header(axum::http::header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY))
-        .layer(security_header(axum::http::header::STRICT_TRANSPORT_SECURITY, "max-age=31536000; includeSubDomains"))
+        .layer(security_header(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            CONTENT_SECURITY_POLICY,
+        ))
+        .layer(security_header(
+            axum::http::header::STRICT_TRANSPORT_SECURITY,
+            "max-age=31536000; includeSubDomains",
+        ))
         .layer(security_header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
         .layer(security_header(axum::http::header::X_FRAME_OPTIONS, "DENY"))
-        .layer(security_header(axum::http::header::REFERRER_POLICY, "strict-origin-when-cross-origin"))
+        .layer(security_header(
+            axum::http::header::REFERRER_POLICY,
+            "strict-origin-when-cross-origin",
+        ))
         // Outermost: stamp `x-request-id` before the TraceLayer's span mints
         // its trace_id from it.
         .layer(axum::middleware::map_request(ensure_request_id))
         .with_state(state)
 }
 
-async fn ready(axum::extract::State(state): axum::extract::State<AppState>) -> axum::Json<serde_json::Value> {
+async fn ready(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({
         "ok": true,
         "version": crate::version(),
@@ -121,15 +155,27 @@ fn cors_layer() -> CorsLayer {
 /// marketing-site CSP, which allows PostHog/Stripe/Google hosts opsclaw has
 /// no analog for). `connect-src 'self'` covers the SSE stream and every
 /// `/api` call; no inline script exception is granted here (unlike
-/// gianna's `'unsafe-inline'`) — the embedded UI's `<script>` should use a
-/// nonce or external file once it's built, not inline handlers.
+/// gianna's `'unsafe-inline'`) — the shell (`src/http/index.html`) has no
+/// inline `<script>` bodies for exactly this reason (see `pages`'s test
+/// `app_shell_forbids_no_inline_script`). `worker-src`/`manifest-src` are
+/// explicit rather than left to fall back to `default-src`, since the PWA
+/// shell depends on both (the service worker and the installable
+/// manifest) and a browser that doesn't fall back silently would
+/// otherwise break install with no visible error.
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 script-src 'self'; style-src 'self' 'unsafe-inline'; \
 img-src 'self' data:; connect-src 'self'; \
+worker-src 'self'; manifest-src 'self'; \
 object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
 
-fn security_header(name: axum::http::HeaderName, value: &'static str) -> tower_http::set_header::SetResponseHeaderLayer<axum::http::HeaderValue> {
-    tower_http::set_header::SetResponseHeaderLayer::overriding(name, axum::http::HeaderValue::from_static(value))
+fn security_header(
+    name: axum::http::HeaderName,
+    value: &'static str,
+) -> tower_http::set_header::SetResponseHeaderLayer<axum::http::HeaderValue> {
+    tower_http::set_header::SetResponseHeaderLayer::overriding(
+        name,
+        axum::http::HeaderValue::from_static(value),
+    )
 }
 
 /// The correlation id for a request: honour an inbound `x-request-id`
@@ -144,8 +190,15 @@ pub(crate) fn trace_id_for(headers: &axum::http::HeaderMap) -> String {
 }
 
 /// Guarantee `x-request-id` on the request BEFORE the TraceLayer runs.
-async fn ensure_request_id(mut req: axum::http::Request<axum::body::Body>) -> axum::http::Request<axum::body::Body> {
-    let missing = req.headers().get("x-request-id").and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty()).is_none();
+async fn ensure_request_id(
+    mut req: axum::http::Request<axum::body::Body>,
+) -> axum::http::Request<axum::body::Body> {
+    let missing = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .is_none();
     if missing {
         let id = uuid::Uuid::new_v4().to_string();
         if let Ok(v) = axum::http::HeaderValue::from_str(&id) {

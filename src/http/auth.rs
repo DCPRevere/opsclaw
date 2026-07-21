@@ -123,10 +123,20 @@ pub struct ScopedClaims {
     pub bind: String,
 }
 
-pub fn issue_scoped(secret: &str, account_id: Uuid, purpose: &str, ttl: Duration, bind: &str) -> Result<String> {
+pub fn issue_scoped(
+    secret: &str,
+    account_id: Uuid,
+    purpose: &str,
+    ttl: Duration,
+    bind: &str,
+) -> Result<String> {
     let exp = (Utc::now() + ttl).timestamp() as usize;
-    let claims =
-        ScopedClaims { sub: account_id.to_string(), purpose: purpose.to_string(), exp, bind: bind.to_string() };
+    let claims = ScopedClaims {
+        sub: account_id.to_string(),
+        purpose: purpose.to_string(),
+        exp,
+        bind: bind.to_string(),
+    };
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes()))
         .map_err(|e| Error::other(format!("jwt encode: {e}")))
 }
@@ -137,7 +147,11 @@ pub fn verify_scoped(secret: &str, token: &str, expected_purpose: &str) -> Resul
 }
 
 /// Like [`verify_scoped`], also returning the token's state binding.
-pub fn verify_scoped_claims(secret: &str, token: &str, expected_purpose: &str) -> Result<(Uuid, String)> {
+pub fn verify_scoped_claims(
+    secret: &str,
+    token: &str,
+    expected_purpose: &str,
+) -> Result<(Uuid, String)> {
     let claims = decode::<ScopedClaims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
@@ -221,9 +235,16 @@ mod tests {
     #[test]
     fn scoped_token_round_trip_and_purpose_gate() {
         let a = Uuid::new_v4();
-        let tok =
-            issue_scoped("a-strong-enough-test-secret-123456", a, "sse", Duration::seconds(60), "bound").unwrap();
-        let (id, bind) = verify_scoped_claims("a-strong-enough-test-secret-123456", &tok, "sse").unwrap();
+        let tok = issue_scoped(
+            "a-strong-enough-test-secret-123456",
+            a,
+            "sse",
+            Duration::seconds(60),
+            "bound",
+        )
+        .unwrap();
+        let (id, bind) =
+            verify_scoped_claims("a-strong-enough-test-secret-123456", &tok, "sse").unwrap();
         assert_eq!(id, a);
         assert_eq!(bind, "bound");
 

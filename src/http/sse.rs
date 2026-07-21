@@ -37,9 +37,17 @@ const REPLAY_GUARD_MARGIN_SECS: i64 = 30;
 /// GET /api/stream-ticket — mint a 60-second single-purpose ticket for the
 /// SSE stream. Cookie-authed like any other operator action; the returned
 /// ticket is what the browser's `EventSource` then uses instead.
-pub async fn stream_ticket(State(state): State<AppState>, Authed(ctx): Authed) -> Result<axum::Json<Value>> {
-    let ticket =
-        auth::issue_scoped(&state.jwt_secret, ctx.account_id, TICKET_PURPOSE, Duration::seconds(TICKET_TTL_SECS), "")?;
+pub async fn stream_ticket(
+    State(state): State<AppState>,
+    Authed(ctx): Authed,
+) -> Result<axum::Json<Value>> {
+    let ticket = auth::issue_scoped(
+        &state.jwt_secret,
+        ctx.account_id,
+        TICKET_PURPOSE,
+        Duration::seconds(TICKET_TTL_SECS),
+        "",
+    )?;
     Ok(axum::Json(json!({ "ticket": ticket })))
 }
 
@@ -100,8 +108,14 @@ mod tests {
     async fn stream_rejects_a_token_of_the_wrong_purpose() {
         let state = AppState::fake();
         // A CLI-purposed token must not authenticate the SSE stream.
-        let tok =
-            auth::issue_scoped(&state.jwt_secret, uuid::Uuid::new_v4(), "cli", Duration::seconds(60), "").unwrap();
+        let tok = auth::issue_scoped(
+            &state.jwt_secret,
+            uuid::Uuid::new_v4(),
+            "cli",
+            Duration::seconds(60),
+            "",
+        )
+        .unwrap();
         let mut q = HashMap::new();
         q.insert("token".to_string(), tok);
         let err = stream(State(state), Query(q)).await.unwrap_err();
@@ -111,8 +125,14 @@ mod tests {
     #[tokio::test]
     async fn a_valid_ticket_is_single_use() {
         let state = AppState::fake();
-        let tok = auth::issue_scoped(&state.jwt_secret, uuid::Uuid::new_v4(), TICKET_PURPOSE, Duration::seconds(60), "")
-            .unwrap();
+        let tok = auth::issue_scoped(
+            &state.jwt_secret,
+            uuid::Uuid::new_v4(),
+            TICKET_PURPOSE,
+            Duration::seconds(60),
+            "",
+        )
+        .unwrap();
         let mut q = HashMap::new();
         q.insert("token".to_string(), tok.clone());
 

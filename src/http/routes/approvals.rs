@@ -81,13 +81,21 @@ async fn list_pending(State(state): State<AppState>, Authed(_ctx): Authed) -> Re
 /// narrower trait `approvals::approve` requires (never a `PolicyExecute`,
 /// which would re-enter the autonomy gate and queue a second approval —
 /// see that trait's doc comment).
-async fn approve(State(state): State<AppState>, Authed(ctx): Authed, Path(id): Path<Uuid>) -> Result<Json<Value>> {
+async fn approve(
+    State(state): State<AppState>,
+    Authed(ctx): Authed,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
     let outcome = approvals::approve(&*state.repos, &state.approved, id, ctx.account_id).await?;
     Ok(Json(outcome_json(&outcome)))
 }
 
 /// POST /api/approvals/{id}/deny
-async fn deny(State(state): State<AppState>, Authed(ctx): Authed, Path(id): Path<Uuid>) -> Result<Json<Value>> {
+async fn deny(
+    State(state): State<AppState>,
+    Authed(ctx): Authed,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
     let outcome = approvals::deny(&*state.repos, id, ctx.account_id).await?;
     Ok(Json(outcome_json(&outcome)))
 }

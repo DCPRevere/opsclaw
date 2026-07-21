@@ -189,15 +189,25 @@ systemd unit · docs. *Exit: brief §13 definition of done, item by item.*
   command-shaped audit records a human can replay — over SDK crates.
 - **web UI stack**: gianna-style no-build vanilla JS embedded via
   `include_str!`; revisit only if the four surfaces genuinely hurt.
-- **drop the transitive `rsa` dep** (RUSTSEC-2023-0071, currently ignored in
-  deny.toml): it arrives via jsonwebtoken and web-push-native→jwt-simple; we
-  use no RSA path (HS256 JWT + ES256 VAPID). Revisit lighter JWT/web-push
-  crates when the auth and push channels are built (Wave 4), then remove the
-  ignore.
-- **legacy config**: machines that ran the zeroclaw-fork opsclaw have an
-  old-schema `~/.opsclaw/config.toml` (`schema_version = 2`) — discovered on
-  this very machine at Wave 0 boot. `onboard`/`doctor` (Wave 4) must detect
-  it and offer migration or a clear refusal, not a raw parse error.
+- **transitive `rsa` dep** (RUSTSEC-2023-0071, ignored in deny.toml) —
+  SETTLED at the end of the build, revisited as planned once the auth and
+  push channels existed: it stays. It arrives via jsonwebtoken (already
+  trimmed to `default-features = false, features = ["rust_crypto"]`) and
+  web-push-native→jwt-simple→superboring; we use no RSA path (HS256 JWT +
+  ES256 VAPID), the advisory is a timing side-channel in RSA *decryption*
+  we never perform, and no upstream fix exists. The alternatives — replacing
+  both crates with hand-rolled HS256/ES256-JWS — trade real risk in
+  security-critical code for zero reduction in reachable attack surface.
+  The deny.toml ignore carries this rationale; re-check it if either crate
+  is ever swapped.
+- **legacy config** — SETTLED (clear refusal, not migration): machines that
+  ran the zeroclaw-fork opsclaw have an old-schema `~/.opsclaw/config.toml`
+  (`schema_version = 2`) — discovered on this very machine at Wave 0 boot.
+  `onboard` and `doctor` detect it via `cli::legacy` and print an actionable
+  refusal (move the file aside, onboard fresh) instead of a raw parse error.
+  No automatic migration: the old schema is a different product generation —
+  a speculative field-mapping would produce a config the operator never
+  reviewed, for a daemon whose autonomy semantics differ.
 
 Settled (DESIGN.md §7): LLM default is OpenRouter-only (evals run the same
 chain); remote CLI is the small set (chat, incidents, approve/deny, estop,

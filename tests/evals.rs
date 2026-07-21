@@ -93,7 +93,7 @@ fn shipped_provider() -> Arc<dyn LlmProvider> {
         .ok()
         .map(|s| s.split(',').map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect())
         .filter(|v: &Vec<String>| !v.is_empty())
-        .unwrap_or_else(|| vec!["deepseek/deepseek-v4-flash".to_string()]);
+        .unwrap_or_else(|| vec!["deepseek/deepseek-v4-pro".to_string()]);
 
     let cfg = LlmCfg {
         api_key: Some(SecretRef::env("OPSCLAW_EVAL_OPENROUTER_KEY")),
@@ -108,7 +108,7 @@ fn model_label() -> String {
         .ok()
         .and_then(|s| s.split(',').next().map(|m| m.trim().to_string()))
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "deepseek/deepseek-v4-flash".into())
+        .unwrap_or_else(|| "deepseek/deepseek-v4-pro".into())
 }
 
 // ---------------------------------------------------------------------------

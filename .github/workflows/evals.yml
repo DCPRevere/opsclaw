@@ -1,0 +1,120 @@
+name: Evals
+
+# The live-eval tier (tests/evals.rs, gated OPSCLAW_LIVE_EVALS=1) against the
+# SHIPPED provider chain — DESIGN.md §6: "scheduled not per-PR", because these
+# hit OpenRouter and spend tokens. Runs only when the OPENROUTER_API_KEY
+# secret is present; otherwise the job is a clean, loudly-noted no-op. On a
+# scheduled red run a single "Eval regression" issue is opened/updated
+# (manual dispatch stays quiet). Adapted from gianna's evals.yml — one suite
+# here instead of three, no judge model (OpsClaw's cases assert on structured
+# state, docs/EVALS.md).
+#
+# `just release` prefers this workflow's latest scheduled conclusion over the
+# local .opsclaw-eval-marker once the repo has a GitHub remote — see the
+# release recipe and docs/EVALS.md ("Release gating").
+on:
+  schedule:
+    # Mon/Wed/Fri, 05:23 UTC (odd minute to dodge the top-of-hour cron surge).
+    - cron: "23 5 * * 1,3,5"
+  workflow_dispatch:
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default read-only; the issue-filing step needs to write issues.
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Match ci.yml: opt actions into the Node 24 runtime ahead of the cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Secrets can't be read in a job-level `if:`, so hoist the key into a job
+    # env var and gate on it in the first step instead (documented pattern).
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - name: Skip if no OpenRouter key
+        id: gate
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::notice::OPENROUTER_API_KEY not set — skipping evals (add the secret to enable)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.gate.outputs.run == 'true'
+
+      # Load the single source of the eval model pin and surface it in the run
+      # output, so the run records exactly which models these evals measured.
+      - name: Load eval model pin
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -a; . ./.github/workflows/eval-models.env; set +a
+          echo "OPENROUTER_MODELS=$OPENROUTER_MODELS" >> "$GITHUB_ENV"
+          echo "::notice::evals pinned to OPENROUTER_MODELS=$OPENROUTER_MODELS"
+
+      - name: Install Rust toolchain
+        if: steps.gate.outputs.run == 'true'
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache cargo
+        if: steps.gate.outputs.run == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run live evals
+        id: evals
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        env:
+          OPSCLAW_LIVE_EVALS: "1"
+        run: cargo test --test evals -- --nocapture 2>&1 | tee evals.log
+
+      - name: Upload eval log
+        if: steps.gate.outputs.run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evals-log
+          path: evals.log
+          retention-days: 30
+
+      # File/refresh a single "Eval regression" issue on scheduled red runs
+      # only. Comments on the existing open issue rather than opening
+      # duplicates.
+      - name: File eval-regression issue
+        if: >-
+          steps.gate.outputs.run == 'true' && github.event_name == 'schedule' &&
+          steps.evals.outcome == 'failure'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Eval regression"
+          body="Scheduled eval run regressed (tests/evals.rs, OPENROUTER_MODELS=$OPENROUTER_MODELS).
+
+          Run: $RUN_URL"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$title in:title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
+
+      - name: Verdict
+        if: steps.gate.outputs.run == 'true'
+        env:
+          OUTCOME: ${{ steps.evals.outcome }}
+        run: |
+          echo "evals: $OUTCOME"
+          [ "$OUTCOME" = "success" ] || { echo "::error::Eval suite regressed."; exit 1; }

@@ -31,8 +31,11 @@ just evals
 
 Optionally pin the model(s) with `OPENROUTER_MODELS` (comma-separated,
 first entry is primary, the rest are OpenRouter's server-side fallback
-list — same semantics as `config.toml`'s `llm.models`). Unset falls back to
-`deepseek/deepseek-v4-flash`.
+list — same semantics as `config.toml`'s `llm.models`). When unset, `just
+evals` sources the checked-in pin `.github/workflows/eval-models.env` (the
+same pin the scheduled `evals.yml` workflow uses, so local and scheduled
+runs measure the same chain); a direct `cargo test --test evals` invocation
+with nothing set falls back to `deepseek/deepseek-v4-pro` in code.
 
 This **spends real API tokens** — each case is kept to one-few turns with a
 small tool registry specifically so a full run stays cheap, but it is not
@@ -98,28 +101,30 @@ model's own account of what it did.
 
 ## The release gate
 
-`just release <version>` refuses to tag unless `.opsclaw-eval-marker` (a
-timestamped, model-labeled line, written only by an all-green `tests/evals.rs`
-run) exists and is **fresh** — written within the last 7 days. A stale or
-missing marker fails the release with a clear message; `EVALS_OVERRIDE=1
-just release <version>` bypasses it for a genuine emergency (the bypass is
-echoed in the release output, so it's visible after the fact).
+`just release <version>` refuses to tag unless evals ran green recently.
+When the repo has a GitHub remote and `gh` can see the scheduled `evals.yml`
+workflow, its latest scheduled run's conclusion decides. Otherwise the gate
+falls back to `.opsclaw-eval-marker` (a timestamped, model-labeled line,
+written only by an all-green `tests/evals.rs` run), which must be **fresh** —
+written within the last 7 days. A red run, or a stale or missing marker,
+fails the release with a clear message; `EVALS_OVERRIDE=1 just release
+<version>` bypasses it for a genuine emergency (the bypass is echoed in the
+release output, so it's visible after the fact).
 
-### Why a local marker file, not a queried CI run
+### Two sources of evidence, strongest first
 
 Gianna's release gate reads a **GitHub Actions workflow run's conclusion**
-via `gh run list --workflow Evals` — that works there because gianna's
-`Evals` workflow runs on a `schedule` (Mon/Wed/Fri) in CI, so there's always
-a recent remote run to query. OpsClaw has `.github/workflows/ci.yml`
-(push/PR-triggered) but no scheduled `evals.yml` yet — there is no remote
-run for `gh` to see. A local, freshness-checked marker file is the honest
-equivalent until a scheduled workflow exists: it proves evals were run
-*recently* against the *current* code, by *someone*, rather than proving
-nothing at all. Once a scheduled `evals.yml` lands, the gate should switch
-to gianna's `gh run list` pattern (a scheduled run is stronger evidence than
-"a marker exists" — it can't be faked by running evals once and tagging
-releases for months against a stale pass) and this doc should be updated to
-match.
+via `gh run list --workflow Evals` — a scheduled run is stronger evidence
+than "a marker exists", because it can't be faked by running evals once and
+tagging releases for months against a stale pass. OpsClaw now has the same
+scheduled workflow (`.github/workflows/evals.yml`, Mon/Wed/Fri, pinned by
+`.github/workflows/eval-models.env`), and `just release` **prefers it**: when
+the repo has a GitHub remote and `gh` can see a scheduled `evals.yml` run,
+that run's conclusion decides the gate. Until the repo is pushed to GitHub
+(it is currently local-only — there is no remote run for `gh` to see), the
+gate falls back to the local, freshness-checked `.opsclaw-eval-marker`: the
+honest equivalent, proving evals were run *recently* against the *current*
+code, by *someone*, rather than proving nothing at all.
 
 ## Adding a case
 

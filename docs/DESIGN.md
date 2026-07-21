@@ -477,6 +477,21 @@ separate mock layer to drift.
   (gianna's web-tests lesson). Port the currently-failing scenarios as
   requirements: 4-way CPU saturation, log-file growth, restart-flapping
   cadence, and mount-scepticism (evaluate writable mounts, not every mount).
+- **The harness must be unable to harm the host — a hard requirement, not a
+  nicety.** A fault-injection scenario deliberately creates the fault it
+  tests, so its blast radius must be bounded to the sandbox by construction:
+  (a) every resource a scenario can exhaust is a **size-capped mount inside
+  the container** (`--tmpfs /data:size=200m`), never the container's writable
+  layer — otherwise `df` inside an overlay container reports the *host*
+  filesystem and a "fill 90% of the disk" fault fills 90% of the host (this
+  is not hypothetical: an un-capped `/data` wedged the dev machine at 100%
+  during this build); (b) scenario containers are **force-reaped on every
+  exit path** — normal, failure, and signal (a Ctrl-C'd parallel run is
+  exactly how a ballooned container survives to hoard host disk); (c)
+  fill-style scenarios carry an absolute ceiling and refuse rather than
+  allocate a fraction of an implausibly large "available" figure. The rule:
+  a scenario that escapes its sandbox is a harness bug of the same severity
+  as a missed detection.
 - **Tier 2, kubernetes**: scenarios run against a throwaway **k3d** cluster —
   opsclaw on the host with the k3d kubeconfig as its `kubernetes` target,
   i.e. the bastion-adjacent production shape in miniature. Fault classes:

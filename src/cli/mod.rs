@@ -25,6 +25,7 @@
 //! free of clap types themselves so they're callable (and testable) without
 //! going through argv parsing.
 
+pub mod account_cmd;
 pub mod audit_cmd;
 pub mod chat_repl;
 pub mod config_cmd;

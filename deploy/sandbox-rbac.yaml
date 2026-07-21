@@ -1,0 +1,118 @@
+# OpsClaw's cluster credential for the remundo SANDBOX cluster
+# (aks-sandbox-spoke05-clus01) — a dedicated ServiceAccount with a
+# READ-ONLY ClusterRole plus pod port-forward, and a long-lived token.
+#
+# Deliberate exclusions:
+#   - NO core-group `secrets` access: opsclaw must never be able to pull
+#     cluster credentials (ES passwords, TLS keys) into LLM context. The
+#     operator fetches the one ES password with their own credentials and
+#     hands it to `opsclaw-cli secret set` (the scrubber-registered path).
+#   - NO write verbs anywhere except pods/portforward create (needed to
+#     reach the in-cluster Elasticsearch from the daemon's machine).
+#
+# Apply once with your own (AAD) credentials:
+#   kubectl --context aks-sandbox-spoke05-clus01 apply -f deploy/sandbox-rbac.yaml
+# Then generate the daemon's kubeconfig:
+#   deploy/gen-opsclaw-kubeconfig.sh
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opsclaw
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opsclaw
+  namespace: opsclaw
+---
+# Long-lived token for the ServiceAccount (k8s >=1.24 no longer auto-mints
+# one). Acceptable for the disposable sandbox; rotate by deleting and
+# re-applying this Secret, then re-running the kubeconfig generator.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: opsclaw-token
+  namespace: opsclaw
+  annotations:
+    kubernetes.io/service-account.name: opsclaw
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: opsclaw-readonly
+rules:
+  # Core group — everything read-worthy EXCEPT secrets (see header).
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/status
+      - services
+      - endpoints
+      - events
+      - namespaces
+      - nodes
+      - configmaps
+      - persistentvolumeclaims
+      - persistentvolumes
+      - replicationcontrollers
+      - resourcequotas
+      - limitranges
+      - serviceaccounts
+    verbs: ["get", "list", "watch"]
+  # The one non-read permission: port-forward (in-cluster ES reachability).
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+  # Remundo's operators: ECK, ArgoCD, Dapr, APISIX — read the CRs so the
+  # agent can reason about them (an Elasticsearch CR's health/phase, an
+  # ArgoCD Application's sync state).
+  - apiGroups:
+      - elasticsearch.k8s.elastic.co
+      - kibana.k8s.elastic.co
+      - argoproj.io
+      - dapr.io
+      - apisix.apache.org
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: opsclaw-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: opsclaw-readonly
+subjects:
+  - kind: ServiceAccount
+    name: opsclaw
+    namespace: opsclaw

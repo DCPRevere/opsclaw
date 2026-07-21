@@ -165,6 +165,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Operator accounts: `create` bootstraps the FIRST web-UI login
+    /// (local, direct to the daemon's DB); later teammates join via the
+    /// web invite flow.
+    Account {
+        #[command(subcommand)]
+        command: AccountCommand,
+    },
     /// Encrypted secret store management. Values NEVER pass through argv
     /// (visible in ps/shell history) — `set` reads from a hidden prompt,
     /// piped stdin, --from-env, or --from-file.
@@ -197,6 +204,22 @@ enum Command {
         /// before opening the browser.
         #[arg(long)]
         tunnel: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    /// Create an operator account (password via hidden prompt or piped
+    /// stdin — never argv).
+    Create {
+        email: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List operator accounts.
+    List {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -771,6 +794,30 @@ async fn dispatch(
             opsclaw::cli::remote::status::whoami(&session, json).await?;
         }
 
+        Command::Account { command } => match command {
+            AccountCommand::Create { email, name } => {
+                let db = open_or_create_db(cfg_path, home).await?;
+                let display_name = name.unwrap_or_else(|| email.clone());
+                let password = read_password_confirmed()?;
+                let out = opsclaw::cli::account_cmd::create(&db, &email, &display_name, &password)
+                    .await?;
+                println!("created operator {} ({}) — sign in at the web UI", out.email, out.id);
+            }
+            AccountCommand::List { json } => {
+                let db = open_or_create_db(cfg_path, home).await?;
+                let accounts = opsclaw::cli::account_cmd::list(&db).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&accounts);
+                } else if accounts.is_empty() {
+                    println!("(no operator accounts — run `opsclaw-cli account create <email>`)");
+                } else {
+                    for a in accounts {
+                        println!("{}  {}  {}", a.id, a.email, a.display_name);
+                    }
+                }
+            }
+        },
+
         Command::Secret { command } => match command {
             SecretCommand::Set { name, from_env, from_file } => {
                 let value = read_secret_value(&name, from_env.as_deref(), from_file.as_deref())?;
@@ -884,6 +931,39 @@ fn read_secret_value(
     }
 }
 
+/// Hidden password prompt with confirmation (interactive), or piped stdin
+/// (scripted). Same never-argv rule as `read_secret_value`.
+fn read_password_confirmed() -> opsclaw::Result<String> {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        let first = rpassword::prompt_password("password (hidden): ")
+            .map_err(|e| opsclaw::Error::other(format!("could not read hidden input: {e}")))?;
+        let second = rpassword::prompt_password("confirm password: ")
+            .map_err(|e| opsclaw::Error::other(format!("could not read hidden input: {e}")))?;
+        if first != second {
+            return Err(opsclaw::Error::validation("passwords did not match"));
+        }
+        Ok(first)
+    } else {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+        Ok(buf.trim_end_matches(['\n', '\r']).to_string())
+    }
+}
+
+/// Like [`open_db`], but for commands that legitimately run BEFORE the
+/// daemon's first boot (account bootstrap): falls back to the default
+/// `<home>/opsclaw.sqlite3` when config declares no db_path, creating and
+/// migrating it — the same file `boot::daemon_state` would then reuse.
+async fn open_or_create_db(
+    cfg_path: &std::path::Path,
+    home: &std::path::Path,
+) -> opsclaw::Result<opsclaw::db::Db> {
+    let path = resolve_db_path(cfg_path)
+        .unwrap_or_else(|| home.join("opsclaw.sqlite3").display().to_string());
+    opsclaw::db::Db::connect(&path).await
+}
+
 /// Load the saved remote session or fail with the standard "please log in"
 /// message — the one place every `--remote`-capable arm below goes through,
 /// so that message (and its wording) never drifts between commands.
@@ -975,6 +1055,9 @@ mod tests {
             &["opsclaw-cli", "whoami"],
             &["opsclaw-cli", "ui"],
             &["opsclaw-cli", "ui", "--tunnel", "op@bastion.example.com"],
+            &["opsclaw-cli", "account", "create", "ops@example.com"],
+            &["opsclaw-cli", "account", "create", "ops@example.com", "--name", "dcp"],
+            &["opsclaw-cli", "account", "list", "--json"],
             &["opsclaw-cli", "secret", "set", "es-password"],
             &["opsclaw-cli", "secret", "set", "es-password", "--from-env", "ES_PASSWORD"],
             &["opsclaw-cli", "secret", "set", "ca-bundle", "--from-file", "/tmp/ca.crt"],

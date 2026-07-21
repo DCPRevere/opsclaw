@@ -1,0 +1,65 @@
+# OpsClaw against the remundo SANDBOX cluster, daemon running locally.
+# Copy to ~/.opsclaw/config.toml and fill the store-backed secrets first:
+#
+#   openssl rand -base64 48 | opsclaw-cli secret set jwt-secret
+#   printf '%s' "$HOME/.opsclaw/sandbox-kubeconfig.yaml" | opsclaw-cli secret set sandbox-kubeconfig
+#   kubectl -n logs get secret coresearch-es-elastic-user \
+#     -o jsonpath='{.data.elastic}' | base64 -d | opsclaw-cli secret set es-password
+#
+# OPENROUTER_API_KEY comes from the environment (systemd unit / shell).
+# The ES resource expects a port-forward on localhost:9201 (see
+# docs/SANDBOX.md step 4).
+
+[daemon]
+listen = "127.0.0.1:8484"
+db_path = "/home/ae/.opsclaw/opsclaw.sqlite3"
+tick_seconds = 300
+
+[http]
+jwt_secret = "store:jwt-secret"
+# Plain http on localhost — the browser won't send a Secure cookie.
+cookies_secure = false
+
+[llm]
+api_key = "env:OPENROUTER_API_KEY"
+models = ["deepseek/deepseek-v4-pro"]
+
+[memory]
+hindsight_url = "http://localhost:8888"
+
+[limits]
+max_actions_per_hour = 30
+# $5/day hard stop — enforced by the CostGuard; loud notice when reached.
+max_cost_per_day_cents = 500
+
+[[project]]
+name = "remundo"
+autonomy = "suggest"
+
+[[project.env]]
+name = "sandbox"
+# Pinned to observe for the first soak: the agent reads, notifies, and
+# dry-run-logs what it WOULD do. Promote to suggest after reviewing
+# `opsclaw-cli dry-run-log`.
+autonomy = "observe"
+expected_state = "running"
+
+[[project.env.target]]
+name = "cluster"
+kind = "kubernetes"
+# Value = PATH to the generated SA kubeconfig (deploy/gen-opsclaw-kubeconfig.sh).
+credential = "store:sandbox-kubeconfig"
+# Context name inside that kubeconfig.
+address = "opsclaw-sandbox"
+
+[[project.env.target.resource]]
+type = "elasticsearch"
+name = "logs"
+url = "https://localhost:9201"
+username = "elastic"
+credential = "store:es-password"
+# The ECK cert's SANs are the in-cluster DNS names; through a localhost
+# port-forward the hostname can never match, so verification is disabled
+# for THIS resource only (loudly warned at boot). The hop is
+# localhost-to-localhost; the tunnel itself is TLS to the apiserver.
+insecure_tls = true

@@ -251,6 +251,35 @@ pub struct TargetCfg {
     /// form (ssh `-J`). DESIGN §4 targets: remundo's estate sits behind an
     /// Azure Bastion jumpbox — this is how a target declares it.
     pub jump_host: Option<String>,
+    /// `kind = "ssh"` only: non-standard port. `None` lets the system `ssh`
+    /// binary fall back to its own default (22, or whatever `~/.ssh/config`
+    /// says for the host) — most real targets never need this, but a
+    /// jumpbox-fronted or containerized target (Tier 2's sim harness maps
+    /// sshd to a random host port) does. Ignored for every other kind.
+    pub ssh_port: Option<u16>,
+    /// `kind = "ssh"` only: remote login user. `None` lets the system `ssh`
+    /// binary fall back to its own default (the invoking user, or whatever
+    /// `~/.ssh/config` says for the host) — most real targets configure this
+    /// via `~/.ssh/config` or an ssh-agent identity that already implies the
+    /// right user, but a containerized target whose `authorized_keys` is
+    /// installed for a specific account (Tier 2's sim harness: `root`, since
+    /// that's the only account in the target image) needs to say so
+    /// explicitly rather than silently trying as whatever account is running
+    /// the daemon. Ignored for every other kind.
+    pub ssh_user: Option<String>,
+    /// `kind = "ssh"` only: path to a target-specific known_hosts file
+    /// (`targets::ssh::SshParams::known_hosts_path` doc: "per-target, not
+    /// the operator's personal file"). `None` uses ssh's own default lookup.
+    pub ssh_known_hosts_path: Option<PathBuf>,
+    /// `kind = "ssh"` only: overrides `StrictHostKeyChecking`. Defaults to
+    /// `None`, which `SshParams`/`SshExecutor` resolve to `"yes"` — the safe
+    /// default for every real target. The one legitimate reason to set this
+    /// is a throwaway target whose host key is genuinely new on every run
+    /// (Tier 2's sim harness: a fresh container, fresh host key, every
+    /// invocation) — `"accept-new"` there, never a blanket `"no"` default
+    /// baked into code (that would defeat known_hosts pinning for every
+    /// target, not just ephemeral ones).
+    pub ssh_strict_host_key_checking: Option<String>,
     #[serde(rename = "resource", default)]
     pub resources: Vec<ResourceCfg>,
 }

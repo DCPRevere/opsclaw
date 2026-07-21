@@ -4,16 +4,27 @@
 #
 # For each scenario: build the gVisor-sandboxed target image, start it under
 # --runtime=runsc, run the scenario's arm.sh, verify the injected fault is
-# REALLY present on the target (not just that arm.sh exited 0), run
-# disarm.sh, verify the target is clean again.
+# REALLY present on the target (not just that arm.sh exited 0), point a
+# REAL opsclaw daemon at it and assert detection (sim/daemon-harness.sh —
+# see its header comment for exactly what's checked deterministically vs.
+# gated behind the live-eval tier), run disarm.sh, verify the target is
+# clean again.
 #
-# What this script does NOT do yet: point a live opsclaw daemon at the
-# target and assert it detected the fault, called notify exactly once with
-# a payload matching expected.json, and stayed silent otherwise. That's the
-# actual acceptance test (brief §9) and needs the daemon's sim-runner
-# integration, which is a later wave. See the TODO below for exactly where
-# that wires in — everything up to and including "the fault is real" is
-# built and working today.
+# The daemon runs with a SCRUBBED, NON-INHERITED environment
+# (daemon-harness.sh's harness_daemon_env — DESIGN.md §6, gianna's
+# web-tests lesson: an ambient real credential must never flip the daemon
+# live mid-test) against a throwaway OPSCLAW_HOME + generated config.toml
+# declaring the sim container as an `ssh` target. Without OPSCLAW_LIVE_EVALS=1
+# + OPENROUTER_API_KEY (same two-var gate as tests/evals.rs/docs/EVALS.md),
+# the daemon boots with the clearly-logged FakeLlm (src/llm/fakes.rs — no
+# network calls, no tool calls ever), so full "was the fault detected"
+# assertions are impossible and are explicitly printed as SKIPPED rather
+# than silently passed; what deterministic mode still proves for real: the
+# daemon boots on the generated config, doctor's probe reaches the target
+# through the same executor construction path the daemon boots with, a scan
+# tick actually fires against the target, the daemon survives the armed
+# fault, and (for must_notify=false scenarios) silence holds even under a
+# tool-less fake — see daemon-harness.sh's harness_assert_detection doc.
 #
 # The target container runs with --cap-add=SYS_ADMIN (still under
 # --runtime=runsc): mount-scepticism needs to mount/remount a decoy tmpfs
@@ -26,6 +37,8 @@
 #   sim/run.sh cpu-single          # run one scenario
 #   sim/run.sh --parallel          # run every scenario in parallel isolated slots
 #   sim/run.sh --keep              # don't tear down containers on success (debugging)
+#
+# OPSCLAW_LIVE_EVALS=1 OPENROUTER_API_KEY=sk-or-... sim/run.sh   # full acceptance incl. live detection
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,9 +68,17 @@ if [ "${#SCENARIOS[@]}" -eq 0 ]; then
 fi
 
 sim_require_runsc
+for bin in jq cargo ssh; do
+    command -v "$bin" >/dev/null 2>&1 || sim_die "required tool '${bin}' not found on PATH"
+done
 
 sim_log "building target image ${SIM_IMAGE}"
 docker build -q -t "$SIM_IMAGE" -f "${SCRIPT_DIR}/target.Dockerfile" "${SCRIPT_DIR}/.." >/dev/null
+
+# Build the daemon binaries ONCE, up front (not per-scenario): every scenario
+# points a freshly-booted daemon at its own throwaway OPSCLAW_HOME, but they
+# all run the SAME opsclaw/opsclaw-cli build.
+harness_build_daemon_binaries "${SCRIPT_DIR}/.."
 
 # run_one_scenario NAME SLOT
 run_one_scenario() {
@@ -65,6 +86,9 @@ run_one_scenario() {
     local sdir="${SCRIPT_DIR}/scenarios/${scenario}"
     local name; name="$(sim_container_name "$slot")"
     local keydir; keydir="$(mktemp -d)"
+    local opsclaw_home; opsclaw_home="$(mktemp -d)"
+    local daemon_log="${opsclaw_home}/daemon.log"
+    local daemon_pid=""
     local rc=0
 
     # Teardown that fires on EVERY exit from this function — normal return, a
@@ -73,11 +97,20 @@ run_one_scenario() {
     # a surviving container was how a ballooned writable layer wedged the host
     # disk. --keep is the one explicit opt-out (leaves the container for
     # inspection); everything else always reaps. Registered per-slot so
-    # parallel scenarios each clean up their own.
+    # parallel scenarios each clean up their own. The daemon subprocess gets
+    # the exact same discipline (harness_stop_daemon: SIGTERM then bounded
+    # SIGKILL) — a leaked daemon process holding an open ssh connection to a
+    # container this trap is about to `docker rm -f` is just as much a stray
+    # process as a leaked container, even though it runs on the host, not in
+    # docker.
     SIM_ACTIVE_CONTAINERS="${SIM_ACTIVE_CONTAINERS:-} ${name}"
     _reap_this() {
+        [ -n "$daemon_pid" ] && harness_stop_daemon "$daemon_pid"
         if [ "${KEEP:-0}" -eq 0 ]; then
             docker rm -f "$name" >/dev/null 2>&1 || true
+            rm -rf "$opsclaw_home" 2>/dev/null || true
+        else
+            sim_log "[${scenario}] --keep set, leaving daemon home at ${opsclaw_home} (log: ${daemon_log})"
         fi
         rm -rf "$keydir" 2>/dev/null || true
     }
@@ -142,16 +175,53 @@ run_one_scenario() {
     fi
 
     if [ "$rc" -eq 0 ]; then
-        sim_log "[${scenario}] fault armed — TODO(daemon-integration): point a live opsclaw"
-        sim_log "  daemon at this target (ssh://root@127.0.0.1:<mapped-port>, key at"
-        sim_log "  ${keydir}/id_ed25519) with the scenario's fq_target from expected.json,"
-        sim_log "  wait for a detection tick, and assert:"
-        sim_log "    - opsclaw_notify called exactly once (or zero times if must_notify=false)"
-        sim_log "    - the notify payload's fault/severity match expected.json"
-        sim_log "    - no further notify calls fire while the fault stays armed (anti-spam)"
-        sim_log "  This is the actual brief §9 acceptance assertion; everything above and"
-        sim_log "  below it (image build, gVisor sandboxing, fault is verifiably real,"
-        sim_log "  clean disarm) is wired and passing today without a daemon."
+        sim_log "[${scenario}] fault armed — booting a real opsclaw daemon against it (brief §9)"
+
+        local fq_target ssh_host ssh_port project_name env_name target_name
+        fq_target="$(jq -r '.fq_target' "${sdir}/expected.json")"
+        project_name="$(printf '%s' "$fq_target" | cut -d: -f1)"
+        env_name="$(printf '%s' "$fq_target" | cut -d: -f3)"
+        target_name="${fq_target##*::}"
+        ssh_host="127.0.0.1"
+        ssh_port="$(docker port "$name" 22/tcp | tail -n1 | cut -d: -f2)"
+
+        if [ -z "$ssh_port" ]; then
+            sim_log "[${scenario}] FAIL: could not determine mapped ssh port for ${name}"
+            rc=1
+        else
+            local target_toml
+            # Exported (not just set) BEFORE calling harness_ssh_target_toml:
+            # that function runs in a command-substitution subshell, so an
+            # export made INSIDE it never reaches this shell — see its doc
+            # comment. This is what harness_daemon_env forwards into the
+            # scrubbed env -i invocation later (harness_run_daemon).
+            export OPSCLAW_HARNESS_SSH_IDENTITY="${keydir}/id_ed25519"
+            target_toml="$(harness_ssh_target_toml "$target_name" "$ssh_host" "$ssh_port")"
+            harness_write_config "$opsclaw_home" 5 "$project_name" "$env_name" "$target_toml"
+
+            if harness_live_gated; then
+                daemon_pid="$(harness_run_daemon_live "$opsclaw_home" "$daemon_log")"
+            else
+                daemon_pid="$(harness_run_daemon "$opsclaw_home" "$daemon_log")"
+            fi
+
+            if ! harness_wait_daemon_ready "$opsclaw_home" "$daemon_pid" 30; then
+                sim_log "[${scenario}] FAIL: daemon did not become ready — see ${daemon_log}"
+                rc=1
+            else
+                sim_log "[${scenario}] daemon up (pid ${daemon_pid}, home ${opsclaw_home}, log ${daemon_log})"
+
+                local must_notify severity
+                must_notify="$(jq -r '.must_notify' "${sdir}/expected.json")"
+                severity="$(jq -r '.severity' "${sdir}/expected.json")"
+
+                if ! harness_assert_detection "$opsclaw_home" "$daemon_log" "$fq_target" \
+                        "${fq_target}-scan" "$must_notify" "$severity"; then
+                    sim_log "[${scenario}] FAIL: daemon-detection assertion failed"
+                    rc=1
+                fi
+            fi
+        fi
     fi
 
     sim_log "[${scenario}] disarming"
@@ -208,7 +278,11 @@ else
 fi
 
 if [ "$overall_rc" -eq 0 ]; then
-    sim_log "all scenarios passed (fault-injection layer only — see TODO above for daemon assertion)"
+    if harness_live_gated; then
+        sim_log "all scenarios passed — including live-tier detection (OPSCLAW_LIVE_EVALS=1)"
+    else
+        sim_log "all scenarios passed (deterministic tier only — see 'SKIPPED live-tier' lines above; set OPSCLAW_LIVE_EVALS=1 + OPENROUTER_API_KEY for full brief §9 detection assertions)"
+    fi
 else
     sim_log "one or more scenarios FAILED"
 fi

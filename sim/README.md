@@ -24,8 +24,10 @@ Each scenario in `sim/scenarios/<name>/` is three files:
   `sim/expected.schema.json`.
 
 `sim/run.sh` is the orchestrator: builds the image once, then per scenario —
-start container → wait for sshd → arm → (today: stop here and report; see
-TODO below) → disarm → verify clean → tear down. Idempotent; safe to re-run.
+start container → wait for sshd → arm → boot a real `opsclaw` daemon against
+the target and assert detection (`sim/daemon-harness.sh`, shared with
+`k3d/run.sh` — see "What's wired today" below) → disarm → verify clean →
+tear down. Idempotent; safe to re-run.
 
 ## Running
 
@@ -47,31 +49,53 @@ mode) so parallel scenario runs never collide. Each run generates a fresh
 ephemeral ed25519 keypair per scenario invocation — no key is baked into the
 image.
 
-## What's wired today vs. TODO
+## What's wired today
 
-**Working today:** image build, gVisor-sandboxed target boot, ssh
+**Fault injection layer:** image build, gVisor-sandboxed target boot, ssh
 reachability, every scenario's arm/disarm round-trip with real verification
 that the fault is present and then absent (real CPU load, real memory
 pressure, real full mount, a really-SIGSTOPped process, real restart churn,
 a real decoy tmpfs that fools naive `df` reading).
 
-**TODO (later wave — daemon sim-runner integration):** `sim/run.sh` does not
-yet point a live `opsclaw` daemon at the armed target and assert detection.
-The wiring point is marked inline in `sim/run.sh` with `TODO(daemon-integration)`,
-immediately after arm and before disarm. Once the daemon has a way to load a
-target pointed at `ssh://root@127.0.0.1:<mapped-port>` with the ephemeral key
-sim/run.sh already generates, that TODO block becomes:
+**Daemon-detection assertion (brief §9, `sim/daemon-harness.sh`):**
+`sim/run.sh` boots a REAL `opsclaw` daemon (the same binary `main.rs`
+builds) as a subprocess, under a **scrubbed, non-inherited environment**
+(DESIGN.md §6 — `env -i` plus an explicit allowlist, so an ambient real
+credential on the host can never flip the daemon into live mode mid-test),
+against a throwaway `OPSCLAW_HOME` and a generated `config.toml` declaring
+the sim container as an `ssh` target (`ssh://root@127.0.0.1:<mapped-port>`,
+the ephemeral key `sim/run.sh` generates, `ssh_strict_host_key_checking =
+"accept-new"` since the container's host key is fresh every run). Two tiers:
 
-1. Configure/point the daemon at the scenario's `fq_target`.
-2. Wait for (or force) a scan tick.
-3. Assert `opsclaw_notify` was called exactly once when `expected.json.must_notify`
-   is true (payload's `fault`/`severity` matching), or zero times when false.
-4. Assert no further notify calls fire while the fault stays armed
-   (anti-spam, brief §6).
+- **Deterministic (always runs, no LLM/network):** the daemon boots on the
+  generated config; `doctor`'s probe reaches the target through the same
+  executor construction path the daemon boots with; the seeded scan job
+  actually fires a tick against the target; the daemon survives the armed
+  fault; for `must_notify=false` scenarios, the incidents table stays at
+  zero rows (necessary but not sufficient — the fakes-mode LLM,
+  `src/llm/fakes.rs` `FakeLlm`, never calls any tool, so this can't
+  distinguish "correctly judged healthy" from "incapable of ever
+  alerting"). Every assertion the deterministic tier cannot make (the actual
+  "was the fault detected and named correctly" claim for `must_notify=true`
+  scenarios) is printed as an explicit `SKIPPED` line, never silently
+  omitted.
+- **Live (`OPSCLAW_LIVE_EVALS=1` + `OPENROUTER_API_KEY`, same gate as
+  `tests/evals.rs`/`docs/EVALS.md`):** the shipped provider chain runs for
+  real; asserts exactly one incident (or zero, for `must_notify=false`)
+  across two observed scan ticks — the anti-spam claim — with severity
+  matching `expected.json`. "Correctly named" (`fault_class`) is NOT checked
+  even in live mode: `opsclaw_notify` (`src/tools/notify.rs`) persists only
+  a SHA-256 fingerprint of `(target, fault_class, resource)`, never
+  `fault_class` itself, so a subprocess daemon has no honest way to read it
+  back — `tests/evals.rs`'s `notify_discipline`/`injection_resistance` cases
+  are where that exact check happens, via in-process capture of the tool
+  call's raw args.
 
-Run the daemon in that future integration with a **scrubbed, non-inherited
-environment** (DESIGN.md §6) so an ambient real credential on the test host
-can never flip the daemon into live mode mid-test.
+Run it live:
+
+```sh
+OPSCLAW_LIVE_EVALS=1 OPENROUTER_API_KEY=sk-or-... sim/run.sh
+```
 
 ## Adding a scenario
 

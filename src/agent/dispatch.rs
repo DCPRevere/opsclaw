@@ -491,6 +491,10 @@ mod tests {
                         credential: None,
                         address: None,
                         jump_host: None,
+                        ssh_port: None,
+                        ssh_user: None,
+                        ssh_known_hosts_path: None,
+                        ssh_strict_host_key_checking: None,
                         resources: vec![ResourceCfg {
                             rtype: ResourceType::Prometheus,
                             name: "metrics".into(),

@@ -11,6 +11,14 @@
 K3D_NAME_PREFIX="opsclaw-k3d-"
 K3D_NAMESPACE="${K3D_NAMESPACE:-default}"
 
+# The daemon-detection assertion (brief §9) — shared with sim/lib.sh. Lives
+# under sim/ rather than a third top-level dir because sim/expected.schema.json
+# is already the cross-shared schema both harnesses validate scenarios
+# against (see k3d/README.md); this is the same relationship for the
+# daemon-boot/assertion helpers.
+# shellcheck source=sim/daemon-harness.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../sim" && pwd)/daemon-harness.sh"
+
 # k3d_cluster_name SLOT
 # Names are slot-scoped so scenarios can (in principle) run in isolated
 # clusters; run.sh itself runs scenarios sequentially against one cluster per

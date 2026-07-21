@@ -6,6 +6,11 @@
 SIM_IMAGE="${SIM_IMAGE:-opsclaw-sim-target:local}"
 SIM_RUNTIME="${SIM_RUNTIME:-runsc}"
 
+# The daemon-detection assertion (brief §9) — shared with k3d/lib.sh, see
+# that file for why it lives under sim/.
+# shellcheck source=sim/daemon-harness.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/daemon-harness.sh"
+
 # sim_container_name SLOT
 # Names are slot-scoped so scenarios can run in parallel isolated slots
 # (brief §9: "runnable individually or in parallel isolated slots").

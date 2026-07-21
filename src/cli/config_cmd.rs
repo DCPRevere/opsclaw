@@ -149,6 +149,10 @@ fn wizard_target(p: &mut dyn Prompter) -> Result<TargetCfg> {
         credential,
         address,
         jump_host,
+        ssh_port: None,
+        ssh_user: None,
+        ssh_known_hosts_path: None,
+        ssh_strict_host_key_checking: None,
         resources: Vec::<ResourceCfg>::new(),
     })
 }

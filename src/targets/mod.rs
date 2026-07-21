@@ -5,6 +5,16 @@
 //! gates, and audits around it. Executor implementations land in Wave 2
 //! (local → ssh (jump-host capable) → kubernetes → cloud/azure).
 
+pub mod kubernetes;
+pub mod local;
+pub mod ssh;
+pub mod stub;
+
+pub use kubernetes::{KubernetesExecutor, KubernetesParams};
+pub use local::LocalExecutor;
+pub use ssh::{SshExecutor, SshParams};
+pub use stub::NotImplementedExecutor;
+
 use std::time::Duration;
 
 use async_trait::async_trait;

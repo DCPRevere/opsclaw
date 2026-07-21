@@ -5,6 +5,13 @@
 //! Environment is policy, Target is connection; policy attributes inherit
 //! down the tree, credentials never do.
 
+pub mod job;
+
+pub use job::{
+    Job, Payload, ROUTINE_GAP_MINUTES_MIN, ROUTINE_INTERVAL_MINUTES_MAX,
+    ROUTINES_PER_HOUSEHOLD_MAX, Schedule, SystemRoutine, Trigger,
+};
+
 use std::fmt;
 use std::str::FromStr;
 

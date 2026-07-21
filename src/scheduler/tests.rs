@@ -405,6 +405,7 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
                 expected_state: None,
                 credential: Some(crate::config::SecretRef::env("X")),
                 address: None,
+                jump_host: None,
                 resources: vec![],
             }],
         }],

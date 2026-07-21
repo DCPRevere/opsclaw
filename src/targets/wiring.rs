@@ -53,7 +53,7 @@ pub fn executor_for_target(
                 port: None,
                 user: None,
                 identity_file,
-                jump_host: None,
+                jump_host: target.jump_host.clone(),
                 known_hosts_path: None,
                 strict_host_key_checking: None,
             })))

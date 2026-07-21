@@ -459,6 +459,7 @@ mod tests {
                         expected_state: None,
                         credential: None,
                         address: None,
+                        jump_host: None,
                         resources: vec![ResourceCfg {
                             rtype: ResourceType::Prometheus,
                             name: "metrics".into(),

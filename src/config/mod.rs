@@ -244,8 +244,13 @@ pub struct TargetCfg {
     /// Connection credential (ssh key, kubeconfig, cloud credential) by
     /// reference. Required for every kind except `local`. Never inherited.
     pub credential: Option<SecretRef>,
-    /// Connection address: host for ssh, context hint for kubernetes, etc.
+    /// Connection address: host for ssh (`[user@]host` — ssh accepts the
+    /// user inline), context hint for kubernetes, etc.
     pub address: Option<String>,
+    /// Optional bastion/jump host for ssh targets, `[user@]host[:port]`
+    /// form (ssh `-J`). DESIGN §4 targets: remundo's estate sits behind an
+    /// Azure Bastion jumpbox — this is how a target declares it.
+    pub jump_host: Option<String>,
     #[serde(rename = "resource", default)]
     pub resources: Vec<ResourceCfg>,
 }

@@ -105,6 +105,15 @@ fn wizard_target(p: &mut dyn Prompter) -> Result<TargetCfg> {
         if a.is_empty() { None } else { Some(a) }
     };
 
+    // Jump host only makes sense for ssh (DESIGN §4: remundo's estate sits
+    // behind an Azure Bastion jumpbox) — don't clutter other kinds' wizard.
+    let jump_host = if kind == TargetKindName::Ssh {
+        let j = p.ask("jump host ([user@]host[:port], blank for direct)", None)?;
+        if j.is_empty() { None } else { Some(j) }
+    } else {
+        None
+    };
+
     // Credentials never inherit (brief invariant #5) — required for every
     // kind except local, and the wizard enforces that here rather than
     // deferring silently to validate() finding it later.
@@ -139,6 +148,7 @@ fn wizard_target(p: &mut dyn Prompter) -> Result<TargetCfg> {
         expected_state,
         credential,
         address,
+        jump_host,
         resources: Vec::<ResourceCfg>::new(),
     })
 }
@@ -280,6 +290,7 @@ mod tests {
             "bastion",                 // target name
             "ssh",                     // target kind
             "bastion.remundo.example", // address
+            "",                        // jump host: direct (ssh-only prompt)
             "env:REMUNDO_SSH_KEY",     // credential
             "",                        // target autonomy: inherit
             "running",                 // target expected_state

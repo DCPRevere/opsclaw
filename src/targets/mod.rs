@@ -5,11 +5,13 @@
 //! gates, and audits around it. Executor implementations land in Wave 2
 //! (local → ssh (jump-host capable) → kubernetes → cloud/azure).
 
+pub mod endpoint;
 pub mod kubernetes;
 pub mod local;
 pub mod ssh;
 pub mod stub;
 
+pub use endpoint::EndpointExecutor;
 pub use kubernetes::{KubernetesExecutor, KubernetesParams};
 pub use local::LocalExecutor;
 pub use ssh::{SshExecutor, SshParams};

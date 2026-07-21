@@ -348,9 +348,13 @@ impl Policy {
                 dry_run_logged: false,
             });
         }
+        // Resource-qualified registrations (endpoint executors, keyed by the
+        // FULL fq path incl. resource) take precedence; the base target key
+        // is the fallback for plain ssh/local/kubernetes commands.
         let executor = self
             .executors
-            .get(&Self::executor_key(target))
+            .get(&fq)
+            .or_else(|| self.executors.get(&Self::executor_key(target)))
             .ok_or_else(|| crate::Error::NotFound(format!("no executor configured for {fq}")))?
             .clone();
 
@@ -853,6 +857,50 @@ mod tests {
         let out = rig.policy.execute_approved(&row, Uuid::new_v4()).await.unwrap();
         assert!(matches!(out, PolicyOutcome::Blocked { .. }), "got {out:?}");
         assert!(rig.executor.ran.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resource_qualified_executor_takes_precedence_over_base_target() {
+        // The endpoint-mutation path (tools/argocd.rs rollback): an executor
+        // registered under the FULL resource-qualified fq string handles the
+        // command — inside audit-begin/end like any other — while plain
+        // commands on the same target still hit the base executor.
+        let rig = rig_with(config_at(Autonomy::Auto), FakeExecutor::ok("base"));
+        let endpoint_exec = FakeExecutor::ok("rolled back");
+        // rig_with holds Policy by value; rebuild with both registrations.
+        let db = Arc::new(InMemoryDb::new());
+        let dir = tempfile::tempdir().unwrap();
+        let estop = Arc::new(EStop::new(dir.path().join("ESTOP"), db.clone()));
+        let mut executors: HashMap<String, Arc<dyn TargetExecutor>> = HashMap::new();
+        executors.insert("remundo::prod::bastion".into(), rig.executor.clone());
+        let mut resource_target = FqTarget::new("remundo", "prod", "bastion");
+        resource_target.resource = Some((crate::domain::ResourceType::Argocd, "main".into()));
+        executors.insert(resource_target.to_string(), endpoint_exec.clone());
+        let policy = Policy::new(
+            Arc::new(config_at(Autonomy::Auto)),
+            executors,
+            Arc::new(AuditWriter::new(db.clone())),
+            estop,
+            db.clone(),
+            Arc::new(Scrubber::new()),
+        );
+
+        let mut req = request("argocd app rollback guestbook 7", RiskClass::High);
+        req.target = resource_target;
+        let out = policy.execute(req).await.unwrap();
+        assert!(matches!(out, PolicyOutcome::Executed(_)), "got {out:?}");
+        assert_eq!(
+            *endpoint_exec.ran.lock().unwrap(),
+            vec!["argocd app rollback guestbook 7".to_string()]
+        );
+        assert!(rig.executor.ran.lock().unwrap().is_empty(), "base executor must not fire");
+        // And it was audited: begin + executed, chain intact.
+        let records = db.range(1, 10).await.unwrap();
+        assert_eq!(
+            records.iter().map(|r| r.outcome).collect::<Vec<_>>(),
+            vec![AuditOutcome::Begun, AuditOutcome::Executed]
+        );
+        assert!(records[0].fq_target.contains("argocd"));
     }
 
     #[tokio::test]

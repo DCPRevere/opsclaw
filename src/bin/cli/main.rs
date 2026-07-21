@@ -11,16 +11,11 @@
 //! going through argv (see `src/cli/mod.rs`'s doc comment).
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use opsclaw::audit::AuditWriter;
 use opsclaw::cli::prompt::StdioPrompter;
-use opsclaw::config::{Config, SecretStore};
-use opsclaw::db::Db;
-use opsclaw::http::{AppState, server};
-use opsclaw::policy::{EStop, Policy, Scrubber};
-use opsclaw::scheduler::SchedulerHandle;
+use opsclaw::config::Config;
+use opsclaw::http::server;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -196,61 +191,14 @@ async fn dispatch(
     home: &std::path::Path,
 ) -> opsclaw::Result<()> {
     match command {
-        // `opsclaw-cli daemon` is identical to the `opsclaw` binary
-        // (src/main.rs) — same wiring, duplicated here rather than shared
-        // because src/main.rs is a `fn main` returning `()`, not `Result`,
-        // and isn't itself a library entry point to call into. Keep this in
-        // sync with src/main.rs if that wiring changes; it is NOT
-        // reimplemented independently (no separate executor-registration
-        // logic, no separate policy construction) — every piece here is the
-        // same library call src/main.rs makes, in the same order.
+        // `opsclaw-cli daemon` IS the `opsclaw` binary: both call
+        // `boot::daemon_state` — one wiring path, drift impossible (the old
+        // duplicated wiring here drifted within a day of being written).
         Command::Daemon => {
-            let config = Config::load(None)?;
+            let config = Config::load(Some(cfg_path))?;
             config.validate()?;
-
-            let secret_store = SecretStore::open(home)?;
-
-            let db_path = config
-                .daemon
-                .db_path
-                .clone()
-                .unwrap_or_else(|| home.join("opsclaw.sqlite3"))
-                .to_string_lossy()
-                .into_owned();
-            let db = Db::connect(&db_path).await?;
-            let repos = db.repos();
-
-            // Same fail-closed placeholder as src/main.rs: an empty executor
-            // map means Policy::execute treats every target as unreachable
-            // (no executor => no command can run) until target wiring from
-            // config lands — not something to invent independently here.
-            let executors = std::collections::HashMap::new();
-
-            let estop_handle =
-                Arc::new(EStop::new(home.join(opsclaw::policy::estop::SENTINEL_FILE), repos.clone()));
-            let audit = Arc::new(AuditWriter::new(repos.clone()));
-            let scrubber = Arc::new(Scrubber::new());
-            let policy = Arc::new(Policy::new(
-                Arc::new(config.clone()),
-                executors,
-                audit,
-                estop_handle.clone(),
-                repos.clone(),
-                scrubber,
-            ));
-
-            let scheduler_handle = SchedulerHandle::new(config.daemon.tick_seconds.max(1) * 1000);
-
-            let state = AppState::new(
-                config,
-                &secret_store,
-                repos,
-                policy.clone(),
-                policy,
-                estop_handle,
-                scheduler_handle,
-            )?;
-
+            let state = opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
+            opsclaw::boot::seed_scan_jobs(&state).await?;
             server::run(state).await?;
         }
 

@@ -28,6 +28,13 @@ pub fn default_dir() -> PathBuf {
     })
 }
 
+/// The default config file location (`<default_dir>/config.toml`) — the
+/// exact path `Config::load(None)` reads, exposed so boot wiring can hand
+/// `AppState.config_path` the same file it loaded.
+pub fn default_config_path() -> PathBuf {
+    default_dir().join("config.toml")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
@@ -264,7 +271,7 @@ impl Config {
     /// file and no env, the result is the fully-faked configuration that
     /// boots the self-validating daemon (gianna's fakes mode).
     pub fn load(path: Option<&Path>) -> Result<Config> {
-        let default_path = default_dir().join("config.toml");
+        let default_path = default_config_path();
         let path = path.unwrap_or(&default_path);
         let mut cfg: Config = if path.exists() {
             let raw = std::fs::read_to_string(path)?;
@@ -399,9 +406,8 @@ impl Config {
                          e.g. `openssl rand -base64 48`"
                     )),
                     Ok(_) => {}
-                    Err(_) => errs.push(format!(
-                        "http.jwt_secret references env:{name}, which is not set"
-                    )),
+                    Err(_) => errs
+                        .push(format!("http.jwt_secret references env:{name}, which is not set")),
                 },
                 Some(SecretRef::Store(_)) => {} // resolved + checked at connect time
             }
@@ -665,7 +671,9 @@ mod tests {
             "#,
         );
         cfg.http.jwt_secret = Some(SecretRef::store("jwt"));
-        assert!(cfg.resolve_jwt_secret(&store).unwrap_err().to_string().contains("insecure default"));
+        assert!(
+            cfg.resolve_jwt_secret(&store).unwrap_err().to_string().contains("insecure default")
+        );
 
         store.set("jwt", "short").unwrap();
         assert!(cfg.resolve_jwt_secret(&store).unwrap_err().to_string().contains("too short"));

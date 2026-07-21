@@ -1,13 +1,8 @@
-//! The opsclaw daemon binary.
+//! The opsclaw daemon binary. All real composition lives in `opsclaw::boot`
+//! — shared with `opsclaw-cli daemon` so the two boot paths cannot drift.
 
-use std::sync::Arc;
-
-use opsclaw::audit::AuditWriter;
-use opsclaw::config::{Config, SecretStore, default_dir};
-use opsclaw::db::Db;
-use opsclaw::http::{AppState, server};
-use opsclaw::policy::{EStop, Policy, Scrubber};
-use opsclaw::scheduler::SchedulerHandle;
+use opsclaw::config::{Config, default_config_path, default_dir};
+use opsclaw::http::server;
 
 #[tokio::main]
 async fn main() {
@@ -30,79 +25,19 @@ async fn main() {
         std::process::exit(2);
     }
 
-    let secret_dir = default_dir();
-    let secret_store = match SecretStore::open(&secret_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("opsclaw: cannot open secret store: {e}");
-            std::process::exit(2);
-        }
-    };
-
-    let db_path = config
-        .daemon
-        .db_path
-        .clone()
-        .unwrap_or_else(|| secret_dir.join("opsclaw.sqlite3"))
-        .to_string_lossy()
-        .into_owned();
-    let db = match Db::connect(&db_path).await {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!("opsclaw: database connect failed: {e}");
-            std::process::exit(1);
-        }
-    };
-    let repos = db.repos();
-
-    // Config → executors: every target keyed by its fq path, every resource
-    // with a url as an EndpointExecutor under its resource-qualified path,
-    // and every resolved resource credential registered with the scrubber
-    // BEFORE any executor that could echo it exists. A credential that
-    // fails to resolve is a boot error (fail closed, never half-wired).
-    let scrubber = Arc::new(Scrubber::new());
-    let (executors, wiring_warnings) =
-        match opsclaw::targets::wiring::build_executors(&config, &secret_store, &scrubber) {
-            Ok(v) => v,
+    let state =
+        match opsclaw::boot::daemon_state(config, default_config_path(), &default_dir()).await {
+            Ok(s) => s,
             Err(e) => {
-                eprintln!("opsclaw: refusing to start (target wiring): {e}");
+                eprintln!("opsclaw: refusing to start (wiring): {e}");
                 std::process::exit(2);
             }
         };
-    for w in &wiring_warnings {
-        tracing::warn!("{w}");
+
+    if let Err(e) = opsclaw::boot::seed_scan_jobs(&state).await {
+        eprintln!("opsclaw: seeding scan jobs failed: {e}");
+        std::process::exit(1);
     }
-    tracing::info!("wired {} executor(s)", executors.len());
-
-    let estop =
-        Arc::new(EStop::new(secret_dir.join(opsclaw::policy::estop::SENTINEL_FILE), repos.clone()));
-    let audit = Arc::new(AuditWriter::new(repos.clone()));
-    let policy = Arc::new(Policy::new(
-        Arc::new(config.clone()),
-        executors,
-        audit,
-        estop.clone(),
-        repos.clone(),
-        scrubber,
-    ));
-
-    let scheduler_handle = SchedulerHandle::new(config.daemon.tick_seconds.max(1) * 1000);
-
-    let state = match AppState::new(
-        config,
-        &secret_store,
-        repos,
-        policy.clone(),
-        policy,
-        estop,
-        scheduler_handle,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("opsclaw: state construction failed: {e}");
-            std::process::exit(2);
-        }
-    };
 
     if let Err(e) = server::run(state).await {
         eprintln!("opsclaw: {e}");

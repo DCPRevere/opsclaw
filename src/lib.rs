@@ -12,6 +12,7 @@
 
 pub mod agent;
 pub mod audit;
+pub mod boot;
 pub mod channels;
 pub mod cli;
 pub mod config;

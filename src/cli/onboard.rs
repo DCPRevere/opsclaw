@@ -68,7 +68,8 @@ fn prepare(config_path: &Path, opsclaw_home: &Path) -> Result<(Config, bool, Sec
     }
     let cfg = if config_existed {
         let raw = std::fs::read_to_string(config_path)?;
-        toml::from_str(&raw).map_err(|e| crate::Error::Config(format!("{}: {e}", config_path.display())))?
+        toml::from_str(&raw)
+            .map_err(|e| crate::Error::Config(format!("{}: {e}", config_path.display())))?
     } else {
         Config::default()
     };
@@ -112,23 +113,31 @@ fn ensure_vapid(cfg: &mut Config, store: &SecretStore) -> Result<bool> {
 /// operator can hit enter through the whole thing and land on a fully-faked,
 /// self-validating daemon — exactly what `Config::default()` already is,
 /// made discoverable through a guided walkthrough instead of silence.
-pub async fn run(p: &mut dyn Prompter, config_path: &Path, opsclaw_home: &Path) -> Result<OnboardOutcome> {
+pub async fn run(
+    p: &mut dyn Prompter,
+    config_path: &Path,
+    opsclaw_home: &Path,
+) -> Result<OnboardOutcome> {
     let (mut cfg, config_existed, store) = prepare(config_path, opsclaw_home)?;
     let mut summary = Vec::new();
 
     p.say("OpsClaw onboarding — every question can be left blank to skip that integration.");
 
-    let llm_key_env = p.ask("OpenRouter API key env var name (blank to skip; sets fakes-mode LLM)", None)?;
+    let llm_key_env =
+        p.ask("OpenRouter API key env var name (blank to skip; sets fakes-mode LLM)", None)?;
     if !llm_key_env.is_empty() {
         cfg.llm.api_key = Some(SecretRef::env(&llm_key_env));
-        let models_raw = p.ask("comma-separated OpenRouter model list (required if a key is set)", None)?;
-        cfg.llm.models = models_raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let models_raw =
+            p.ask("comma-separated OpenRouter model list (required if a key is set)", None)?;
+        cfg.llm.models =
+            models_raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
         summary.push(format!("LLM: env:{llm_key_env}, {} model(s)", cfg.llm.models.len()));
     } else {
         summary.push("LLM: not configured (fakes mode)".to_string());
     }
 
-    let hindsight_url = p.ask("Hindsight URL (blank to skip; memory runs as an honest no-op)", None)?;
+    let hindsight_url =
+        p.ask("Hindsight URL (blank to skip; memory runs as an honest no-op)", None)?;
     if !hindsight_url.is_empty() {
         cfg.memory.hindsight_url = Some(hindsight_url.clone());
         summary.push(format!("Memory: {hindsight_url}"));
@@ -261,7 +270,9 @@ mod tests {
     async fn secret_store_key_file_is_0600() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
-        run_non_interactive(&NonInteractiveOptions::default(), &config_path, dir.path()).await.unwrap();
+        run_non_interactive(&NonInteractiveOptions::default(), &config_path, dir.path())
+            .await
+            .unwrap();
 
         let key_path = dir.path().join("secret.key");
         assert!(key_path.exists());
@@ -325,9 +336,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         let mut p = ScriptedPrompter::new([
-            "",              // llm key env: skip
-            "",              // hindsight url: skip
-            "",              // telegram env: skip
+            "",                      // llm key env: skip
+            "",                      // hindsight url: skip
+            "",                      // telegram env: skip
             "https://hc-ping.com/x", // deadman url
         ]);
 

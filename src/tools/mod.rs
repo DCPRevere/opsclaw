@@ -266,7 +266,9 @@ pub fn registry(ctx: &ToolCtx, heartbeat: bool) -> Vec<Box<dyn Tool>> {
         ctx.config.as_ref().is_some_and(|c| target_kind_of(c, t).is_some_and(is_ssh_or_local))
     });
     let has_kubernetes = ctx.known_targets.iter().any(|t| {
-        ctx.config.as_ref().is_some_and(|c| target_kind_of(c, t) == Some(RegistryTargetClass::Kubernetes))
+        ctx.config
+            .as_ref()
+            .is_some_and(|c| target_kind_of(c, t) == Some(RegistryTargetClass::Kubernetes))
     });
 
     if has_ssh_or_local {
@@ -284,9 +286,9 @@ pub fn registry(ctx: &ToolCtx, heartbeat: bool) -> Vec<Box<dyn Tool>> {
     // one target's resource of that type has resolved credentials. ---
     if let Some(endpoints) = &ctx.endpoints {
         let has_resource = |rt: ResourceType| {
-            ctx.known_targets
-                .iter()
-                .any(|t| t.resource.as_ref().is_some_and(|(r, _)| *r == rt) && endpoints.get(t).is_some())
+            ctx.known_targets.iter().any(|t| {
+                t.resource.as_ref().is_some_and(|(r, _)| *r == rt) && endpoints.get(t).is_some()
+            })
         };
         if has_resource(ResourceType::Elasticsearch) {
             tools.push(Box::new(elasticsearch::ElasticsearchSearchTool));

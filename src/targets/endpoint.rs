@@ -66,9 +66,10 @@ impl EndpointExecutor {
         if let Some(b) = body {
             req = req.json(&b);
         }
-        let resp = req.send().await.map_err(|e| {
-            crate::Error::Policy(format!("endpoint {url} unreachable: {e}"))
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| crate::Error::Policy(format!("endpoint {url} unreachable: {e}")))?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -180,10 +181,8 @@ mod tests {
     #[tokio::test]
     async fn unrecognized_line_is_an_error_never_a_guess() {
         let ex = EndpointExecutor::new(ResourceType::Argocd, "http://127.0.0.1:1", None);
-        let err = ex
-            .run(&cmd("argocd app delete guestbook"), Duration::from_secs(1))
-            .await
-            .unwrap_err();
+        let err =
+            ex.run(&cmd("argocd app delete guestbook"), Duration::from_secs(1)).await.unwrap_err();
         assert!(err.to_string().contains("does not recognize"), "{err}");
     }
 

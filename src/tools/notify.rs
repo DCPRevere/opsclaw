@@ -97,18 +97,20 @@ impl Tool for NotifyTool {
 
         let severity = args["severity"]
             .as_str()
-            .ok_or_else(|| ToolError::UserFacing("opsclaw_notify requires \"severity\"".to_string()))
+            .ok_or_else(|| {
+                ToolError::UserFacing("opsclaw_notify requires \"severity\"".to_string())
+            })
             .and_then(parse_severity)?;
-        let target_str = args["target"]
-            .as_str()
-            .ok_or_else(|| ToolError::UserFacing("opsclaw_notify requires \"target\"".to_string()))?;
+        let target_str = args["target"].as_str().ok_or_else(|| {
+            ToolError::UserFacing("opsclaw_notify requires \"target\"".to_string())
+        })?;
         let fault_class = args["fault_class"].as_str().ok_or_else(|| {
             ToolError::UserFacing("opsclaw_notify requires \"fault_class\"".to_string())
         })?;
         let resource = args["resource"].as_str().unwrap_or("");
-        let evidence = args["evidence"]
-            .as_str()
-            .ok_or_else(|| ToolError::UserFacing("opsclaw_notify requires \"evidence\"".to_string()))?;
+        let evidence = args["evidence"].as_str().ok_or_else(|| {
+            ToolError::UserFacing("opsclaw_notify requires \"evidence\"".to_string())
+        })?;
         let hypothesis = args["hypothesis"].as_str().ok_or_else(|| {
             ToolError::UserFacing("opsclaw_notify requires \"hypothesis\"".to_string())
         })?;
@@ -170,8 +172,8 @@ impl Tool for NotifyTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::memory::InMemoryDb;
     use crate::db::IncidentRepo;
+    use crate::db::memory::InMemoryDb;
     use crate::domain::{FqTarget, Principal};
     use crate::policy::{CommandRequest, PolicyExecute, PolicyOutcome};
     use std::sync::Arc;
@@ -221,7 +223,10 @@ mod tests {
         let r = NotifyTool.call(&ctx, base_args()).await.unwrap();
         assert!(r.output.contains("opened incident"));
 
-        let open = db.find_open_by_fingerprint(&fingerprint_for(&target(), "cpu_saturation", "")).await.unwrap();
+        let open = db
+            .find_open_by_fingerprint(&fingerprint_for(&target(), "cpu_saturation", ""))
+            .await
+            .unwrap();
         assert!(open.is_some());
         let incident = open.unwrap();
         assert_eq!(incident.severity, Severity::Critical);

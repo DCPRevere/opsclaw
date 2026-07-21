@@ -90,8 +90,8 @@ impl Tool for ListIncidentsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::memory::InMemoryDb;
     use crate::db::IncidentRepo;
+    use crate::db::memory::InMemoryDb;
     use crate::domain::{FqTarget, Incident, IncidentState, Principal, Severity};
     use crate::policy::{CommandRequest, PolicyExecute, PolicyOutcome};
     use chrono::Utc;

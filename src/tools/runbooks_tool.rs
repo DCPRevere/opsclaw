@@ -77,7 +77,8 @@ impl Tool for RunbookListTool {
             let fm = &lr.runbook.front_matter;
             let mut trigger_bits = Vec::new();
             if !fm.trigger.alert_categories.is_empty() {
-                trigger_bits.push(format!("categories: {}", fm.trigger.alert_categories.join(", ")));
+                trigger_bits
+                    .push(format!("categories: {}", fm.trigger.alert_categories.join(", ")));
             }
             if !fm.trigger.keywords.is_empty() {
                 trigger_bits.push(format!("keywords: {}", fm.trigger.keywords.join(", ")));
@@ -85,8 +86,11 @@ impl Tool for RunbookListTool {
             if let Some(glob) = &fm.trigger.target_glob {
                 trigger_bits.push(format!("target: {glob}"));
             }
-            let trigger_summary =
-                if trigger_bits.is_empty() { "no trigger configured".to_string() } else { trigger_bits.join("; ") };
+            let trigger_summary = if trigger_bits.is_empty() {
+                "no trigger configured".to_string()
+            } else {
+                trigger_bits.join("; ")
+            };
 
             // Success rate is a best-effort JOIN: run history may not be
             // wired at all, or this runbook may simply have never run
@@ -161,10 +165,14 @@ impl Tool for RunbookHistoryTool {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
         let repo = ctx.runbook_runs.as_ref().ok_or_else(|| {
-            ToolError::Internal("runbook_history called with no runbook-run store wired".to_string())
+            ToolError::Internal(
+                "runbook_history called with no runbook-run store wired".to_string(),
+            )
         })?;
         let runbook_name = args["runbook_name"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("runbook_history requires a \"runbook_name\" argument".to_string())
+            ToolError::UserFacing(
+                "runbook_history requires a \"runbook_name\" argument".to_string(),
+            )
         })?;
         let limit = args["limit"].as_i64().unwrap_or(5);
 
@@ -178,7 +186,8 @@ impl Tool for RunbookHistoryTool {
         if let Some(store) = &ctx.runbooks
             && store.get(runbook_name).is_none()
         {
-            let known: Vec<String> = store.list().into_iter().map(|lr| lr.runbook.title().to_string()).collect();
+            let known: Vec<String> =
+                store.list().into_iter().map(|lr| lr.runbook.title().to_string()).collect();
             return Err(ToolError::UserFacing(format!(
                 "no runbook named {runbook_name:?}. Known runbooks: {}.",
                 if known.is_empty() { "(none loaded)".to_string() } else { known.join(", ") }
@@ -222,8 +231,8 @@ impl Tool for RunbookHistoryTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::memory::InMemoryDb;
     use crate::db::RunbookRunRepo;
+    use crate::db::memory::InMemoryDb;
     use crate::domain::{FqTarget, Principal};
     use crate::policy::{CommandRequest, PolicyExecute, PolicyOutcome};
     use crate::runbooks::history::{RunbookRun, StepOutcome, StepStatus};
@@ -311,11 +320,7 @@ mod tests {
     #[tokio::test]
     async fn list_reports_load_errors_alongside_good_runbooks() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("good.md"),
-            runbook_src("Good runbook", &["x"]),
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("good.md"), runbook_src("Good runbook", &["x"])).unwrap();
         std::fs::write(dir.path().join("bad.md"), "not even front matter").unwrap();
         let store = crate::runbooks::RunbookStore::load(dir.path()).unwrap();
 
@@ -364,10 +369,8 @@ mod tests {
     async fn history_unknown_name_says_no_recorded_runs_when_no_store_wired() {
         let mut ctx = base_ctx();
         ctx.runbook_runs = Some(Arc::new(InMemoryDb::new()));
-        let r = RunbookHistoryTool
-            .call(&ctx, json!({"runbook_name": "nonexistent"}))
-            .await
-            .unwrap();
+        let r =
+            RunbookHistoryTool.call(&ctx, json!({"runbook_name": "nonexistent"})).await.unwrap();
         assert!(r.output.contains("never run"));
     }
 
@@ -421,10 +424,7 @@ mod tests {
     #[tokio::test]
     async fn history_missing_repo_is_internal_fault() {
         let ctx = base_ctx();
-        let err = RunbookHistoryTool
-            .call(&ctx, json!({"runbook_name": "x"}))
-            .await
-            .unwrap_err();
+        let err = RunbookHistoryTool.call(&ctx, json!({"runbook_name": "x"})).await.unwrap_err();
         assert!(matches!(err, ToolError::Internal(_)));
     }
 

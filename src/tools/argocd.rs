@@ -146,7 +146,8 @@ impl Tool for SyncStatusTool {
             ToolError::UserFacing("argocd_sync_status requires an \"app\" argument".to_string())
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
-        let result = get_json(&client(), auth, self.name(), &format!("/api/v1/applications/{app}")).await?;
+        let result =
+            get_json(&client(), auth, self.name(), &format!("/api/v1/applications/{app}")).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -293,7 +294,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/applications/api-service"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": {"sync": {"status": "Synced"}}})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"status": {"sync": {"status": "Synced"}}})),
+            )
             .mount(&server)
             .await;
         let ctx = ctx_with_policy(&server.uri(), None, Arc::new(NoopPolicy));
@@ -313,7 +317,8 @@ mod tests {
             .mount(&server)
             .await;
         let ctx = ctx_with_policy(&server.uri(), None, Arc::new(NoopPolicy));
-        let err = ListAppsTool.call(&ctx, json!({"resource": target().to_string()})).await.unwrap_err();
+        let err =
+            ListAppsTool.call(&ctx, json!({"resource": target().to_string()})).await.unwrap_err();
         match err {
             ToolError::UserFacing(msg) => assert!(msg.contains("403")),
             _ => panic!("expected UserFacing"),
@@ -363,9 +368,7 @@ mod tests {
         assert_eq!(seen[0].command, "argocd app rollback api-service a1b2c3d");
         assert_eq!(seen[0].declared_risk, RiskClass::High);
         assert_eq!(seen[0].target, target());
-        assert!(
-            seen[0].hypothesis.as_deref().unwrap().contains("bad deploy"),
-        );
+        assert!(seen[0].hypothesis.as_deref().unwrap().contains("bad deploy"),);
         // A gated mutation with no HTTP call made — this test's server (if
         // any were mounted) would show zero requests; here there is no
         // server at all, which would panic on a real HTTP attempt, proving

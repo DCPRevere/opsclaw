@@ -64,13 +64,19 @@ impl Tool for QueueDepthTool {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
         let resource = args["resource"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("azure_service_bus_queue_depth requires a \"resource\" argument".to_string())
+            ToolError::UserFacing(
+                "azure_service_bus_queue_depth requires a \"resource\" argument".to_string(),
+            )
         })?;
         let queue = args["queue"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("azure_service_bus_queue_depth requires a \"queue\" argument".to_string())
+            ToolError::UserFacing(
+                "azure_service_bus_queue_depth requires a \"queue\" argument".to_string(),
+            )
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
-        let result = get_json(&client(), auth, self.name(), &format!("/{queue}?api-version=2021-05")).await?;
+        let result =
+            get_json(&client(), auth, self.name(), &format!("/{queue}?api-version=2021-05"))
+                .await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -118,16 +124,21 @@ impl Tool for PeekMessagesTool {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
         let resource = args["resource"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("azure_service_bus_peek requires a \"resource\" argument".to_string())
+            ToolError::UserFacing(
+                "azure_service_bus_peek requires a \"resource\" argument".to_string(),
+            )
         })?;
         let queue = args["queue"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("azure_service_bus_peek requires a \"queue\" argument".to_string())
+            ToolError::UserFacing(
+                "azure_service_bus_peek requires a \"queue\" argument".to_string(),
+            )
         })?;
         let dead_letter = args["dead_letter"].as_bool().unwrap_or(false);
         let count = args["count"].as_i64().unwrap_or(10);
         let (_, auth) = ctx.resolve_resource(resource)?;
 
-        let sub_path = if dead_letter { format!("{queue}/$deadletterqueue") } else { queue.to_string() };
+        let sub_path =
+            if dead_letter { format!("{queue}/$deadletterqueue") } else { queue.to_string() };
         let result = get_json(
             &client(),
             auth,
@@ -189,7 +200,9 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/orders-dlq"))
             .and(header("authorization", "Bearer sas-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"activeMessageCount": 42})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"activeMessageCount": 42})),
+            )
             .mount(&server)
             .await;
         let ctx = ctx_with(&server.uri(), Some("sas-token"));
@@ -225,7 +238,10 @@ mod tests {
             .await;
         let ctx = ctx_with(&server.uri(), None);
         let r = PeekMessagesTool
-            .call(&ctx, json!({"resource": target().to_string(), "queue": "orders", "dead_letter": true}))
+            .call(
+                &ctx,
+                json!({"resource": target().to_string(), "queue": "orders", "dead_letter": true}),
+            )
             .await
             .unwrap();
         assert!(r.output.contains("poison"));

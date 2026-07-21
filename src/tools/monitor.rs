@@ -70,12 +70,12 @@ impl Tool for MonitorTool {
     }
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
-        let target_str = args["target"]
-            .as_str()
-            .ok_or_else(|| ToolError::UserFacing("monitor requires a \"target\" argument".to_string()))?;
-        let view = args["view"]
-            .as_str()
-            .ok_or_else(|| ToolError::UserFacing("monitor requires a \"view\" argument".to_string()))?;
+        let target_str = args["target"].as_str().ok_or_else(|| {
+            ToolError::UserFacing("monitor requires a \"target\" argument".to_string())
+        })?;
+        let view = args["view"].as_str().ok_or_else(|| {
+            ToolError::UserFacing("monitor requires a \"view\" argument".to_string())
+        })?;
         let command = command_for(view)?;
         let target = ctx.resolve_target(target_str)?;
         run_command(ctx, self.name(), target, command.to_string(), self.risk(), None).await
@@ -113,7 +113,10 @@ mod tests {
     async fn disk_view_composes_df() {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
-        MonitorTool.call(&ctx, json!({"target": "remundo::prod::web-1", "view": "disk"})).await.unwrap();
+        MonitorTool
+            .call(&ctx, json!({"target": "remundo::prod::web-1", "view": "disk"}))
+            .await
+            .unwrap();
         assert_eq!(policy.seen.lock().unwrap()[0].command, "df -P");
     }
 
@@ -121,7 +124,10 @@ mod tests {
     async fn mem_view_composes_free() {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
-        MonitorTool.call(&ctx, json!({"target": "remundo::prod::web-1", "view": "mem"})).await.unwrap();
+        MonitorTool
+            .call(&ctx, json!({"target": "remundo::prod::web-1", "view": "mem"}))
+            .await
+            .unwrap();
         assert_eq!(policy.seen.lock().unwrap()[0].command, "free -m");
     }
 
@@ -129,9 +135,15 @@ mod tests {
     async fn cpu_and_proc_views_compose_expected_commands() {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
-        MonitorTool.call(&ctx, json!({"target": "remundo::prod::web-1", "view": "cpu"})).await.unwrap();
+        MonitorTool
+            .call(&ctx, json!({"target": "remundo::prod::web-1", "view": "cpu"}))
+            .await
+            .unwrap();
         assert!(policy.seen.lock().unwrap()[0].command.starts_with("top"));
-        MonitorTool.call(&ctx, json!({"target": "remundo::prod::web-1", "view": "proc"})).await.unwrap();
+        MonitorTool
+            .call(&ctx, json!({"target": "remundo::prod::web-1", "view": "proc"}))
+            .await
+            .unwrap();
         assert!(policy.seen.lock().unwrap()[1].command.starts_with("ps"));
     }
 

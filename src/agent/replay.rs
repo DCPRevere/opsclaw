@@ -36,7 +36,9 @@ const TOOL_RESULT_CHARS_MAX: usize = 1_200;
 /// No-op on any other turn variant.
 fn cap_tool_result(t: Turn) -> Turn {
     match t {
-        Turn::ToolResult { call_id, name, output } if output.chars().count() > TOOL_RESULT_CHARS_MAX => {
+        Turn::ToolResult { call_id, name, output }
+            if output.chars().count() > TOOL_RESULT_CHARS_MAX =>
+        {
             let mut kept: String = output.chars().take(TOOL_RESULT_CHARS_MAX).collect();
             kept.push_str("…[truncated]");
             Turn::ToolResult { call_id, name, output: kept }
@@ -51,7 +53,10 @@ fn turn_tokens(t: &Turn) -> usize {
         Turn::User { content } => est_tokens(content),
         Turn::Assistant { content, tool_calls } => {
             est_tokens(content)
-                + tool_calls.iter().map(|c| est_tokens(&c.name) + est_tokens(&c.args.to_string())).sum::<usize>()
+                + tool_calls
+                    .iter()
+                    .map(|c| est_tokens(&c.name) + est_tokens(&c.args.to_string()))
+                    .sum::<usize>()
         }
         Turn::ToolResult { output, .. } => est_tokens(output),
     }
@@ -176,11 +181,7 @@ pub(crate) fn collapse_marker(name: &str, outcome: &str) -> String {
     } else {
         outcome.to_string()
     };
-    if shown.is_empty() {
-        format!("[used {name}]")
-    } else {
-        format!("[used {name} → {shown}]")
-    }
+    if shown.is_empty() { format!("[used {name}]") } else { format!("[used {name} → {shown}]") }
 }
 
 #[cfg(test)]
@@ -197,7 +198,11 @@ mod tests {
     fn asst_call(id: &str, name: &str) -> Turn {
         Turn::Assistant {
             content: String::new(),
-            tool_calls: vec![ToolCall { id: id.into(), name: name.into(), args: serde_json::json!({}) }],
+            tool_calls: vec![ToolCall {
+                id: id.into(),
+                name: name.into(),
+                args: serde_json::json!({}),
+            }],
         }
     }
     fn result(id: &str, name: &str, output: &str) -> Turn {
@@ -326,7 +331,9 @@ mod tests {
         let markers: Vec<&String> = hist
             .iter()
             .filter_map(|t| match t {
-                Turn::Assistant { content, tool_calls } if tool_calls.is_empty() && content.starts_with("[used ") => {
+                Turn::Assistant { content, tool_calls }
+                    if tool_calls.is_empty() && content.starts_with("[used ") =>
+                {
                     Some(content)
                 }
                 _ => None,
@@ -365,6 +372,8 @@ mod tests {
         assert!(hist.len() < before_len, "folding must shrink turn count");
         // The earliest user turn ("do thing 0") survives — folding drops the
         // raw tool call/result, not the surrounding user turns.
-        assert!(hist.iter().any(|t| matches!(t, Turn::User { content } if content == "do thing 0")));
+        assert!(
+            hist.iter().any(|t| matches!(t, Turn::User { content } if content == "do thing 0"))
+        );
     }
 }

@@ -126,7 +126,10 @@ impl EndpointRegistry {
 /// ERROR, same fail-closed direction as `build_executors` — a half-wired
 /// registry must not silently grant read access with no auth where a
 /// credential was declared but unreadable.
-pub fn registry_from_config(config: &Config, store: &SecretStore) -> crate::Result<EndpointRegistry> {
+pub fn registry_from_config(
+    config: &Config,
+    store: &SecretStore,
+) -> crate::Result<EndpointRegistry> {
     let mut registry = EndpointRegistry::new();
     for project in &config.projects {
         for env in &project.envs {
@@ -253,7 +256,9 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/health"))
             .and(header("authorization", "Bearer secret-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "green"})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "green"})),
+            )
             .mount(&server)
             .await;
 
@@ -278,7 +283,8 @@ mod tests {
         // absence by default), so the real assertion is that the call
         // succeeds with no token configured, proving the header is skipped
         // without erroring.
-        let result = get_json(&client(), &auth(&server.uri(), None), "es", "/health").await.unwrap();
+        let result =
+            get_json(&client(), &auth(&server.uri(), None), "es", "/health").await.unwrap();
         assert_eq!(result["ok"], true);
     }
 
@@ -291,9 +297,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = get_json(&client(), &auth(&server.uri(), None), "es", "/health")
-            .await
-            .unwrap_err();
+        let err =
+            get_json(&client(), &auth(&server.uri(), None), "es", "/health").await.unwrap_err();
         match err {
             ToolError::UserFacing(msg) => {
                 assert!(msg.contains("503"));
@@ -324,14 +329,17 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/query"))
             .and(header("authorization", "Bearer tok"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": []})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": []})),
+            )
             .mount(&server)
             .await;
 
         let body = serde_json::json!({"query": "up"});
-        let result = post_json(&client(), &auth(&server.uri(), Some("tok")), "prometheus", "/query", &body)
-            .await
-            .unwrap();
+        let result =
+            post_json(&client(), &auth(&server.uri(), Some("tok")), "prometheus", "/query", &body)
+                .await
+                .unwrap();
         assert_eq!(result["result"], serde_json::json!([]));
     }
 
@@ -343,9 +351,15 @@ mod tests {
             .respond_with(ResponseTemplate::new(400).set_body_string("bad promql"))
             .mount(&server)
             .await;
-        let err = post_json(&client(), &auth(&server.uri(), None), "prometheus", "/query", &serde_json::json!({}))
-            .await
-            .unwrap_err();
+        let err = post_json(
+            &client(),
+            &auth(&server.uri(), None),
+            "prometheus",
+            "/query",
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
     }
 

@@ -36,7 +36,10 @@ pub async fn render(db: &Db, id: Uuid) -> Result<Option<String>> {
         }
         let page_len = page.len();
         for record in page {
-            if record.fq_target == target_str && record.ts >= incident.opened_at && record.ts <= window_end {
+            if record.fq_target == target_str
+                && record.ts >= incident.opened_at
+                && record.ts <= window_end
+            {
                 matching.push(record);
             }
         }
@@ -79,7 +82,12 @@ mod tests {
         }
     }
 
-    fn audit_record(seq: i64, fq_target: &str, ts: chrono::DateTime<Utc>, tail: Option<&AuditRecord>) -> AuditRecord {
+    fn audit_record(
+        seq: i64,
+        fq_target: &str,
+        ts: chrono::DateTime<Utc>,
+        tail: Option<&AuditRecord>,
+    ) -> AuditRecord {
         let r = AuditRecord {
             id: Uuid::new_v4(),
             seq,
@@ -110,17 +118,35 @@ mod tests {
         IncidentRepo::insert(db.repos().as_ref(), &incident).await.unwrap();
 
         // A record for the same target inside the window.
-        let r1 = audit_record(1, &incident.target.to_string(), incident.opened_at + chrono::Duration::minutes(1), None);
+        let r1 = audit_record(
+            1,
+            &incident.target.to_string(),
+            incident.opened_at + chrono::Duration::minutes(1),
+            None,
+        );
         db.repos().append(&r1).await.unwrap();
         // A record for a DIFFERENT target — must be excluded.
-        let r2 = audit_record(2, "p::e::unrelated", incident.opened_at + chrono::Duration::minutes(2), Some(&r1));
+        let r2 = audit_record(
+            2,
+            "p::e::unrelated",
+            incident.opened_at + chrono::Duration::minutes(2),
+            Some(&r1),
+        );
         db.repos().append(&r2).await.unwrap();
         // A record for the same target but OUTSIDE the window (before opened_at).
-        let r3 = audit_record(3, &incident.target.to_string(), incident.opened_at - chrono::Duration::hours(1), Some(&r2));
+        let r3 = audit_record(
+            3,
+            &incident.target.to_string(),
+            incident.opened_at - chrono::Duration::hours(1),
+            Some(&r2),
+        );
         db.repos().append(&r3).await.unwrap();
 
         let md = render(&db, incident.id).await.unwrap().unwrap();
-        assert!(md.contains("systemctl restart app"), "expected the in-window matching record to be rendered:\n{md}");
+        assert!(
+            md.contains("systemctl restart app"),
+            "expected the in-window matching record to be rendered:\n{md}"
+        );
         // Exactly one command line should be rendered (r1), not r2/r3.
         assert_eq!(md.matches("systemctl restart app").count(), 1);
     }

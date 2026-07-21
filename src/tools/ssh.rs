@@ -136,8 +136,7 @@ mod tests {
     async fn missing_command_argument_is_user_facing() {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy);
-        let err =
-            SshTool.call(&ctx, json!({"target": "remundo::prod::web-1"})).await.unwrap_err();
+        let err = SshTool.call(&ctx, json!({"target": "remundo::prod::web-1"})).await.unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
     }
 

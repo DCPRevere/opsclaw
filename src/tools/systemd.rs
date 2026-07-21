@@ -18,8 +18,7 @@ pub struct SystemdTool;
 /// into the composed `systemctl` line even though the fixed verb set alone
 /// already bounds most of the risk.
 fn valid_unit_name(unit: &str) -> bool {
-    !unit.is_empty()
-        && unit.chars().all(|c| c.is_ascii_alphanumeric() || "-_.@:\\".contains(c))
+    !unit.is_empty() && unit.chars().all(|c| c.is_ascii_alphanumeric() || "-_.@:\\".contains(c))
 }
 
 fn compose(action: &str, unit: &str) -> Result<String, ToolError> {
@@ -150,7 +149,10 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         SystemdTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "status", "unit": "nginx"}))
+            .call(
+                &ctx,
+                json!({"target": "remundo::prod::web-1", "action": "status", "unit": "nginx"}),
+            )
             .await
             .unwrap();
         assert_eq!(policy.seen.lock().unwrap()[0].declared_risk, RiskClass::Read);
@@ -173,7 +175,10 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy);
         let err = SystemdTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "reload", "unit": "nginx"}))
+            .call(
+                &ctx,
+                json!({"target": "remundo::prod::web-1", "action": "reload", "unit": "nginx"}),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));

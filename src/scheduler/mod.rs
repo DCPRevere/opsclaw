@@ -53,7 +53,9 @@ pub mod jobs;
 #[cfg(test)]
 mod tests;
 
-pub use jobs::{JobComposer, NoopComposer, RECORD_SCAN_PROMPT, resolved_prompt, seed_default_scan_jobs};
+pub use jobs::{
+    JobComposer, NoopComposer, RECORD_SCAN_PROMPT, resolved_prompt, seed_default_scan_jobs,
+};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -145,15 +147,16 @@ impl SchedulerHandle {
     /// Release one prior `tighten` call. A `relax` with no matching prior
     /// `tighten` is a no-op (the counter is saturating, never goes negative).
     pub fn relax(&self) {
-        let _ = self.tighten_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
-            Some(c.saturating_sub(1))
-        });
+        let _ = self
+            .tighten_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(1)));
         self.recompute_interval();
     }
 
     fn recompute_interval(&self) {
         let tightened = self.tighten_count.load(Ordering::Relaxed) > 0;
-        let new_interval = if tightened { (self.base_interval_ms / 2).max(1000) } else { self.base_interval_ms };
+        let new_interval =
+            if tightened { (self.base_interval_ms / 2).max(1000) } else { self.base_interval_ms };
         self.interval_ms.store(new_interval, Ordering::Relaxed);
     }
 
@@ -198,7 +201,11 @@ impl SchedulerHandle {
         if last == 0 {
             return HeartbeatStatus::Booting;
         }
-        if self.stall(now_ms).is_some() { HeartbeatStatus::Stalled } else { HeartbeatStatus::Healthy }
+        if self.stall(now_ms).is_some() {
+            HeartbeatStatus::Stalled
+        } else {
+            HeartbeatStatus::Healthy
+        }
     }
 
     /// True iff at least `interval_ms()` has elapsed since tick start was
@@ -259,7 +266,11 @@ fn rate_limit_bucket(at: DateTime<Utc>, window: chrono::Duration) -> String {
 /// Run one scheduler pass: fire any due jobs, ping the external dead-man
 /// receiver, and run hourly housekeeping. Pure of timing (the caller supplies
 /// `now_utc`) so it is testable without a real clock.
-pub async fn tick(deps: &SchedulerDeps, handle: &SchedulerHandle, now_utc: DateTime<Utc>) -> Result<()> {
+pub async fn tick(
+    deps: &SchedulerDeps,
+    handle: &SchedulerHandle,
+    now_utc: DateTime<Utc>,
+) -> Result<()> {
     // Heartbeat: record liveness BEFORE any phase work (see SchedulerHandle
     // doc) — a slow phase must read as lag, not a stall.
     handle.mark_tick_start(now_utc);
@@ -308,12 +319,7 @@ async fn ping_deadman(deps: &SchedulerDeps, now_utc: DateTime<Utc>) -> Result<()
         .map_err(|e| crate::Error::other(format!("deadman client build: {e}")))?;
     if let Err(e) = client.post(url).send().await {
         let bucket = rate_limit_bucket(now_utc, ALERT_RATE_LIMIT_WINDOW);
-        if deps
-            .control
-            .claim(CLAIM_KIND_DEADMAN_FAILURE, &bucket, now_utc)
-            .await
-            .unwrap_or(true)
-        {
+        if deps.control.claim(CLAIM_KIND_DEADMAN_FAILURE, &bucket, now_utc).await.unwrap_or(true) {
             tracing::warn!(url, error = %e, "dead-man heartbeat ping failed");
         }
     }
@@ -336,22 +342,28 @@ pub fn spawn(
     tracker: &tokio_util::task::TaskTracker,
 ) {
     spawn_watchdog(deps.clone(), handle.clone(), shutdown.clone(), tracker);
-    supervise("scheduler", (deps, handle.clone()), shutdown, tracker, |(deps, handle)| async move {
-        // The supervisor wakes every SUPERVISE_GRANULARITY so a `tighten()`
-        // is observed promptly, but only actually ticks once the ADAPTIVE
-        // interval has elapsed — otherwise a tightened (sub-base) interval
-        // would still only fire at the stale base cadence, and an untightened
-        // base interval would fire far too often.
-        if !handle.due(Utc::now().timestamp_millis()) {
-            return;
-        }
-        let started = std::time::Instant::now();
-        let res = tick(&deps, &handle, Utc::now()).await;
-        handle.mark_tick_duration(started.elapsed());
-        if let Err(e) = res {
-            tracing::warn!("scheduler tick error: {e}");
-        }
-    });
+    supervise(
+        "scheduler",
+        (deps, handle.clone()),
+        shutdown,
+        tracker,
+        |(deps, handle)| async move {
+            // The supervisor wakes every SUPERVISE_GRANULARITY so a `tighten()`
+            // is observed promptly, but only actually ticks once the ADAPTIVE
+            // interval has elapsed — otherwise a tightened (sub-base) interval
+            // would still only fire at the stale base cadence, and an untightened
+            // base interval would fire far too often.
+            if !handle.due(Utc::now().timestamp_millis()) {
+                return;
+            }
+            let started = std::time::Instant::now();
+            let res = tick(&deps, &handle, Utc::now()).await;
+            handle.mark_tick_duration(started.elapsed());
+            if let Err(e) = res {
+                tracing::warn!("scheduler tick error: {e}");
+            }
+        },
+    );
 }
 
 /// Spawn the stall/lag watchdog on its own supervised loop — checked every
@@ -363,53 +375,59 @@ fn spawn_watchdog(
     shutdown: tokio_util::sync::CancellationToken,
     tracker: &tokio_util::task::TaskTracker,
 ) {
-    supervise("scheduler-watchdog", (deps, handle), shutdown, tracker, |(deps, handle)| async move {
-        let now = Utc::now();
-        if let Some((last, age)) = handle.stall(now.timestamp_millis()) {
-            let bucket = rate_limit_bucket(now, ALERT_RATE_LIMIT_WINDOW);
-            if deps.control.claim(CLAIM_KIND_STALL_ALERT, &bucket, now).await.unwrap_or(true) {
-                tracing::error!(
-                    last_tick_ms = last,
-                    stalled_for_ms = age,
-                    "scheduler STALL: the fast loop has not ticked within its watchdog threshold"
-                );
-                deps.channel
-                    .send(crate::channels::OutboundMessage {
-                        operator: None,
-                        body: format!(
-                            "Scheduler stalled: the fast loop has not ticked in {}s. \
+    supervise(
+        "scheduler-watchdog",
+        (deps, handle),
+        shutdown,
+        tracker,
+        |(deps, handle)| async move {
+            let now = Utc::now();
+            if let Some((last, age)) = handle.stall(now.timestamp_millis()) {
+                let bucket = rate_limit_bucket(now, ALERT_RATE_LIMIT_WINDOW);
+                if deps.control.claim(CLAIM_KIND_STALL_ALERT, &bucket, now).await.unwrap_or(true) {
+                    tracing::error!(
+                        last_tick_ms = last,
+                        stalled_for_ms = age,
+                        "scheduler STALL: the fast loop has not ticked within its watchdog threshold"
+                    );
+                    deps.channel
+                        .send(crate::channels::OutboundMessage {
+                            operator: None,
+                            body: format!(
+                                "Scheduler stalled: the fast loop has not ticked in {}s. \
                              Scan jobs and the dead-man heartbeat are NOT running. \
                              Check the app logs for a wedged phase or a dead task.",
-                            age / 1000
-                        ),
-                    })
-                    .await
-                    .ok();
+                                age / 1000
+                            ),
+                        })
+                        .await
+                        .ok();
+                }
             }
-        }
-        if let Some(dur) = handle.lag() {
-            let bucket = rate_limit_bucket(now, ALERT_RATE_LIMIT_WINDOW);
-            if deps.control.claim(CLAIM_KIND_LAG_ALERT, &bucket, now).await.unwrap_or(true) {
-                tracing::warn!(
-                    tick_ms = dur,
-                    "scheduler LAG: last tick took far longer than the current interval"
-                );
-                deps.channel
-                    .send(crate::channels::OutboundMessage {
-                        operator: None,
-                        body: format!(
-                            "Scheduler running late: the last tick took {}s against a {}s \
+            if let Some(dur) = handle.lag() {
+                let bucket = rate_limit_bucket(now, ALERT_RATE_LIMIT_WINDOW);
+                if deps.control.claim(CLAIM_KIND_LAG_ALERT, &bucket, now).await.unwrap_or(true) {
+                    tracing::warn!(
+                        tick_ms = dur,
+                        "scheduler LAG: last tick took far longer than the current interval"
+                    );
+                    deps.channel
+                        .send(crate::channels::OutboundMessage {
+                            operator: None,
+                            body: format!(
+                                "Scheduler running late: the last tick took {}s against a {}s \
                              cadence. The loop is alive but proactive delivery is persistently \
                              late — check per-phase timings in the app logs.",
-                            dur / 1000,
-                            handle.interval().as_secs()
-                        ),
-                    })
-                    .await
-                    .ok();
+                                dur / 1000,
+                                handle.interval().as_secs()
+                            ),
+                        })
+                        .await
+                        .ok();
+                }
             }
-        }
-    });
+        },
+    );
     // NB: the watchdog's own supervise() loop runs on a fixed 1s cadence
     // (SUPERVISE_WATCHDOG_INTERVAL below), independent of the scheduler's
     // adaptive interval — the watchdog must sample often enough to catch a

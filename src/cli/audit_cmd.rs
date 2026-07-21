@@ -25,10 +25,14 @@ pub struct VerifyOutcome {
 fn describe(e: &ChainError) -> String {
     match e {
         ChainError::BadHash { seq } => {
-            format!("record at seq {seq} has a hash that doesn't match its own contents — tampered or corrupted")
+            format!(
+                "record at seq {seq} has a hash that doesn't match its own contents — tampered or corrupted"
+            )
         }
         ChainError::BrokenLink { seq } => {
-            format!("record at seq {seq}'s prev_hash doesn't match the previous record's hash — chain broken")
+            format!(
+                "record at seq {seq}'s prev_hash doesn't match the previous record's hash — chain broken"
+            )
         }
         ChainError::BadSeq { seq, expected } => {
             format!("record out of order: got seq {seq}, expected {expected}")

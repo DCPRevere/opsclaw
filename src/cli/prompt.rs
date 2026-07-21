@@ -59,11 +59,7 @@ impl Prompter for StdioPrompter {
         }
         std::io::stdout().flush().ok();
         let line = self.read_line()?;
-        if line.is_empty() {
-            Ok(default.unwrap_or("").to_string())
-        } else {
-            Ok(line)
-        }
+        if line.is_empty() { Ok(default.unwrap_or("").to_string()) } else { Ok(line) }
     }
 
     fn confirm(&mut self, question: &str, default: bool) -> Result<bool> {
@@ -114,11 +110,7 @@ impl Prompter for ScriptedPrompter {
             .answers
             .pop_front()
             .unwrap_or_else(|| panic!("ScriptedPrompter under-scripted at ask({question:?})"));
-        if answer.is_empty() {
-            Ok(default.unwrap_or("").to_string())
-        } else {
-            Ok(answer)
-        }
+        if answer.is_empty() { Ok(default.unwrap_or("").to_string()) } else { Ok(answer) }
     }
 
     fn confirm(&mut self, question: &str, default: bool) -> Result<bool> {

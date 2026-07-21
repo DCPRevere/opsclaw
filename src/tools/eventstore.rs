@@ -59,10 +59,14 @@ impl Tool for ReadStreamTool {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
         let resource = args["resource"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("eventstore_read_stream requires a \"resource\" argument".to_string())
+            ToolError::UserFacing(
+                "eventstore_read_stream requires a \"resource\" argument".to_string(),
+            )
         })?;
         let stream = args["stream"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("eventstore_read_stream requires a \"stream\" argument".to_string())
+            ToolError::UserFacing(
+                "eventstore_read_stream requires a \"stream\" argument".to_string(),
+            )
         })?;
         let count = args["count"].as_i64().unwrap_or(20);
         let (_, auth) = ctx.resolve_resource(resource)?;
@@ -118,10 +122,14 @@ impl Tool for ProjectionStatusTool {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
         let resource = args["resource"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("eventstore_projection_status requires a \"resource\" argument".to_string())
+            ToolError::UserFacing(
+                "eventstore_projection_status requires a \"resource\" argument".to_string(),
+            )
         })?;
         let name = args["name"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("eventstore_projection_status requires a \"name\" argument".to_string())
+            ToolError::UserFacing(
+                "eventstore_projection_status requires a \"name\" argument".to_string(),
+            )
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
         let result = get_json(&client(), auth, self.name(), &format!("/projection/{name}")).await?;
@@ -184,7 +192,10 @@ mod tests {
             .await;
         let ctx = ctx_with(&server.uri(), Some("tok"));
         let r = ReadStreamTool
-            .call(&ctx, json!({"resource": target().to_string(), "stream": "orders-123", "count": 5}))
+            .call(
+                &ctx,
+                json!({"resource": target().to_string(), "stream": "orders-123", "count": 5}),
+            )
             .await
             .unwrap();
         assert!(r.output.contains("entries"));
@@ -195,7 +206,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/projection/orders-projection"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "Running", "position": 12345})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"status": "Running", "position": 12345})),
+            )
             .mount(&server)
             .await;
         let ctx = ctx_with(&server.uri(), None);

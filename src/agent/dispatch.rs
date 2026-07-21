@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use crate::Result;
 use crate::agent::{self, AgentDeps};
 use crate::channels::Channel;
 use crate::config::{Config, SecretStore};
@@ -34,9 +35,8 @@ use crate::memory::{self, Memory};
 use crate::policy::PolicyExecute;
 use crate::runbooks::RunbookStore;
 use crate::scheduler::JobComposer;
-use crate::tools::endpoint::{registry_from_config, EndpointRegistry};
+use crate::tools::endpoint::{EndpointRegistry, registry_from_config};
 use crate::tools::{self, ToolCtx};
-use crate::Result;
 
 /// Everything needed to assemble a real `ToolCtx` — gathered once at daemon
 /// boot (this struct, not `ToolCtx` itself, is what a caller holds across
@@ -152,7 +152,8 @@ fn team_context_line(targets: &[FqTarget]) -> Option<String> {
     if targets.is_empty() {
         return None;
     }
-    let names: Vec<String> = targets.iter().filter(|t| t.resource.is_none()).map(|t| t.to_string()).collect();
+    let names: Vec<String> =
+        targets.iter().filter(|t| t.resource.is_none()).map(|t| t.to_string()).collect();
     if names.is_empty() {
         return None;
     }
@@ -189,14 +190,22 @@ impl AgentJobComposer {
 
 #[async_trait]
 impl JobComposer for AgentJobComposer {
-    async fn compose(&self, job: &Job, prompt: &str, _now_utc: DateTime<Utc>) -> Result<Option<String>> {
+    async fn compose(
+        &self,
+        job: &Job,
+        prompt: &str,
+        _now_utc: DateTime<Utc>,
+    ) -> Result<Option<String>> {
         let principal = Principal::Agent { job: Some(job.id) };
         let ctx = build_tool_ctx(&self.deps, principal);
         let registry = tools::registry(&ctx, /* heartbeat = */ true);
         let team_context = team_context_line(&ctx.known_targets);
 
-        let agent_deps =
-            AgentDeps { llm: self.deps.llm.clone(), memory: self.deps.memory.clone(), heartbeat: true };
+        let agent_deps = AgentDeps {
+            llm: self.deps.llm.clone(),
+            memory: self.deps.memory.clone(),
+            heartbeat: true,
+        };
 
         // A malformed/unclassified job prompt is a real failure the
         // scheduler's own retry/dead-letter path should see (never a
@@ -205,7 +214,8 @@ impl JobComposer for AgentJobComposer {
         // provider hiccup `FallbackLlm` gave up on), so this just
         // propagates it through `?` rather than swallowing or downgrading
         // it.
-        let reply = agent::run_turn(&agent_deps, &ctx, &registry, team_context.as_deref(), prompt).await?;
+        let reply =
+            agent::run_turn(&agent_deps, &ctx, &registry, team_context.as_deref(), prompt).await?;
 
         if memory::should_retain(prompt) {
             agent::retain_turn_detached(&self.deps.memory, "agent", prompt.to_string());
@@ -255,8 +265,11 @@ impl IngestAlert for WebhookIngest {
         let registry = tools::registry(&ctx, /* heartbeat = */ false);
         let team_context = team_context_line(&ctx.known_targets);
 
-        let agent_deps =
-            AgentDeps { llm: self.deps.llm.clone(), memory: self.deps.memory.clone(), heartbeat: false };
+        let agent_deps = AgentDeps {
+            llm: self.deps.llm.clone(),
+            memory: self.deps.memory.clone(),
+            heartbeat: false,
+        };
 
         // The payload is DATA: framed as an observation, never merged into
         // the instruction stream (agent::prompt's own boundary). `source`
@@ -267,7 +280,9 @@ impl IngestAlert for WebhookIngest {
         let message =
             format!("{observation}\nAn alert just arrived on this channel. Diagnose and respond.");
 
-        let reply = agent::run_turn(&agent_deps, &ctx, &registry, team_context.as_deref(), &message).await?;
+        let reply =
+            agent::run_turn(&agent_deps, &ctx, &registry, team_context.as_deref(), &message)
+                .await?;
 
         if memory::should_retain(&message) {
             agent::retain_turn_detached(&self.deps.memory, "agent", message.clone());

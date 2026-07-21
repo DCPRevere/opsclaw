@@ -14,7 +14,9 @@ use std::path::Path;
 
 use crate::Result;
 use crate::cli::prompt::Prompter;
-use crate::config::{Config, EnvCfg, ProjectCfg, ResourceCfg, SecretRef, TargetCfg, TargetKindName};
+use crate::config::{
+    Config, EnvCfg, ProjectCfg, ResourceCfg, SecretRef, TargetCfg, TargetKindName,
+};
 use crate::domain::{Autonomy, CloudProvider, ExpectedState};
 
 /// Serialize `cfg` and write it to `path`, creating parent directories if
@@ -61,12 +63,7 @@ fn ask_choice(
 }
 
 fn ask_autonomy(p: &mut dyn Prompter, question: &str) -> Result<Option<Autonomy>> {
-    let answer = ask_choice(
-        p,
-        question,
-        &["", "observe", "suggest", "act_on_known", "auto"],
-        "",
-    )?;
+    let answer = ask_choice(p, question, &["", "observe", "suggest", "act_on_known", "auto"], "")?;
     if answer.is_empty() {
         Ok(None) // inherit from the level above (project > env > target), DESIGN.md §1
     } else {
@@ -96,8 +93,12 @@ fn wizard_target(p: &mut dyn Prompter) -> Result<TargetCfg> {
     } else {
         None
     };
-    let region =
-        if provider.is_some() { let r = p.ask("region (blank for none)", None)?; if r.is_empty() { None } else { Some(r) } } else { None };
+    let region = if provider.is_some() {
+        let r = p.ask("region (blank for none)", None)?;
+        if r.is_empty() { None } else { Some(r) }
+    } else {
+        None
+    };
 
     let address = {
         let a = p.ask("address (host for ssh, context hint for kubernetes; blank if n/a)", None)?;
@@ -147,8 +148,12 @@ fn wizard_target(p: &mut dyn Prompter) -> Result<TargetCfg> {
 fn wizard_env(p: &mut dyn Prompter) -> Result<EnvCfg> {
     let name = p.ask("environment name", None)?;
     let autonomy = ask_autonomy(p, "environment autonomy override (blank = inherit)")?;
-    let expected_state_str =
-        ask_choice(p, "environment expected state", &["running", "stopped", "ephemeral"], "running")?;
+    let expected_state_str = ask_choice(
+        p,
+        "environment expected state",
+        &["running", "stopped", "ephemeral"],
+        "running",
+    )?;
     let expected_state = Some(match expected_state_str.as_str() {
         "running" => ExpectedState::Running,
         "stopped" => ExpectedState::Stopped,
@@ -241,9 +246,14 @@ fn load_for_edit(path: &Path) -> Result<Config> {
 /// `crate::Result<()>`, so the caller can print every failure instead of
 /// just the first.
 pub fn validate(config_path: &Path) -> Result<Vec<String>> {
-    let raw = if config_path.exists() { std::fs::read_to_string(config_path)? } else { String::new() };
+    let raw =
+        if config_path.exists() { std::fs::read_to_string(config_path)? } else { String::new() };
     if !raw.is_empty() && crate::cli::legacy::looks_like_legacy_config(&raw) {
-        return Ok(vec![format!("{}: {}", config_path.display(), crate::cli::legacy::LEGACY_CONFIG_MESSAGE)]);
+        return Ok(vec![format!(
+            "{}: {}",
+            config_path.display(),
+            crate::cli::legacy::LEGACY_CONFIG_MESSAGE
+        )]);
     }
 
     let cfg = Config::load(Some(config_path))?;
@@ -262,19 +272,19 @@ mod tests {
     #[test]
     fn wizard_project_single_env_single_target() {
         let mut p = ScriptedPrompter::new([
-            "remundo",  // project name
-            "",         // project autonomy: inherit
-            "prod",     // env name
-            "",         // env autonomy: inherit
-            "running",  // env expected_state
-            "bastion",  // target name
-            "ssh",      // target kind
+            "remundo",                 // project name
+            "",                        // project autonomy: inherit
+            "prod",                    // env name
+            "",                        // env autonomy: inherit
+            "running",                 // env expected_state
+            "bastion",                 // target name
+            "ssh",                     // target kind
             "bastion.remundo.example", // address
             "env:REMUNDO_SSH_KEY",     // credential
-            "",         // target autonomy: inherit
-            "running",  // target expected_state
-            "n",        // add another target? no
-            "n",        // add another env? no
+            "",                        // target autonomy: inherit
+            "running",                 // target expected_state
+            "n",                       // add another target? no
+            "n",                       // add another env? no
         ]);
         let project = wizard_project(&mut p).unwrap();
         assert_eq!(project.name, "remundo");
@@ -291,9 +301,7 @@ mod tests {
 
     #[test]
     fn wizard_target_local_needs_no_credential() {
-        let mut p = ScriptedPrompter::new([
-            "this-host", "local", "", "", "running",
-        ]);
+        let mut p = ScriptedPrompter::new(["this-host", "local", "", "", "running"]);
         let t = wizard_target(&mut p).unwrap();
         assert_eq!(t.kind, TargetKindName::Local);
         assert!(t.credential.is_none());
@@ -302,7 +310,14 @@ mod tests {
     #[test]
     fn wizard_target_cloud_requires_provider() {
         let mut p = ScriptedPrompter::new([
-            "aci-runner", "cloud", "azure", "westeurope", "", "env:AZURE_CRED", "", "running",
+            "aci-runner",
+            "cloud",
+            "azure",
+            "westeurope",
+            "",
+            "env:AZURE_CRED",
+            "",
+            "running",
         ]);
         let t = wizard_target(&mut p).unwrap();
         assert_eq!(t.kind, TargetKindName::Cloud);
@@ -313,7 +328,13 @@ mod tests {
     #[test]
     fn wizard_target_rejects_bad_credential_ref_then_accepts() {
         let mut p = ScriptedPrompter::new([
-            "bastion", "ssh", "", "not-a-valid-ref", "env:GOOD", "", "running",
+            "bastion",
+            "ssh",
+            "",
+            "not-a-valid-ref",
+            "env:GOOD",
+            "",
+            "running",
         ]);
         let t = wizard_target(&mut p).unwrap();
         assert_eq!(t.credential.as_ref().map(|c| c.to_string()), Some("env:GOOD".to_string()));
@@ -325,7 +346,18 @@ mod tests {
         let config_path = dir.path().join("config.toml");
 
         let mut p = ScriptedPrompter::new([
-            "remundo", "", "prod", "", "running", "this-host", "local", "", "", "running", "n", "n",
+            "remundo",
+            "",
+            "prod",
+            "",
+            "running",
+            "this-host",
+            "local",
+            "",
+            "",
+            "running",
+            "n",
+            "n",
         ]);
         let project = add_project(&mut p, &config_path).unwrap();
         assert_eq!(project.name, "remundo");
@@ -343,12 +375,34 @@ mod tests {
         let config_path = dir.path().join("config.toml");
 
         let mut p1 = ScriptedPrompter::new([
-            "remundo", "", "prod", "", "running", "this-host", "local", "", "", "running", "n", "n",
+            "remundo",
+            "",
+            "prod",
+            "",
+            "running",
+            "this-host",
+            "local",
+            "",
+            "",
+            "running",
+            "n",
+            "n",
         ]);
         add_project(&mut p1, &config_path).unwrap();
 
         let mut p2 = ScriptedPrompter::new([
-            "remundo", "", "staging", "", "running", "this-host", "local", "", "", "running", "n", "n",
+            "remundo",
+            "",
+            "staging",
+            "",
+            "running",
+            "this-host",
+            "local",
+            "",
+            "",
+            "running",
+            "n",
+            "n",
         ]);
         let err = add_project(&mut p2, &config_path).unwrap_err();
         assert!(err.to_string().contains("already exists"));
@@ -390,7 +444,8 @@ mod tests {
     fn validate_detects_legacy_config_without_raw_parse_error() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
-        std::fs::write(&config_path, "schema_version = 2\n[providers]\nfallback = \"openai\"\n").unwrap();
+        std::fs::write(&config_path, "schema_version = 2\n[providers]\nfallback = \"openai\"\n")
+            .unwrap();
 
         let errors = validate(&config_path).unwrap();
         assert_eq!(errors.len(), 1);

@@ -29,7 +29,12 @@ pub trait JobComposer: Send + Sync {
     /// Compose the body to send for a `Prompt`/`ScanRoutine` job. `Ok(None)`
     /// means "ran fine but produced nothing to send" (treated like gianna's
     /// empty-reply case: logged, not an error, not a failure to retry).
-    async fn compose(&self, job: &Job, prompt: &str, now_utc: DateTime<Utc>) -> Result<Option<String>>;
+    async fn compose(
+        &self,
+        job: &Job,
+        prompt: &str,
+        now_utc: DateTime<Utc>,
+    ) -> Result<Option<String>>;
 }
 
 /// The fail-closed default: every compose "succeeds" with nothing to send.
@@ -40,7 +45,12 @@ pub struct NoopComposer;
 
 #[async_trait]
 impl JobComposer for NoopComposer {
-    async fn compose(&self, _job: &Job, _prompt: &str, _now_utc: DateTime<Utc>) -> Result<Option<String>> {
+    async fn compose(
+        &self,
+        _job: &Job,
+        _prompt: &str,
+        _now_utc: DateTime<Utc>,
+    ) -> Result<Option<String>> {
         Ok(None)
     }
 }
@@ -171,11 +181,20 @@ async fn fire_one_job(deps: &SchedulerDeps, job: &mut Job, now_utc: DateTime<Utc
             // concurrency slot (or the tick) open forever. A timeout is
             // treated like "produced nothing" — released and retried with
             // backoff — so it flows through the same failure path below.
-            match tokio::time::timeout(COMPOSE_TIMEOUT, deps.composer.compose(job, prompt, now_utc)).await {
+            match tokio::time::timeout(COMPOSE_TIMEOUT, deps.composer.compose(job, prompt, now_utc))
+                .await
+            {
                 Ok(Ok(body)) => body,
                 Ok(Err(e)) => {
-                    return handle_fire_failure(deps, job, &claim_key, occurrence, &format!("compose: {e}"), now_utc)
-                        .await;
+                    return handle_fire_failure(
+                        deps,
+                        job,
+                        &claim_key,
+                        occurrence,
+                        &format!("compose: {e}"),
+                        now_utc,
+                    )
+                    .await;
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -237,8 +256,15 @@ async fn fire_one_job(deps: &SchedulerDeps, job: &mut Job, now_utc: DateTime<Utc
                 let _ = deps.jobs.clear_job_failure(job.id, &claim_key).await;
             }
             Err(e) => {
-                return handle_fire_failure(deps, job, &claim_key, occurrence, &format!("send: {e}"), now_utc)
-                    .await;
+                return handle_fire_failure(
+                    deps,
+                    job,
+                    &claim_key,
+                    occurrence,
+                    &format!("send: {e}"),
+                    now_utc,
+                )
+                .await;
             }
         }
     } else {
@@ -250,8 +276,15 @@ async fn fire_one_job(deps: &SchedulerDeps, job: &mut Job, now_utc: DateTime<Utc
         // with backoff, exactly like the failure path; a give-up
         // dead-letters it. Recurring jobs just wait for the next run.
         if !job.schedule.is_recurring() {
-            return handle_fire_failure(deps, job, &claim_key, occurrence, "compose produced nothing", now_utc)
-                .await;
+            return handle_fire_failure(
+                deps,
+                job,
+                &claim_key,
+                occurrence,
+                "compose produced nothing",
+                now_utc,
+            )
+            .await;
         }
     }
 
@@ -324,7 +357,13 @@ async fn record_and_triage_failure(
     false
 }
 
-async fn alert_deadletter(deps: &SchedulerDeps, job: &Job, attempts: i64, error: &str, now_utc: DateTime<Utc>) {
+async fn alert_deadletter(
+    deps: &SchedulerDeps,
+    job: &Job,
+    attempts: i64,
+    error: &str,
+    now_utc: DateTime<Utc>,
+) {
     let key = job.id.to_string();
     if !deps.control.claim(CLAIM_KIND_JOB_DEADLETTER, &key, now_utc).await.unwrap_or(true) {
         return; // already alerted this job's dead-letter (a job id fires this once, ever)
@@ -342,7 +381,13 @@ async fn alert_deadletter(deps: &SchedulerDeps, job: &Job, attempts: i64, error:
         .ok();
 }
 
-async fn alert_failing(deps: &SchedulerDeps, job: &Job, attempts: i64, error: &str, now_utc: DateTime<Utc>) {
+async fn alert_failing(
+    deps: &SchedulerDeps,
+    job: &Job,
+    attempts: i64,
+    error: &str,
+    now_utc: DateTime<Utc>,
+) {
     // Bucketed by job + coarse time window so a job stuck failing every
     // backoff interval pages again after the window rather than once ever.
     let bucket = super::rate_limit_bucket(now_utc, chrono::Duration::hours(6));
@@ -387,8 +432,7 @@ async fn advance_and_save(deps: &SchedulerDeps, job: &mut Job, now: DateTime<Utc
 /// snapshotted into a `jobs` row — so editing a const here reaches every
 /// unedited seeded job on its very next tick, no migration.
 pub const RECORD_SCAN_PROMPT: &str = "record_scan";
-const DEFAULT_SCAN_PROMPT: &str =
-    "Scan this target for anomalies: elevated error rates, resource pressure (CPU/memory/disk), \
+const DEFAULT_SCAN_PROMPT: &str = "Scan this target for anomalies: elevated error rates, resource pressure (CPU/memory/disk), \
      crash-looping or flapping processes, and any log lines indicating a fault. Corroborate any \
      single signal before treating it as a finding (an app health endpoint proves only that its \
      own process loop is alive) — never open an incident on one weak signal alone.";

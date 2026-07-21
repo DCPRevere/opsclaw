@@ -22,7 +22,8 @@ pub struct KubernetesTool;
 /// attempts and matches the real naming rules closely enough to be a useful
 /// early error.
 fn valid_k8s_name(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-.".contains(c))
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-.".contains(c))
 }
 
 fn compose(
@@ -44,7 +45,9 @@ fn compose(
     match action {
         "get" | "describe" => {
             let resource = resource.ok_or_else(|| {
-                ToolError::UserFacing(format!("kubernetes {action} requires a \"resource\" argument"))
+                ToolError::UserFacing(format!(
+                    "kubernetes {action} requires a \"resource\" argument"
+                ))
             })?;
             if !valid_k8s_name(resource) {
                 return Err(ToolError::UserFacing(format!("invalid resource type {resource:?}")));
@@ -62,7 +65,9 @@ fn compose(
         }
         "logs" => {
             let name = name.ok_or_else(|| {
-                ToolError::UserFacing("kubernetes logs requires a \"name\" argument (the pod name)".to_string())
+                ToolError::UserFacing(
+                    "kubernetes logs requires a \"name\" argument (the pod name)".to_string(),
+                )
             })?;
             if !valid_k8s_name(name) {
                 return Err(ToolError::UserFacing(format!("invalid pod name {name:?}")));
@@ -71,7 +76,10 @@ fn compose(
         }
         "rollout_restart" => {
             let resource = resource.ok_or_else(|| {
-                ToolError::UserFacing("kubernetes rollout_restart requires a \"resource\" argument, e.g. deploy/api".to_string())
+                ToolError::UserFacing(
+                    "kubernetes rollout_restart requires a \"resource\" argument, e.g. deploy/api"
+                        .to_string(),
+                )
             })?;
             // resource here is a slash-form ref (deploy/api) — validate each
             // segment rather than the whole string.
@@ -84,7 +92,9 @@ fn compose(
         }
         "delete_pod" => {
             let name = name.ok_or_else(|| {
-                ToolError::UserFacing("kubernetes delete_pod requires a \"name\" argument".to_string())
+                ToolError::UserFacing(
+                    "kubernetes delete_pod requires a \"name\" argument".to_string(),
+                )
             })?;
             if !valid_k8s_name(name) {
                 return Err(ToolError::UserFacing(format!("invalid pod name {name:?}")));

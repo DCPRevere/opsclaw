@@ -83,10 +83,7 @@ impl RunbookStore {
         for (file, runbook) in runbooks {
             by_title.insert(runbook.title().to_string(), LoadedRunbook { file, runbook });
         }
-        RunbookStore {
-            dir: dir.into(),
-            state: RwLock::new(State { by_title, errors: Vec::new() }),
-        }
+        RunbookStore { dir: dir.into(), state: RwLock::new(State { by_title, errors: Vec::new() }) }
     }
 
     /// Re-scan the configured directory, replacing the snapshot atomically.
@@ -179,9 +176,8 @@ mod tests {
     use crate::runbooks::template::INIT_TEMPLATE;
 
     fn write_runbook(dir: &Path, name: &str, title: &str) {
-        let src = format!(
-            "+++\ntitle = \"{title}\"\n\n[trigger]\nkeywords = [\"x\"]\n+++\n- step one\n"
-        );
+        let src =
+            format!("+++\ntitle = \"{title}\"\n\n[trigger]\nkeywords = [\"x\"]\n+++\n- step one\n");
         std::fs::write(dir.join(format!("{name}.md")), src).unwrap();
     }
 
@@ -268,10 +264,8 @@ mod tests {
     #[test]
     fn from_parsed_builds_a_store_with_no_filesystem() {
         let rb = Runbook::parse(INIT_TEMPLATE).unwrap();
-        let store = RunbookStore::from_parsed(
-            "/does/not/exist",
-            vec![("seed.md".to_string(), rb.clone())],
-        );
+        let store =
+            RunbookStore::from_parsed("/does/not/exist", vec![("seed.md".to_string(), rb.clone())]);
         assert_eq!(store.list().len(), 1);
         assert_eq!(store.get(rb.title()).unwrap().file, "seed.md");
     }

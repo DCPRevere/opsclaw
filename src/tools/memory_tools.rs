@@ -130,9 +130,9 @@ impl Tool for StoreMemoryTool {
     }
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
-        let fact = args["fact"]
-            .as_str()
-            .ok_or_else(|| ToolError::UserFacing("store_memory requires a \"fact\" argument".to_string()))?;
+        let fact = args["fact"].as_str().ok_or_else(|| {
+            ToolError::UserFacing("store_memory requires a \"fact\" argument".to_string())
+        })?;
         if !self.memory.is_enabled() {
             return Ok(ToolResult {
                 output: "memory is not configured for this deployment — I can't actually save \
@@ -192,9 +192,9 @@ impl Tool for ForgetMemoryTool {
         let memory_id = args["memory_id"].as_str().ok_or_else(|| {
             ToolError::UserFacing("forget_memory requires a \"memory_id\" argument".to_string())
         })?;
-        let reason = args["reason"]
-            .as_str()
-            .ok_or_else(|| ToolError::UserFacing("forget_memory requires a \"reason\" argument".to_string()))?;
+        let reason = args["reason"].as_str().ok_or_else(|| {
+            ToolError::UserFacing("forget_memory requires a \"reason\" argument".to_string())
+        })?;
         if !self.memory.is_enabled() {
             return Ok(ToolResult {
                 output: "memory is not configured for this deployment — there is nothing to \

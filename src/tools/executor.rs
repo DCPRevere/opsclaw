@@ -193,9 +193,10 @@ pub(crate) mod tests {
             }
         }
         let ctx = ctx_with(std::sync::Arc::new(Approval));
-        let r = run_command(&ctx, "systemd", target(), "restart nginx".into(), RiskClass::Medium, None)
-            .await
-            .unwrap();
+        let r =
+            run_command(&ctx, "systemd", target(), "restart nginx".into(), RiskClass::Medium, None)
+                .await
+                .unwrap();
         assert!(r.output.contains("NOT run yet"));
         assert!(r.output.contains("awaiting approval") || r.output.contains("queued"));
     }
@@ -206,13 +207,23 @@ pub(crate) mod tests {
         #[async_trait]
         impl PolicyExecute for Blocked {
             async fn execute(&self, _req: CR) -> crate::Result<PolicyOutcome> {
-                Ok(PolicyOutcome::Blocked { reason: "observe autonomy".into(), dry_run_logged: true })
+                Ok(PolicyOutcome::Blocked {
+                    reason: "observe autonomy".into(),
+                    dry_run_logged: true,
+                })
             }
         }
         let ctx = ctx_with(std::sync::Arc::new(Blocked));
-        let r = run_command(&ctx, "docker", target(), "docker restart x".into(), RiskClass::Medium, None)
-            .await
-            .unwrap();
+        let r = run_command(
+            &ctx,
+            "docker",
+            target(),
+            "docker restart x".into(),
+            RiskClass::Medium,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(r.output.contains("did NOT run"));
         assert!(r.output.contains("observe autonomy"));
     }

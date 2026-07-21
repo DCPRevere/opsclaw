@@ -55,10 +55,14 @@ impl Tool for InstantQueryTool {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
         let resource = args["resource"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("prometheus_instant_query requires a \"resource\" argument".to_string())
+            ToolError::UserFacing(
+                "prometheus_instant_query requires a \"resource\" argument".to_string(),
+            )
         })?;
         let query = args["query"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("prometheus_instant_query requires a \"query\" argument".to_string())
+            ToolError::UserFacing(
+                "prometheus_instant_query requires a \"query\" argument".to_string(),
+            )
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
 
@@ -117,13 +121,19 @@ impl Tool for RangeQueryTool {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
         let resource = args["resource"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("prometheus_range_query requires a \"resource\" argument".to_string())
+            ToolError::UserFacing(
+                "prometheus_range_query requires a \"resource\" argument".to_string(),
+            )
         })?;
         let query = args["query"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("prometheus_range_query requires a \"query\" argument".to_string())
+            ToolError::UserFacing(
+                "prometheus_range_query requires a \"query\" argument".to_string(),
+            )
         })?;
         let start = args["start"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("prometheus_range_query requires a \"start\" argument".to_string())
+            ToolError::UserFacing(
+                "prometheus_range_query requires a \"start\" argument".to_string(),
+            )
         })?;
         let end = args["end"].as_str().ok_or_else(|| {
             ToolError::UserFacing("prometheus_range_query requires an \"end\" argument".to_string())
@@ -236,7 +246,10 @@ mod tests {
     async fn range_query_requires_all_of_start_end_step() {
         let ctx = ctx_with("http://unused", None);
         let err = RangeQueryTool
-            .call(&ctx, json!({"resource": target().to_string(), "query": "up", "start": "x", "end": "y"}))
+            .call(
+                &ctx,
+                json!({"resource": target().to_string(), "query": "up", "start": "x", "end": "y"}),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
@@ -247,7 +260,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path_regex(r"^/api/v1/query_range$"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "success", "data": {}})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"status": "success", "data": {}})),
+            )
             .mount(&server)
             .await;
         let ctx = ctx_with(&server.uri(), None);

@@ -173,8 +173,9 @@ pub async fn run_turn(
                     continue;
                 };
 
-                let action_key =
-                    tool.is_action().then(|| format!("{}::{}", call.name, canonical_args(&call.args)));
+                let action_key = tool
+                    .is_action()
+                    .then(|| format!("{}::{}", call.name, canonical_args(&call.args)));
 
                 let output = if let Some(key) = &action_key
                     && let Some(prev) = executed_actions.get(key)
@@ -570,10 +571,15 @@ mod tests {
 
     #[test]
     fn user_facing_error_is_relayed_with_detail() {
-        let msg =
-            tool_error_for_model("validate_me", &ToolError::UserFacing("unknown target 'foo'".into()));
+        let msg = tool_error_for_model(
+            "validate_me",
+            &ToolError::UserFacing("unknown target 'foo'".into()),
+        );
         assert!(msg.contains("unknown target 'foo'"), "user-facing detail must be relayed: {msg}");
-        assert!(!msg.contains("do NOT retry"), "a validation error is worth a corrected retry: {msg}");
+        assert!(
+            !msg.contains("do NOT retry"),
+            "a validation error is worth a corrected retry: {msg}"
+        );
     }
 
     #[tokio::test]

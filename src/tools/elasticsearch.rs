@@ -59,15 +59,16 @@ impl Tool for ElasticsearchSearchTool {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
         let resource = args["resource"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("elasticsearch_search requires a \"resource\" argument".to_string())
+            ToolError::UserFacing(
+                "elasticsearch_search requires a \"resource\" argument".to_string(),
+            )
         })?;
         let index = args["index"].as_str().ok_or_else(|| {
             ToolError::UserFacing("elasticsearch_search requires an \"index\" argument".to_string())
         })?;
-        let query = args
-            .get("query")
-            .cloned()
-            .ok_or_else(|| ToolError::UserFacing("elasticsearch_search requires a \"query\" argument".to_string()))?;
+        let query = args.get("query").cloned().ok_or_else(|| {
+            ToolError::UserFacing("elasticsearch_search requires a \"query\" argument".to_string())
+        })?;
         let size = args["size"].as_i64().unwrap_or(20);
 
         let (_, auth) = ctx.resolve_resource(resource)?;
@@ -75,7 +76,8 @@ impl Tool for ElasticsearchSearchTool {
         if let Value::Object(map) = &mut body {
             map.entry("size").or_insert(json!(size));
         }
-        let result = post_json(&client(), auth, self.name(), &format!("/{index}/_search"), &body).await?;
+        let result =
+            post_json(&client(), auth, self.name(), &format!("/{index}/_search"), &body).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -120,10 +122,14 @@ impl Tool for ElasticsearchIndexStatsTool {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
         let resource = args["resource"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("elasticsearch_index_stats requires a \"resource\" argument".to_string())
+            ToolError::UserFacing(
+                "elasticsearch_index_stats requires a \"resource\" argument".to_string(),
+            )
         })?;
         let index = args["index"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("elasticsearch_index_stats requires an \"index\" argument".to_string())
+            ToolError::UserFacing(
+                "elasticsearch_index_stats requires an \"index\" argument".to_string(),
+            )
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
         let result = get_json(&client(), auth, self.name(), &format!("/{index}/_stats")).await?;
@@ -170,7 +176,9 @@ impl Tool for ElasticsearchClusterHealthTool {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
         let resource = args["resource"].as_str().ok_or_else(|| {
-            ToolError::UserFacing("elasticsearch_cluster_health requires a \"resource\" argument".to_string())
+            ToolError::UserFacing(
+                "elasticsearch_cluster_health requires a \"resource\" argument".to_string(),
+            )
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
         let result = get_json(&client(), auth, self.name(), "/_cluster/health").await?;

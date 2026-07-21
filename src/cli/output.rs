@@ -39,14 +39,20 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
             }
         }
     }
-    let header_line: Vec<String> =
-        headers.iter().enumerate().map(|(i, h)| format!("{:<width$}", h, width = widths[i])).collect();
+    let header_line: Vec<String> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{:<width$}", h, width = widths[i]))
+        .collect();
     println!("{}", header_line.join("  "));
     let rule: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
     println!("{}", rule.join("  "));
     for row in rows {
-        let line: Vec<String> =
-            row.iter().enumerate().map(|(i, c)| format!("{:<width$}", c, width = widths[i])).collect();
+        let line: Vec<String> = row
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
+            .collect();
         println!("{}", line.join("  "));
     }
 }
@@ -66,7 +72,10 @@ mod tests {
         // Smoke test: must not panic on ragged-but-consistent input.
         print_table(
             &["name", "state"],
-            &[vec!["a-very-long-target-name".into(), "ok".into()], vec!["x".into(), "degraded".into()]],
+            &[
+                vec!["a-very-long-target-name".into(), "ok".into()],
+                vec!["x".into(), "degraded".into()],
+            ],
         );
     }
 }

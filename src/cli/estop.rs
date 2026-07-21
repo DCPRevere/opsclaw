@@ -30,7 +30,11 @@ pub struct EstopOutcome {
 /// here yet); `Some(path)` attempts `Db::connect` and reports failure in
 /// `db_error` without failing the overall command — a DB that can't be
 /// reached is exactly the situation this command exists for.
-pub async fn engage(sentinel_path: &Path, reason: &str, db_path: Option<&str>) -> Result<EstopOutcome> {
+pub async fn engage(
+    sentinel_path: &Path,
+    reason: &str,
+    db_path: Option<&str>,
+) -> Result<EstopOutcome> {
     estop::write_sentinel(sentinel_path, reason)?;
     let (db_flag_set, db_error) = try_set_db_flag(db_path, true).await;
     Ok(EstopOutcome {
@@ -130,7 +134,8 @@ mod tests {
         // still fails because the containing directory doesn't exist.
         let bad_db_path = dir.path().join("no/such/dir/test.db");
 
-        let outcome = engage(&sentinel, "test panic", Some(bad_db_path.to_str().unwrap())).await.unwrap();
+        let outcome =
+            engage(&sentinel, "test panic", Some(bad_db_path.to_str().unwrap())).await.unwrap();
         // The sentinel write must still have succeeded even though the DB path is bad.
         assert!(sentinel.exists());
         assert_eq!(outcome.db_flag_set, Some(false));

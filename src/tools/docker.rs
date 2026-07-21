@@ -133,7 +133,10 @@ mod tests {
     async fn ps_needs_no_container_and_is_read_risk() {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
-        DockerTool.call(&ctx, json!({"target": "remundo::prod::web-1", "action": "ps"})).await.unwrap();
+        DockerTool
+            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "ps"}))
+            .await
+            .unwrap();
         let seen = policy.seen.lock().unwrap();
         assert_eq!(seen[0].command, "docker ps -a");
         assert_eq!(seen[0].declared_risk, RiskClass::Read);
@@ -144,7 +147,10 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         DockerTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "logs", "container": "api"}))
+            .call(
+                &ctx,
+                json!({"target": "remundo::prod::web-1", "action": "logs", "container": "api"}),
+            )
             .await
             .unwrap();
         assert_eq!(policy.seen.lock().unwrap()[0].command, "docker logs --tail 200 api");

@@ -52,10 +52,9 @@ impl Tool for ConfigTool {
     }
 
     async fn call(&self, ctx: &ToolCtx, _args: Value) -> Result<ToolResult, ToolError> {
-        let config = ctx
-            .config
-            .as_ref()
-            .ok_or_else(|| ToolError::Internal("opsclaw_config called with no config wired".to_string()))?;
+        let config = ctx.config.as_ref().ok_or_else(|| {
+            ToolError::Internal("opsclaw_config called with no config wired".to_string())
+        })?;
 
         Ok(ToolResult { output: render_inventory(config) })
     }
@@ -79,7 +78,9 @@ fn render_inventory(config: &crate::config::Config) -> String {
             out.push_str(&format!(
                 "  env {} (autonomy: {})\n",
                 e.name,
-                e.autonomy.map(|a| a.to_string()).unwrap_or_else(|| "(inherits project)".to_string())
+                e.autonomy
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "(inherits project)".to_string())
             ));
             for t in &e.targets {
                 out.push_str(&format!(

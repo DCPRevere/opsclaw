@@ -36,7 +36,9 @@ fn t(h: u32, m: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2099, 6, 9, h, m, 0).unwrap()
 }
 
-fn deps_with(composer: Arc<dyn JobComposer>) -> (SchedulerDeps, Arc<InMemoryDb>, Arc<RecordingChannel>) {
+fn deps_with(
+    composer: Arc<dyn JobComposer>,
+) -> (SchedulerDeps, Arc<InMemoryDb>, Arc<RecordingChannel>) {
     let db = Arc::new(InMemoryDb::new());
     let channel = Arc::new(RecordingChannel::new());
     let deps = SchedulerDeps {
@@ -59,7 +61,12 @@ struct FixedComposer(String);
 
 #[async_trait]
 impl JobComposer for FixedComposer {
-    async fn compose(&self, _job: &Job, _prompt: &str, _now_utc: DateTime<Utc>) -> Result<Option<String>> {
+    async fn compose(
+        &self,
+        _job: &Job,
+        _prompt: &str,
+        _now_utc: DateTime<Utc>,
+    ) -> Result<Option<String>> {
         Ok(Some(self.0.clone()))
     }
 }
@@ -69,7 +76,12 @@ struct FailingComposer;
 
 #[async_trait]
 impl JobComposer for FailingComposer {
-    async fn compose(&self, _job: &Job, _prompt: &str, _now_utc: DateTime<Utc>) -> Result<Option<String>> {
+    async fn compose(
+        &self,
+        _job: &Job,
+        _prompt: &str,
+        _now_utc: DateTime<Utc>,
+    ) -> Result<Option<String>> {
         Err(crate::Error::other("composer boom"))
     }
 }
@@ -83,7 +95,12 @@ struct SelfPerpetuatingComposer {
 
 #[async_trait]
 impl JobComposer for SelfPerpetuatingComposer {
-    async fn compose(&self, _job: &Job, _prompt: &str, now_utc: DateTime<Utc>) -> Result<Option<String>> {
+    async fn compose(
+        &self,
+        _job: &Job,
+        _prompt: &str,
+        now_utc: DateTime<Utc>,
+    ) -> Result<Option<String>> {
         let mut next = prompt_job("heartbeat-probe", Schedule::Once { at: now_utc });
         // See the comment at the test's job setup: `Job::new` alone would
         // leave `next_run_at: None` for an `at` that's already "now or
@@ -104,7 +121,12 @@ struct ConcurrencyTrackingComposer {
 
 #[async_trait]
 impl JobComposer for ConcurrencyTrackingComposer {
-    async fn compose(&self, _job: &Job, _prompt: &str, _now_utc: DateTime<Utc>) -> Result<Option<String>> {
+    async fn compose(
+        &self,
+        _job: &Job,
+        _prompt: &str,
+        _now_utc: DateTime<Utc>,
+    ) -> Result<Option<String>> {
         let now = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(now, Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -150,9 +172,10 @@ impl crate::channels::Channel for FlakyThenOkChannel {
         // (unlike `then`/`then_with`), so `n - 1` must be computed only
         // inside a branch that already knows `n > 0` — a bare
         // `(n > 0).then_some(n - 1)` still panics on underflow when n == 0.
-        let decremented = self.remaining_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-            if n > 0 { Some(n - 1) } else { None }
-        });
+        let decremented =
+            self.remaining_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                if n > 0 { Some(n - 1) } else { None }
+            });
         if decremented.is_ok() {
             return Err(crate::Error::other("channel down"));
         }
@@ -224,7 +247,11 @@ async fn one_shot_stays_due_and_retries_on_failure_then_dead_letters_after_give_
     // First failure: stays due (no advance), attempt 1 recorded.
     jobs::run_due_jobs(&deps, t0).await.unwrap();
     let stored = db.get(job.id).await.unwrap().unwrap();
-    assert_eq!(stored.next_run_at, Some(t0), "a failed one-shot must stay due, not advance/disable");
+    assert_eq!(
+        stored.next_run_at,
+        Some(t0),
+        "a failed one-shot must stay due, not advance/disable"
+    );
     assert!(stored.enabled);
     assert!(channel.sent().is_empty());
 
@@ -271,7 +298,10 @@ async fn recurring_job_does_not_accumulate_a_retry_budget_it_just_advances() {
 
     jobs::run_due_jobs(&deps, now).await.unwrap();
     let stored = db.get(job.id).await.unwrap().unwrap();
-    assert!(stored.next_run_at.unwrap() > now, "a recurring job advances even after a failed compose");
+    assert!(
+        stored.next_run_at.unwrap() > now,
+        "a recurring job advances even after a failed compose"
+    );
 }
 
 #[tokio::test]
@@ -344,8 +374,14 @@ async fn compose_concurrency_is_bounded_across_a_batch_of_due_jobs() {
     jobs::run_due_jobs(&deps, now).await.unwrap();
 
     assert_eq!(channel.sent().len(), 10, "every due job still fires");
-    assert!(peak.load(Ordering::SeqCst) <= 4, "peak in-flight composes must respect the semaphore bound");
-    assert!(peak.load(Ordering::SeqCst) >= 2, "sanity: the batch actually overlapped, not fully serial");
+    assert!(
+        peak.load(Ordering::SeqCst) <= 4,
+        "peak in-flight composes must respect the semaphore bound"
+    );
+    assert!(
+        peak.load(Ordering::SeqCst) >= 2,
+        "sanity: the batch actually overlapped, not fully serial"
+    );
 }
 
 // ---- seeded scan jobs: prompt resolves from a code constant at fire time ----
@@ -402,7 +438,11 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
 
     // Re-seeding is idempotent: no duplicate job for the same target.
     seed_default_scan_jobs(&deps, 5).await.unwrap();
-    assert_eq!(db.list().await.unwrap().len(), 1, "re-seeding must not duplicate an existing system job");
+    assert_eq!(
+        db.list().await.unwrap().len(),
+        1,
+        "re-seeding must not duplicate an existing system job"
+    );
 }
 
 // ---- adaptive tick interval ----
@@ -463,7 +503,10 @@ fn lag_threshold_scales_with_the_adaptive_interval() {
     let handle = SchedulerHandle::new(60_000);
     handle.tighten(); // interval now 30_000ms; lag threshold now 150_000ms
     handle.mark_tick_duration(std::time::Duration::from_millis(150_001));
-    assert!(handle.lag().is_some(), "the lag threshold must derive from the CURRENT (tightened) interval");
+    assert!(
+        handle.lag().is_some(),
+        "the lag threshold must derive from the CURRENT (tightened) interval"
+    );
     handle.mark_tick_duration(std::time::Duration::from_millis(149_999));
     assert!(handle.lag().is_none());
 }
@@ -471,7 +514,11 @@ fn lag_threshold_scales_with_the_adaptive_interval() {
 #[test]
 fn handle_stall_is_not_tripped_before_the_first_tick() {
     let handle = SchedulerHandle::new(60_000);
-    assert_eq!(handle.stall(Utc::now().timestamp_millis()), None, "never-ticked is a fresh boot, not a stall");
+    assert_eq!(
+        handle.stall(Utc::now().timestamp_millis()),
+        None,
+        "never-ticked is a fresh boot, not a stall"
+    );
     assert_eq!(handle.heartbeat_status(Utc::now().timestamp_millis()), HeartbeatStatus::Booting);
 }
 
@@ -663,7 +710,10 @@ async fn a_panicking_body_is_caught_and_the_loop_respawns() {
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    assert!(fired.load(Ordering::SeqCst) > 0, "the loop must resume firing after the panic is caught and respawned");
+    assert!(
+        fired.load(Ordering::SeqCst) > 0,
+        "the loop must resume firing after the panic is caught and respawned"
+    );
 
     shutdown.cancel();
     tracker.close();

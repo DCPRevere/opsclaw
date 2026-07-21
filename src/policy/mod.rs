@@ -13,6 +13,7 @@
 
 pub mod classify;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -52,6 +53,32 @@ pub enum PolicyOutcome {
     EStopped,
 }
 
+/// The choke point as a trait, so `ToolCtx` can hold `Arc<dyn PolicyExecute>`.
+///
+/// ## Contract change (Wave 3, flagged for main-session review)
+///
+/// `ToolCtx.policy` was `Arc<Policy>` (a concrete struct) in the frozen
+/// `tools/mod.rs` sketch. Tool unit tests need to assert *which*
+/// `CommandRequest` a tool built without running the real (fail-closed stub)
+/// engine — the brief explicitly asks for "a fake Policy that records
+/// CommandRequests" and explicitly rules out testing against a real
+/// backend. `Policy` has no seam to substitute a recorder, so this adds:
+///
+/// - `trait PolicyExecute` (this trait): the one method every tool calls.
+/// - `Policy` implements it unchanged (same fail-closed stub body).
+/// - `ToolCtx.policy` is now `Arc<dyn PolicyExecute>` instead of `Arc<Policy>`.
+///
+/// The safety invariant is preserved exactly: tools still only ever see a
+/// trait object whose sole method is "classify, gate, audit, then maybe
+/// execute" — there is still no way to obtain a `TargetExecutor` from
+/// `ToolCtx`. No other module referenced `ToolCtx.policy` or constructed a
+/// `Policy` before this change (verified by grep), so the blast radius is
+/// `tools/mod.rs` plus this file.
+#[async_trait]
+pub trait PolicyExecute: Send + Sync {
+    async fn execute(&self, req: CommandRequest) -> Result<PolicyOutcome>;
+}
+
 /// The policy engine handle threaded through `ToolCtx`. Wave 2 gives it the
 /// executor registry, audit chain, e-stop sentinel, caps, and scrubber.
 pub struct Policy {}
@@ -76,5 +103,12 @@ impl Policy {
 impl Default for Policy {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[async_trait]
+impl PolicyExecute for Policy {
+    async fn execute(&self, req: CommandRequest) -> Result<PolicyOutcome> {
+        Policy::execute(self, req).await
     }
 }

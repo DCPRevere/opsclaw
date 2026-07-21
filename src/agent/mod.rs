@@ -257,6 +257,28 @@ pub async fn run_turn_with_history(
     }
 
     tracing::warn!(steps = max_steps, acted, "tool loop did not converge (hit the step cap)");
+    // The steps weren't wasted — the history holds real tool results. One
+    // final TOOL-LESS call turns them into a report instead of discarding
+    // them behind a canned "check the audit log" line (observed live: a
+    // 30-step sandbox sweep of a badly broken cluster produced excellent
+    // forensics and then threw them away). No tools are offered, so this
+    // cannot extend the loop; a failure here falls back to the old text.
+    history.push(Turn::User {
+        content: "SYSTEM: step budget exhausted. Stop investigating NOW and write your final \
+                  report from what you have already seen: findings so far, what you did not get \
+                  to, and what to check next. No more tool calls are available."
+            .to_string(),
+    });
+    match deps.llm.chat_step(&ctx.principal, &system, &history, &[]).await {
+        Ok(step) => {
+            if let Some(text) = step.text
+                && !text.trim().is_empty()
+            {
+                return Ok(finish(acted, text));
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "final-report call after step cap failed"),
+    }
     if acted {
         return Ok(finish(acted, best_effort_acted_reply()));
     }
@@ -679,6 +701,8 @@ mod tests {
         for _ in 0..MAX_STEPS {
             scripted.push_tool_call("echo", json!({"q": "still going"}));
         }
+        // The post-cap final-report call yields nothing usable either.
+        scripted.push_text("   ");
         let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
         let registry: Vec<Box<dyn Tool>> = vec![Box::new(EchoTool)];
 
@@ -693,6 +717,8 @@ mod tests {
         for i in 1..MAX_STEPS {
             scripted.push_tool_call("echo", json!({"q": format!("still checking {i}")}));
         }
+        // The post-cap final-report call turns the work into a report.
+        scripted.push_text("restarted nginx; was still verifying when the step budget ran out");
         let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
         let registry: Vec<Box<dyn Tool>> =
             vec![Box::new(CountingActionTool::new()), Box::new(EchoTool)];

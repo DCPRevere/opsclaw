@@ -1,0 +1,8 @@
+{
+  "fault": "crashloop",
+  "severity": "critical",
+  "fq_target": "k3d::default::opsclaw-crashloop",
+  "expected_signals": ["pod_phase", "container_waiting_reason", "restart_count"],
+  "must_notify": true,
+  "notes": "busybox pod exits 1 on every start; restartPolicy Always drives kubelet's backoff into CrashLoopBackOff. arm.sh polls until the waiting.reason is genuinely CrashLoopBackOff, not just that the pod spec applied."
+}

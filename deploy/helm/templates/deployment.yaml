@@ -1,0 +1,113 @@
+{{- include "opsclaw.requireDeadmanUrl" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opsclaw.fullname" . }}
+  labels:
+    {{- include "opsclaw.labels" . | nindent 4 }}
+spec:
+  # Single replica always (DESIGN.md §5) — values.replicaCount exists for
+  # documentation/explicitness, not to be raised: two replicas would both
+  # open the same PV-backed SQLite file, which is not a supported SQLite
+  # access pattern.
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    # Recreate, not RollingUpdate: a rolling update would briefly run the old
+    # and new pod at once, both mounting the same ReadWriteOnce PV — either
+    # the second pod fails to schedule (PV already attached) or, worse on a
+    # backend that allows multi-attach, two processes open the same SQLite
+    # file concurrently. A short deploy gap is the correct trade for a
+    # single-daemon-per-team architecture (DESIGN.md §1).
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "opsclaw.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsclaw.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "opsclaw.serviceAccountName" . }}
+      priorityClassName: {{ include "opsclaw.priorityClassName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: opsclaw
+          image: {{ include "opsclaw.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: OPSCLAW_HOME
+              value: /home/opsclaw/.opsclaw
+            - name: OPSCLAW_LISTEN
+              value: {{ printf "0.0.0.0:%d" (int .Values.service.port) | quote }}
+            # DESIGN.md §4/§5: mandatory in-cluster. Not read by config.rs's
+            # env overlay today (deadman_url is TOML-only, see
+            # configmap.yaml) — set here too so it's visible via `kubectl
+            # describe` / `env` without reading the mounted TOML, and so a
+            # future env-overlay addition picks it up for free.
+            - name: OPSCLAW_DEADMAN_URL
+              value: {{ .Values.deadmanUrl | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.existingSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /home/opsclaw/.opsclaw/config.toml
+              subPath: config.toml
+              readOnly: true
+            - name: data
+              mountPath: /home/opsclaw/data
+            # readOnlyRootFilesystem needs a writable /tmp.
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "opsclaw.fullname" . }}-config
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "opsclaw.pvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

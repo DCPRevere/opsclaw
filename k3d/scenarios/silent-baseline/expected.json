@@ -1,0 +1,8 @@
+{
+  "fault": "silent-baseline",
+  "severity": "info",
+  "fq_target": "k3d::default::opsclaw-silent-baseline",
+  "expected_signals": ["pod_phase", "available_replicas", "deployment_progressing_reason"],
+  "must_notify": false,
+  "notes": "A genuinely healthy single-replica Deployment (arm.sh waits for rollout status to actually report Ready, not just that apply succeeded). The daemon must produce zero notify calls against this target across a full scan tick — the kubernetes-layer anti-spam/false-positive control, mirroring sim/scenarios/silent-baseline."
+}

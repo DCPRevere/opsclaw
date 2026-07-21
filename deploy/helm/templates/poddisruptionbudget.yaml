@@ -1,0 +1,13 @@
+{{- if .Values.podDisruptionBudget.create }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "opsclaw.fullname" . }}
+  labels:
+    {{- include "opsclaw.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "opsclaw.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -1,0 +1,8 @@
+{
+  "fault": "cluster-death",
+  "severity": "critical",
+  "fq_target": "k3d::default::cluster",
+  "expected_signals": ["api_server_reachable", "kubeconfig_dial_error"],
+  "must_notify": true,
+  "notes": "Whole-cluster death via `k3d cluster stop` (not delete — disarm restarts the same cluster). The daemon must escalate a specific 'cluster unreachable' fault distinct from any in-cluster resource fault, since none of its normal kubernetes-target queries can return anything. This is the fault class DESIGN.md flags as untestable from inside the cluster, which is why opsclaw runs adjacent by default."
+}

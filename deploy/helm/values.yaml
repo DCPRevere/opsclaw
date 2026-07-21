@@ -1,0 +1,161 @@
+# Default values for opsclaw.
+# In-cluster is a supported packaging (DESIGN.md §5), not the recommended one
+# — the recommended placement is adjacent (bastion/ops host), outside the
+# failure domain it watches, so it can report a dead cluster and stay
+# reachable mid-incident. This chart is for teams that want in-cluster
+# anyway; the correlated-failure caveat is real and undocumented nowhere but
+# here and DESIGN.md.
+
+image:
+  repository: ghcr.io/dcprevere/opsclaw
+  tag: ""  # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# --- Networking ------------------------------------------------------------
+
+service:
+  type: ClusterIP
+  port: 8484  # matches the daemon's default DaemonCfg.listen port
+
+ingress:
+  # Off by default (DESIGN.md §4: the operational web UI is "never publicly
+  # reachable" — reached via VPN/tailnet/SSH tunnel). Turning this on is the
+  # operator's explicit choice, not the chart's default posture.
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: opsclaw.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# --- The external dead-man heartbeat (DESIGN.md §4, §5) --------------------
+#
+# "mandatory for in-cluster installs": nothing inside a dead cluster can
+# report the cluster is dead. REQUIRED — helm template/install refuses to
+# render with a clear message if this is left unset. Point it at a
+# healthchecks.io check, a PagerDuty heartbeat, or any webhook outside this
+# cluster's own failure domain.
+deadmanUrl: ""
+
+# --- Config / secrets --------------------------------------------------
+#
+# opsclaw reads ~/.opsclaw/config.toml (OPSCLAW_HOME overrides the home dir
+# used to derive that path — src/config/mod.rs). The chart mounts a
+# ConfigMap (non-secret TOML body) and, when secretsExtraEnv/existingSecret
+# reference credentials, a Secret providing the env vars the daemon's env
+# overlay reads directly (OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN,
+# HINDSIGHT_URL, ...) — config.rs resolves `env:VAR` references at connect
+# time, never bakes a value into the TOML.
+config:
+  # Base heartbeat tick in seconds (DaemonCfg.tick_seconds); the scheduler
+  # tightens it adaptively while an incident is active (DESIGN.md §3).
+  tickSeconds: 300
+  # Additional raw config.toml body — llm/memory/telegram/push/limits tables
+  # and [[project]] definitions — templated into a ConfigMap and mounted at
+  # $OPSCLAW_HOME/config.toml. Do NOT put a [daemon] table here: the chart
+  # owns that table (see templates/configmap.yaml) because db_path and
+  # deadman_url are chart-scheduling decisions, not operator-editable ones.
+  # Keep secrets OUT of this block — reference them as env:VAR resolved via
+  # existingSecret (DESIGN.md §3 Config).
+  toml: ""
+
+# Name of an existing Secret (created outside this chart, e.g. via `kubectl
+# create secret` or a secrets operator) whose keys are exposed to the daemon
+# container as environment variables via envFrom. Use this for
+# OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN, HINDSIGHT_TOKEN, etc. Leave unset
+# to run fully faked (DESIGN.md §3: "with zero config the whole daemon runs
+# and self-validates on fakes").
+existingSecret: ""
+
+# Extra plain (non-secret) env vars, e.g. OPSCLAW_LISTEN overrides. Secrets
+# belong in existingSecret, never here.
+extraEnv: []
+# - name: RUST_LOG
+#   value: "info"
+
+# --- Persistence (SQLite on a PV, DESIGN.md §5) -----------------------------
+
+persistence:
+  enabled: true
+  storageClassName: ""  # "" = cluster default StorageClass
+  accessMode: ReadWriteOnce
+  size: 2Gi
+  # Set true to reuse an existing PVC instead of provisioning one.
+  existingClaim: ""
+
+# --- Scheduling: single replica, Recreate, last-evicted ---------------------
+#
+# strategy is fixed to Recreate in templates/deployment.yaml (a RollingUpdate
+# would briefly run two replicas against the same PV-backed SQLite file,
+# which SQLite does not support across pods — this is not configurable).
+
+replicaCount: 1  # single-replica by design (DESIGN.md §5); do not scale this
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+priorityClassName:
+  create: true
+  name: ""  # "" = "<fullname>-critical"
+  value: 1000000  # below system-cluster-critical (2000000000), above default workloads
+
+podDisruptionBudget:
+  create: true
+  minAvailable: 1  # with replicaCount: 1, this blocks voluntary eviction entirely
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# --- RBAC --------------------------------------------------------------
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Minimal read-only RBAC for the kubernetes tool's observability paths (pods,
+# deployments, nodes, events — get/list/watch only). Mutating kubernetes
+# actions (e.g. an ArgoCD-style rollback) are out of scope for the in-cluster
+# SA per DESIGN.md's least-privilege stance on target credentials; a
+# kubernetes target with mutation rights is a deliberate separate
+# ServiceAccount/kubeconfig, not this chart's default.
+rbac:
+  create: true
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+livenessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10

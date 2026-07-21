@@ -1,0 +1,8 @@
+{
+  "fault": "node-pressure",
+  "severity": "critical",
+  "fq_target": "k3d::default::opsclaw-node-pressure",
+  "expected_signals": ["container_last_terminated_reason", "restart_count", "mem_limit_bytes"],
+  "must_notify": true,
+  "notes": "A pod with a 24Mi memory limit allocates well past it; the kernel/kubelet OOM-kills the container, which restartPolicy: Always then restarts, producing a real OOMKilled lastState across the cluster's own cgroup accounting — not synthetic pressure on the k3d node's actual RAM."
+}

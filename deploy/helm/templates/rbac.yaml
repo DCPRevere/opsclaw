@@ -1,0 +1,44 @@
+{{- if .Values.rbac.create }}
+# Minimal, read-only, cluster-scoped RBAC for the kubernetes tool's
+# observability paths (DESIGN.md §4 "Tools" — kubernetes API side; §6
+# fault classes this chart's own k3d smoke/scenarios exercise: pod status,
+# deployment rollout status, node conditions, events). get/list/watch only —
+# no create/update/patch/delete anywhere. A kubernetes target with mutation
+# rights (e.g. an ArgoCD-style rollback) is a deliberate separate
+# ServiceAccount, never this chart's default (targets/README + DESIGN.md §4
+# "one target = one credential set = one audit identity").
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "opsclaw.fullname" . }}-reader
+  labels:
+    {{- include "opsclaw.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "nodes", "events", "namespaces", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "opsclaw.fullname" . }}-reader
+  labels:
+    {{- include "opsclaw.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "opsclaw.fullname" . }}-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "opsclaw.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

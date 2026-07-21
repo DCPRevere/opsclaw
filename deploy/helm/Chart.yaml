@@ -1,0 +1,23 @@
+apiVersion: v2
+name: opsclaw
+description: >-
+  OpsClaw — an autonomous SRE agent daemon. In-cluster is a supported
+  packaging (DESIGN.md §5): single replica, SQLite on a PV, priority class +
+  PodDisruptionBudget so opsclaw is among the last pods evicted, with the
+  external dead-man heartbeat required in this shape (a dead cluster must
+  still be reported, and nothing inside a dead cluster can report on itself).
+  The recommended placement is still adjacent (a bastion/ops host) — this
+  chart exists for teams that want in-cluster anyway.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://opsclaw.io
+sources:
+  - https://github.com/dcprevere/opsclaw
+keywords:
+  - sre
+  - ops
+  - incident-response
+  - agent
+maintainers:
+  - name: D C P Revere

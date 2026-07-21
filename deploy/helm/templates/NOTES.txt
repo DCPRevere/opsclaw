@@ -1,0 +1,27 @@
+opsclaw is installed as {{ include "opsclaw.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+Reminders (DESIGN.md §5, "In-cluster is a supported packaging"):
+
+  * The recommended placement is still ADJACENT to what opsclaw watches (a
+    bastion/ops host), not in-cluster — a correlated failure can take down
+    opsclaw and the cluster it's supposed to report on together. You chose
+    in-cluster; that's supported, with the caveat on record.
+
+  * The external dead-man heartbeat is MANDATORY in this placement and is
+    already wired to {{ .Values.deadmanUrl }} — confirm that receiver is
+    reachable from inside this cluster's egress policy, and that it actually
+    pages someone on silence.
+
+  * The daemon is single-replica by design (SQLite has no multi-writer
+    story). Do not scale replicaCount above 1.
+
+Reach the web UI the same way you'd reach any internal ops tool — VPN/tailnet
+or an SSH tunnel:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "opsclaw.fullname" . }} 8484:{{ .Values.service.port }}
+
+then open http://127.0.0.1:8484/.
+
+Check daemon health:
+
+  kubectl -n {{ .Release.Namespace }} get pods -l {{ include "opsclaw.selectorLabels" . | replace ": " "=" | replace "\n" "," }}

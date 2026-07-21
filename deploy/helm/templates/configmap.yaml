@@ -1,0 +1,26 @@
+{{- include "opsclaw.requireDeadmanUrl" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opsclaw.fullname" . }}-config
+  labels:
+    {{- include "opsclaw.labels" . | nindent 4 }}
+data:
+  # values.config.toml is the operator-supplied body (llm/memory/telegram/...
+  # tables and project definitions) and MUST NOT declare its own [daemon]
+  # table — TOML forbids redeclaring a table, so the chart owns [daemon]
+  # entirely here: db_path (the PV mount path) and deadman_url (mandatory
+  # in-cluster, DESIGN.md §4/§5) are chart-scheduling decisions, not
+  # operator-editable ones, and merging them into an operator-supplied
+  # [daemon] table would be fragile string surgery. tick_seconds is
+  # settable via values.config.tickSeconds instead of raw TOML for the same
+  # reason. Secrets never belong in this ConfigMap — they're referenced as
+  # env:VAR and supplied via existingSecret/envFrom (values.yaml, DESIGN.md
+  # §3 Config).
+  config.toml: |
+    [daemon]
+    tick_seconds = {{ .Values.config.tickSeconds }}
+    db_path = "/home/opsclaw/data/opsclaw.db"
+    deadman_url = {{ .Values.deadmanUrl | quote }}
+
+    {{- .Values.config.toml | nindent 4 }}

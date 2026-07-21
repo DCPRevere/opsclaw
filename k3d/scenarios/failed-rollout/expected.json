@@ -1,0 +1,8 @@
+{
+  "fault": "failed-rollout",
+  "severity": "critical",
+  "fq_target": "k3d::default::opsclaw-failed-rollout",
+  "expected_signals": ["deployment_progressing_reason", "pod_waiting_reason", "available_replicas"],
+  "must_notify": true,
+  "notes": "Deployment pinned to a nonexistent image tag with progressDeadlineSeconds: 20. arm.sh waits for BOTH ImagePullBackOff/ErrImagePull on the pod AND the Deployment's Progressing condition to actually report ProgressDeadlineExceeded — applying the bad spec always succeeds, so the fault has to be confirmed downstream of the apply."
+}

@@ -1,0 +1,42 @@
+{{- if .Values.ingress.enabled }}
+{{/*
+Off by default (values.yaml). DESIGN.md §4: the operational web UI is "never
+publicly reachable" — the documented path is a VPN/tailnet or SSH tunnel
+(`opsclaw ui`), with Tailscale as the golden path for web push's
+publicly-trusted-cert requirement. Enabling this Ingress is an explicit
+operator choice the chart does not default to or encourage.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "opsclaw.fullname" . }}
+  labels:
+    {{- include "opsclaw.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "opsclaw.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}

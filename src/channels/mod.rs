@@ -1,18 +1,18 @@
 //! Message delivery abstraction. The trait is gianna's `Channel`, near
 //! verbatim: only `name` and `send` are mandatory so adding a channel is a
-//! small diff. Wave 1 ports the CLI capture channel and `RecordingChannel`
-//! verbatim (rename-only); Telegram and its household->operator adaptation
-//! land in a follow-up commit. The web SSE hub and web push land with the
-//! web UI (Wave 4).
+//! small diff. Wave 1 ports Telegram (long-polling; offset persisted only
+//! after genuine hand-off), the CLI capture channel, and `RecordingChannel`;
+//! the web SSE hub and web push land with the web UI (Wave 4).
 //!
 //! Trait-surface additions over the frozen shape (all DEFAULTED, no existing
 //! signature touched): `send_typing`, `self_handle`, `drop_self_messages`.
-//! Ported verbatim from gianna's `Channel` — `RecordingChannel`'s
-//! self-message guard needs them, and every other channel gets a free no-op
-//! default.
+//! Ported verbatim from gianna's `Channel` — Telegram's self-message guard
+//! and typing indicator need them, and every other channel gets a free
+//! no-op default.
 
 pub mod cli;
 pub mod recording;
+pub mod telegram;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;

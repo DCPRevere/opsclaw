@@ -182,7 +182,15 @@ impl ToolCtx {
             ToolError::Internal("called with no endpoint credentials wired".to_string())
         })?;
         let auth = endpoints.get(&target).ok_or_else(|| {
-            ToolError::UserFacing(format!("no resolved credentials for resource {s:?}"))
+            // Name the valid choices — a model given only "no credentials"
+            // burns tool-loop steps guessing address forms (observed live:
+            // `cluster`, `cluster:logs`, … before the right one). The
+            // resource-qualified form is not guessable from the base path.
+            ToolError::UserFacing(format!(
+                "no resolved credentials for resource {s:?} — resource-qualified targets with \
+                 credentials: {}",
+                endpoints.known_targets().join(", ")
+            ))
         })?;
         Ok((target, auth))
     }

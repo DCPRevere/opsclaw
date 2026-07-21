@@ -168,7 +168,18 @@ fn team_context_line(targets: &[FqTarget]) -> Option<String> {
     if names.is_empty() {
         return None;
     }
-    Some(format!("known targets: {}", names.join(", ")))
+    // Resource-qualified addresses are listed too — the elasticsearch/
+    // prometheus tools take the FULL `project::env::target::type::name`
+    // form, which is not guessable from the base path (observed live: a
+    // model given only base targets burned 6+ tool-loop steps on address
+    // variants before finding the right one from an error message).
+    let resources: Vec<String> =
+        targets.iter().filter(|t| t.resource.is_some()).map(|t| t.to_string()).collect();
+    let mut line = format!("known targets: {}", names.join(", "));
+    if !resources.is_empty() {
+        line.push_str(&format!("; resource addresses: {}", resources.join(", ")));
+    }
+    Some(line)
 }
 
 // ---------------------------------------------------------------------------
@@ -748,14 +759,14 @@ mod tests {
     }
 
     #[test]
-    fn team_context_line_lists_base_target_names_only() {
+    fn team_context_line_lists_base_targets_and_resource_addresses() {
         let config = test_config();
         let targets = known_targets_from_config(&config);
         let line = team_context_line(&targets).unwrap();
         assert!(line.contains("remundo::prod::web-1"));
-        // Resource-qualified entries are not separately listed in the
-        // orientation line (the base target already names the surface).
-        assert!(!line.contains("prometheus::metrics"));
+        // Resource-qualified addresses ARE listed — the endpoint tools take
+        // the full form and the model can't guess it from the base path.
+        assert!(line.contains("remundo::prod::web-1::prometheus::metrics"), "{line}");
     }
 
     #[test]

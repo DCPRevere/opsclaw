@@ -55,24 +55,48 @@ async fn main() {
     };
     let repos = db.repos();
 
-    // TargetExecutor construction from `config.projects[].envs[].targets[]`
-    // (resolving each target's credential through the secret store and
-    // registering it with the scrubber) is Wave 2/3 integration work with
-    // real credential-handling stakes — left for main-session wiring rather
-    // than invented here. Until then the daemon boots with an EMPTY
-    // executor map, which is the safe direction: `Policy::execute` already
-    // treats an unregistered target as unreachable (no executor => no
-    // command can run against it), so this is fail-closed, not fail-open.
-    let executors = std::collections::HashMap::new();
-
-    let estop = Arc::new(EStop::new(secret_dir.join(opsclaw::policy::estop::SENTINEL_FILE), repos.clone()));
-    let audit = Arc::new(AuditWriter::new(repos.clone()));
+    // Config → executors: every target keyed by its fq path, every resource
+    // with a url as an EndpointExecutor under its resource-qualified path,
+    // and every resolved resource credential registered with the scrubber
+    // BEFORE any executor that could echo it exists. A credential that
+    // fails to resolve is a boot error (fail closed, never half-wired).
     let scrubber = Arc::new(Scrubber::new());
-    let policy = Arc::new(Policy::new(Arc::new(config.clone()), executors, audit, estop.clone(), repos.clone(), scrubber));
+    let (executors, wiring_warnings) =
+        match opsclaw::targets::wiring::build_executors(&config, &secret_store, &scrubber) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("opsclaw: refusing to start (target wiring): {e}");
+                std::process::exit(2);
+            }
+        };
+    for w in &wiring_warnings {
+        tracing::warn!("{w}");
+    }
+    tracing::info!("wired {} executor(s)", executors.len());
+
+    let estop =
+        Arc::new(EStop::new(secret_dir.join(opsclaw::policy::estop::SENTINEL_FILE), repos.clone()));
+    let audit = Arc::new(AuditWriter::new(repos.clone()));
+    let policy = Arc::new(Policy::new(
+        Arc::new(config.clone()),
+        executors,
+        audit,
+        estop.clone(),
+        repos.clone(),
+        scrubber,
+    ));
 
     let scheduler_handle = SchedulerHandle::new(config.daemon.tick_seconds.max(1) * 1000);
 
-    let state = match AppState::new(config, &secret_store, repos, policy.clone(), policy, estop, scheduler_handle) {
+    let state = match AppState::new(
+        config,
+        &secret_store,
+        repos,
+        policy.clone(),
+        policy,
+        estop,
+        scheduler_handle,
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("opsclaw: state construction failed: {e}");

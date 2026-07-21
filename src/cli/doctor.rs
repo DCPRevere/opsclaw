@@ -16,9 +16,8 @@
 use serde::Serialize;
 
 use crate::Result;
-use crate::config::{Config, SecretStore, TargetKindName};
+use crate::config::{Config, SecretStore};
 use crate::domain::FqTarget;
-use crate::targets::{TargetExecutor, stub::NotImplementedExecutor};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckResult {
@@ -48,12 +47,17 @@ pub async fn run(config_path: &std::path::Path, opsclaw_home: &std::path::Path) 
     // 1. Config parses + validates. Every later check needs a loaded config,
     // so a failure here is reported and everything else is skipped rather
     // than cascading into confusing secondary failures.
-    let raw = if config_path.exists() { std::fs::read_to_string(config_path)? } else { String::new() };
+    let raw =
+        if config_path.exists() { std::fs::read_to_string(config_path)? } else { String::new() };
     if !raw.is_empty() && crate::cli::legacy::looks_like_legacy_config(&raw) {
         checks.push(CheckResult {
             name: "config".into(),
             ok: false,
-            detail: format!("{}: {}", config_path.display(), crate::cli::legacy::LEGACY_CONFIG_MESSAGE),
+            detail: format!(
+                "{}: {}",
+                config_path.display(),
+                crate::cli::legacy::LEGACY_CONFIG_MESSAGE
+            ),
         });
         return Ok(Report { checks });
     }
@@ -123,7 +127,10 @@ fn check_secrets(cfg: &Config, opsclaw_home: &std::path::Path) -> Result<Vec<Che
         for env in &project.envs {
             for target in &env.targets {
                 if let Some(r) = &target.credential {
-                    refs.push((format!("target {}::{}::{}", project.name, env.name, target.name), r.clone()));
+                    refs.push((
+                        format!("target {}::{}::{}", project.name, env.name, target.name),
+                        r.clone(),
+                    ));
                 }
                 for res in &target.resources {
                     if let Some(r) = &res.credential {
@@ -183,7 +190,11 @@ async fn check_targets(cfg: &Config, opsclaw_home: &std::path::Path) -> Vec<Chec
                         ok: report.reachable,
                         detail: report.detail,
                     },
-                    Err(e) => CheckResult { name: format!("target: {fq}"), ok: false, detail: e.to_string() },
+                    Err(e) => CheckResult {
+                        name: format!("target: {fq}"),
+                        ok: false,
+                        detail: e.to_string(),
+                    },
                 });
             }
         }
@@ -195,52 +206,10 @@ async fn probe_target(
     target: &crate::config::TargetCfg,
     store: &SecretStore,
 ) -> Result<crate::targets::ProbeReport> {
-    match target.kind {
-        TargetKindName::Local => {
-            let exec = crate::targets::local::LocalExecutor::new();
-            exec.probe().await
-        }
-        TargetKindName::Ssh => {
-            let identity_file = match &target.credential {
-                Some(r) => Some(std::path::PathBuf::from(r.resolve(store)?)),
-                None => None,
-            };
-            let host = target
-                .address
-                .clone()
-                .ok_or_else(|| crate::Error::Config(format!("ssh target {:?} has no address", target.name)))?;
-            let exec = crate::targets::ssh::SshExecutor::new(crate::targets::ssh::SshParams {
-                host,
-                port: None,
-                user: None,
-                identity_file,
-                jump_host: None,
-                known_hosts_path: None,
-                strict_host_key_checking: None,
-            });
-            exec.probe().await
-        }
-        TargetKindName::Kubernetes => {
-            let kubeconfig = match &target.credential {
-                Some(r) => std::path::PathBuf::from(r.resolve(store)?),
-                None => {
-                    return Err(crate::Error::Config(format!(
-                        "kubernetes target {:?} has no credential (kubeconfig path)",
-                        target.name
-                    )));
-                }
-            };
-            let exec = crate::targets::kubernetes::KubernetesExecutor::new(
-                crate::targets::kubernetes::KubernetesParams { kubeconfig, context: target.address.clone() },
-            );
-            exec.probe().await
-        }
-        TargetKindName::Cloud => {
-            // Honest "not built yet", never treated as a target-specific
-            // outage (targets/stub.rs's own doc comment).
-            NotImplementedExecutor::cloud().probe().await
-        }
-    }
+    // The SAME construction path the daemon boots with
+    // (targets::wiring::executor_for_target) — doctor probing one thing and
+    // the daemon wiring another is exactly the divergence this prevents.
+    crate::targets::wiring::executor_for_target(target, store)?.probe().await
 }
 
 async fn check_db(db_path: Option<&str>) -> CheckResult {
@@ -252,16 +221,26 @@ async fn check_db(db_path: Option<&str>) -> CheckResult {
         };
     };
     match crate::db::Db::connect(path).await {
-        Ok(_) => CheckResult { name: "database".into(), ok: true, detail: format!("{path} opens and migrates") },
-        Err(e) => CheckResult { name: "database".into(), ok: false, detail: format!("{path}: {e}") },
+        Ok(_) => CheckResult {
+            name: "database".into(),
+            ok: true,
+            detail: format!("{path} opens and migrates"),
+        },
+        Err(e) => {
+            CheckResult { name: "database".into(), ok: false, detail: format!("{path}: {e}") }
+        }
     }
 }
 
 async fn check_hindsight(url: &str) -> CheckResult {
     let client = crate::memory::hindsight::HindsightClient::new(url, None, "default");
     match client.health().await {
-        Ok(()) => CheckResult { name: "hindsight".into(), ok: true, detail: format!("{url} reachable") },
-        Err(e) => CheckResult { name: "hindsight".into(), ok: false, detail: format!("{url}: {e}") },
+        Ok(()) => {
+            CheckResult { name: "hindsight".into(), ok: true, detail: format!("{url} reachable") }
+        }
+        Err(e) => {
+            CheckResult { name: "hindsight".into(), ok: false, detail: format!("{url}: {e}") }
+        }
     }
 }
 
@@ -326,8 +305,11 @@ mod tests {
         unsafe { std::env::set_var("AZURE_CRED", "fake-value-for-doctor-test") };
 
         let report = run(&config_path, dir.path()).await.unwrap();
-        let target_check =
-            report.checks.iter().find(|c| c.name.starts_with("target:") && c.name.contains("aci")).unwrap();
+        let target_check = report
+            .checks
+            .iter()
+            .find(|c| c.name.starts_with("target:") && c.name.contains("aci"))
+            .unwrap();
         assert!(!target_check.ok, "{target_check:?}");
         assert!(target_check.detail.contains("not implemented"), "{target_check:?}");
 

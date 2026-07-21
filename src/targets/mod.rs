@@ -10,6 +10,7 @@ pub mod kubernetes;
 pub mod local;
 pub mod ssh;
 pub mod stub;
+pub mod wiring;
 
 pub use endpoint::EndpointExecutor;
 pub use kubernetes::{KubernetesExecutor, KubernetesParams};

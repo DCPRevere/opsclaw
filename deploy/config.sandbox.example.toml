@@ -63,3 +63,11 @@ credential = "store:es-password"
 # for THIS resource only (loudly warned at boot). The hop is
 # localhost-to-localhost; the tunnel itself is TLS to the apiserver.
 insecure_tls = true
+
+[[project.env.target.resource]]
+# kube-prometheus-stack's Prometheus (metrics for every workload +
+# kube-state-metrics + node exporters). Plain HTTP in-cluster, no auth —
+# reached through the same port-forward mechanism as ES.
+type = "prometheus"
+name = "metrics"
+url = "http://localhost:9202"

@@ -49,18 +49,24 @@ Autonomy ships pinned `observe` for the sandbox env: reads run, mutations
 land in the dry-run log, nothing executes. Promote to `suggest` in
 config after reviewing `opsclaw-cli dry-run-log`.
 
-## 4. Elasticsearch port-forward (per session)
+## 4. Port-forwards: Elasticsearch + Prometheus (per session)
 
-Uses opsclaw's OWN kubeconfig (the SA has the portforward verb):
+One supervised script, using opsclaw's OWN kubeconfig (the SA has the
+portforward verb); each forward auto-restarts when its backing pod cycles:
 
 ```sh
-kubectl --kubeconfig ~/.opsclaw/sandbox-kubeconfig.yaml \
-  -n logs port-forward svc/coresearch-es-http 9201:9200
+deploy/sandbox-portforwards.sh
+# localhost:9201 -> logs/coresearch-es-http:9200                      (ES, HTTPS)
+# localhost:9202 -> monitoring/prometheus-stack-kube-prom-prometheus:9090 (Prometheus, HTTP)
 ```
 
-The resource is declared `insecure_tls = true` because the ECK cert's
+The ES resource is declared `insecure_tls = true` because the ECK cert's
 SANs are the in-cluster DNS names — a localhost hop can never match.
-Verify by hand: `curl -sk -u "elastic:$(…)" https://localhost:9201/_cluster/health`.
+Prometheus (kube-prometheus-stack) is plain HTTP with no auth in-cluster;
+Grafana is only a UI over the same data, so opsclaw talks PromQL to
+Prometheus directly via its `prometheus_*` tools.
+Verify by hand: `curl -sk -u "elastic:…" https://localhost:9201/_cluster/health`
+and `curl -s 'http://localhost:9202/api/v1/query?query=up' | head -c 200`.
 
 ## 5. Hindsight (memory) + first operator
 

@@ -6,19 +6,9 @@ all-features = true
 
 [advisories]
 version = 2
-ignore = [
-    # Revisit if this stops applying: OpsClaw's jsonwebtoken dependency is
-    # pinned to the rust_crypto backend (Cargo.toml — default-features =
-    # false, features = ["rust_crypto"]), so no RSA-backed JWT algorithm is
-    # reachable and there is no RSA key anywhere in the system. Kept as a
-    # RUSTSEC-2023-0071 (Marvin Attack timing oracle in `rsa`): pulled
-    # transitively by jsonwebtoken (RS* support) and web-push-native →
-    # jwt-simple — confirmed present via `cargo tree -i rsa`. OpsClaw signs
-    # only HS256 JWTs and ES256 VAPID tokens; no RSA code path is exercised,
-    # so the oracle is unreachable in our usage. No safe upstream upgrade
-    # exists yet; re-check when jsonwebtoken/web-push-native bump.
-    { id = "RUSTSEC-2023-0071", reason = "RSA paths unused: HS256 JWT + ES256 VAPID only" },
-]
+# `rsa` arrives transitively (jsonwebtoken, web-push-native); no RSA code path
+# is used and no upstream fix is available yet. Tracked in docs/plans.
+ignore = ["RUSTSEC-2023-0071"]
 
 [licenses]
 version = 2

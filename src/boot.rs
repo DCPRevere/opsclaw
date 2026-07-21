@@ -64,8 +64,17 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     ));
 
     // The shipped LLM chain (FallbackLlm over OpenRouter, or the
-    // clearly-logged FakeLlm with no key) — the same chain the evals gate on.
-    let llm = crate::llm::build_chain(&config.llm, &secret_store)?;
+    // clearly-logged FakeLlm with no key) — the same chain the evals gate on
+    // — wrapped in the daily cost cap (`limits.max_cost_per_day_cents`).
+    // The guard's notifier is installed further down, once the channel
+    // fan-out exists (wiring order, not an optional feature).
+    let base_llm = crate::llm::build_chain(&config.llm, &secret_store)?;
+    let cost_guard = Arc::new(crate::llm::CostGuard::new(
+        base_llm,
+        repos.clone(),
+        config.limits.max_cost_per_day_cents,
+    ));
+    let llm: Arc<dyn crate::llm::LlmProvider> = cost_guard.clone();
 
     // Memory: Hindsight when configured, honest no-op otherwise.
     let memory = match &config.memory.hindsight_url {
@@ -161,6 +170,10 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         )));
     }
     state.channel = Arc::new(MultiChannel::new(channels));
+    // The cost cap's loud once-per-day notification rides the same fan-out
+    // as every other escalation (built just above — this is the earliest
+    // point the notifier can exist).
+    cost_guard.set_notifier(state.channel.clone());
 
     // The real webhook ingest (verified alert → framed observation → full
     // registry turn), the real scan-job composer, and the real chat handler

@@ -74,6 +74,7 @@ use crate::domain::Principal;
 
 pub mod anthropic;
 pub mod chain;
+pub mod cost_guard;
 pub mod fakes;
 pub mod fallback;
 pub mod openai_compat;
@@ -81,6 +82,7 @@ pub mod pricing;
 
 pub use anthropic::{AnthropicAuth, AnthropicProvider};
 pub use chain::build_chain;
+pub use cost_guard::CostGuard;
 pub use fakes::{FakeLlm, ScriptedLlm};
 pub use fallback::FallbackLlm;
 pub use openai_compat::OpenAiCompatProvider;

@@ -1,8 +1,18 @@
 //! Message delivery abstraction. The trait is gianna's `Channel`, near
 //! verbatim: only `name` and `send` are mandatory so adding a channel is a
-//! small diff. Wave 1 ports Telegram (long-polling; offset persisted only
-//! after genuine hand-off), the CLI capture channel, and `RecordingChannel`;
-//! the web SSE hub and web push land with the web UI (Wave 4).
+//! small diff. Wave 1 ports the CLI capture channel and `RecordingChannel`
+//! verbatim (rename-only); Telegram and its household->operator adaptation
+//! land in a follow-up commit. The web SSE hub and web push land with the
+//! web UI (Wave 4).
+//!
+//! Trait-surface additions over the frozen shape (all DEFAULTED, no existing
+//! signature touched): `send_typing`, `self_handle`, `drop_self_messages`.
+//! Ported verbatim from gianna's `Channel` — `RecordingChannel`'s
+//! self-message guard needs them, and every other channel gets a free no-op
+//! default.
+
+pub mod cli;
+pub mod recording;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -49,6 +59,31 @@ pub trait Channel: Send + Sync {
     async fn listen(&self, _tx: mpsc::Sender<InboundMessage>) -> Result<()> {
         Ok(())
     }
+
+    /// Best-effort "typing…" presence hint while a reply is being composed.
+    /// Default no-op; channels with a native indicator (Telegram) implement
+    /// it. DEFAULTED addition (gianna parity) — not on the original frozen
+    /// signature list.
+    async fn send_typing(&self, _sender: &str) {}
+
+    /// The bot's own identity on this channel, if known — so callers can drop
+    /// inbound events the bot itself authored (self-loop guard). DEFAULTED
+    /// addition (gianna parity).
+    fn self_handle(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether an inbound message is self-authored (default compares
+    /// `sender` against `self_handle`, case-insensitively, ignoring a
+    /// leading `@`). DEFAULTED addition (gianna parity).
+    fn drop_self_messages(&self, msg: &InboundMessage) -> bool {
+        let Some(handle) = self.self_handle() else {
+            return false;
+        };
+        let h = handle.trim_start_matches('@').to_ascii_lowercase();
+        let s = msg.sender.trim_start_matches('@').to_ascii_lowercase();
+        !h.is_empty() && h == s
+    }
 }
 
 /// Fan-out over every configured channel (gianna's `MultiChannel`).
@@ -75,5 +110,41 @@ impl Channel for MultiChannel {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::channels::recording::RecordingChannel;
+
+    /// A channel whose `send` always fails, to prove one bad channel doesn't
+    /// stop fan-out to the others.
+    struct FailingChannel;
+
+    #[async_trait]
+    impl Channel for FailingChannel {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        async fn send(&self, _msg: OutboundMessage) -> Result<()> {
+            Err(crate::Error::other("boom"))
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_channel_fanout_survives_one_failing_channel() {
+        let recording = std::sync::Arc::new(RecordingChannel::new());
+        let multi = MultiChannel::new(vec![std::sync::Arc::new(FailingChannel), recording.clone()]);
+
+        let msg = OutboundMessage { operator: None, body: "hello".into() };
+        let r = multi.send(msg).await;
+
+        // MultiChannel::send is best-effort fan-out: it must still return Ok
+        // even though one underlying channel failed...
+        assert!(r.is_ok());
+        // ...and the other channel must still have received the message.
+        assert_eq!(recording.sent().len(), 1);
+        assert_eq!(recording.last().unwrap().body, "hello");
     }
 }

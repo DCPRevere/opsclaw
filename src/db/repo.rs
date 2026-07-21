@@ -20,7 +20,17 @@ pub trait IncidentRepo: Send + Sync {
     /// the anti-spam lookup.
     async fn find_open_by_fingerprint(&self, fingerprint: &str) -> Result<Option<Incident>>;
     async fn set_state(&self, id: Uuid, state: IncidentState, by: Option<Uuid>) -> Result<()>;
-    async fn record_notification(&self, id: Uuid, at: DateTime<Utc>) -> Result<()>;
+    /// Record one escalation-chain send atomically: `last_notified_at = at`,
+    /// `notify_count += 1`, and the chain position (`escalation_step`,
+    /// `step_started_at`) as computed by `incidents::escalation` — a first
+    /// notify and an escalate move the step clock; a re-notify repeats it.
+    async fn record_notification(
+        &self,
+        id: Uuid,
+        at: DateTime<Utc>,
+        step: i64,
+        step_started_at: DateTime<Utc>,
+    ) -> Result<()>;
     async fn list(&self, include_closed: bool, limit: i64) -> Result<Vec<Incident>>;
 }
 

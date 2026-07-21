@@ -148,6 +148,18 @@ impl FromStr for Autonomy {
     }
 }
 
+impl fmt::Display for Autonomy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Must stay the exact inverse of FromStr (the config-file vocabulary).
+        f.write_str(match self {
+            Autonomy::Observe => "observe",
+            Autonomy::Suggest => "suggest",
+            Autonomy::ActOnKnown => "act_on_known",
+            Autonomy::Auto => "auto",
+        })
+    }
+}
+
 /// Risk class of a concrete command. Classification is done in code (pattern
 /// rules + tool self-declaration), never by the LLM. Ordered: later = riskier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -157,6 +169,17 @@ pub enum RiskClass {
     Medium,
     High,
     Destructive,
+}
+
+impl fmt::Display for RiskClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            RiskClass::Read => "read",
+            RiskClass::Medium => "medium",
+            RiskClass::High => "high",
+            RiskClass::Destructive => "destructive",
+        })
+    }
 }
 
 /// Expected state of a target/environment — intentional states must not page
@@ -234,6 +257,14 @@ pub struct Incident {
     pub resolved_at: Option<DateTime<Utc>>,
     pub last_notified_at: Option<DateTime<Utc>>,
     pub notify_count: i64,
+    /// Index into the escalation chain's steps currently being notified
+    /// (0-based). Together with `step_started_at`/`last_notified_at` this is
+    /// the durable form of `incidents::escalation::EscalationState`, so the
+    /// chain survives a daemon restart mid-escalation.
+    pub escalation_step: i64,
+    /// When the CURRENT escalation step was first notified (its `ack_timeout`
+    /// clock). `None` until the chain's first notification.
+    pub step_started_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

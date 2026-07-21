@@ -113,6 +113,8 @@ fn incident(id: Uuid, fingerprint: &str) -> Incident {
         resolved_at: None,
         last_notified_at: None,
         notify_count: 0,
+        escalation_step: 0,
+        step_started_at: None,
     }
 }
 
@@ -236,20 +238,26 @@ incident_set_state_stamps_ack_and_resolve => |db| {
     assert!(got.resolved_at.is_some());
 }
 
-incident_record_notification_bumps_count => |db| {
+incident_record_notification_bumps_count_and_persists_chain_position => |db| {
     let id = Uuid::new_v4();
     IncidentRepo::insert(db, &incident(id, "fp-notify")).await.unwrap();
 
+    // First notify: step 0, step clock starts.
     let t1 = Utc::now();
-    db.record_notification(id, t1).await.unwrap();
+    db.record_notification(id, t1, 0, t1).await.unwrap();
     let got = IncidentRepo::get(db, id).await.unwrap().unwrap();
     assert_eq!(got.notify_count, 1);
     assert_eq!(got.last_notified_at.unwrap().timestamp(), t1.timestamp());
+    assert_eq!(got.escalation_step, 0);
+    assert_eq!(got.step_started_at.unwrap().timestamp(), t1.timestamp());
 
+    // Escalate: step advances and its clock restarts.
     let t2 = Utc::now();
-    db.record_notification(id, t2).await.unwrap();
+    db.record_notification(id, t2, 1, t2).await.unwrap();
     let got = IncidentRepo::get(db, id).await.unwrap().unwrap();
     assert_eq!(got.notify_count, 2);
+    assert_eq!(got.escalation_step, 1);
+    assert_eq!(got.step_started_at.unwrap().timestamp(), t2.timestamp());
 }
 
 incident_list_scopes_closed_and_respects_limit => |db| {

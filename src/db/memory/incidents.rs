@@ -51,11 +51,19 @@ impl crate::db::IncidentRepo for InMemoryDb {
         Ok(())
     }
 
-    async fn record_notification(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+    async fn record_notification(
+        &self,
+        id: Uuid,
+        at: DateTime<Utc>,
+        step: i64,
+        step_started_at: DateTime<Utc>,
+    ) -> Result<()> {
         let mut store = self.store.lock().unwrap();
         if let Some(i) = store.incidents.get_mut(&id) {
             i.last_notified_at = Some(at);
             i.notify_count += 1;
+            i.escalation_step = step;
+            i.step_started_at = Some(step_started_at);
         }
         Ok(())
     }

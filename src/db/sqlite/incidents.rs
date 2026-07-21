@@ -70,6 +70,10 @@ fn row_to_incident(row: &SqliteRow) -> Incident {
             .get::<Option<String>, _>("last_notified_at")
             .map(|s| s.parse::<DateTime<Utc>>().expect("stored rfc3339")),
         notify_count: row.get("notify_count"),
+        escalation_step: row.get("escalation_step"),
+        step_started_at: row
+            .get::<Option<String>, _>("step_started_at")
+            .map(|s| s.parse::<DateTime<Utc>>().expect("stored rfc3339")),
     }
 }
 
@@ -82,8 +86,8 @@ impl crate::db::IncidentRepo for SqliteDb {
             "INSERT INTO incidents
                (id, fingerprint, target, severity, state, signals, hypothesis,
                 recommended_action, opened_at, acked_at, acked_by, resolved_at,
-                last_notified_at, notify_count)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                last_notified_at, notify_count, escalation_step, step_started_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(incident.id.to_string())
         .bind(&incident.fingerprint)
@@ -99,6 +103,8 @@ impl crate::db::IncidentRepo for SqliteDb {
         .bind(incident.resolved_at.map(|t| t.to_rfc3339()))
         .bind(incident.last_notified_at.map(|t| t.to_rfc3339()))
         .bind(incident.notify_count)
+        .bind(incident.escalation_step)
+        .bind(incident.step_started_at.map(|t| t.to_rfc3339()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -157,11 +163,21 @@ impl crate::db::IncidentRepo for SqliteDb {
         Ok(())
     }
 
-    async fn record_notification(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+    async fn record_notification(
+        &self,
+        id: Uuid,
+        at: DateTime<Utc>,
+        step: i64,
+        step_started_at: DateTime<Utc>,
+    ) -> Result<()> {
         sqlx::query(
-            "UPDATE incidents SET last_notified_at = ?, notify_count = notify_count + 1 WHERE id = ?",
+            "UPDATE incidents SET last_notified_at = ?, notify_count = notify_count + 1,
+                    escalation_step = ?, step_started_at = ?
+             WHERE id = ?",
         )
         .bind(at.to_rfc3339())
+        .bind(step)
+        .bind(step_started_at.to_rfc3339())
         .bind(id.to_string())
         .execute(&self.pool)
         .await?;

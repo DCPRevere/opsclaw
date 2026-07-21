@@ -83,3 +83,5 @@ clap_complete = "4"
 # Local mock HTTP server for provider/Hindsight/endpoint-tool tests (no real network).
 wiremock = "0.6"
 tempfile = "3"
+# test-util: paused-clock scheduler tests (start_paused, time::advance).
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -28,6 +28,7 @@ fn parse_risk(s: &str) -> RiskClass {
 
 fn outcome_str(o: AuditOutcome) -> &'static str {
     match o {
+        AuditOutcome::Begun => "begun",
         AuditOutcome::Executed => "executed",
         AuditOutcome::Blocked => "blocked",
         AuditOutcome::ApprovalQueued => "approval_queued",
@@ -38,6 +39,7 @@ fn outcome_str(o: AuditOutcome) -> &'static str {
 
 fn parse_outcome(s: &str) -> AuditOutcome {
     match s {
+        "begun" => AuditOutcome::Begun,
         "executed" => AuditOutcome::Executed,
         "blocked" => AuditOutcome::Blocked,
         "approval_queued" => AuditOutcome::ApprovalQueued,

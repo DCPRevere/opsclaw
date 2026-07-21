@@ -7,6 +7,9 @@
 //! Chain implementation lands in Wave 2; the record shape is frozen here.
 
 pub mod chain;
+pub mod writer;
+
+pub use writer::AuditWriter;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,6 +20,10 @@ use crate::domain::{Principal, RiskClass};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditOutcome {
+    /// Execution is about to start (audit-begin). A `Begun` with no matching
+    /// `Executed`/`Error` record after it means the daemon died mid-command —
+    /// exactly the trace a post-crash investigation needs.
+    Begun,
     /// Command ran; exit code recorded.
     Executed,
     Blocked,

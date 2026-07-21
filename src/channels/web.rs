@@ -1,0 +1,124 @@
+//! The web SSE channel (DESIGN §3: "the web SSE hub... land with the web UI
+//! (Wave 4)"). A broadcast hub any number of connected browser tabs
+//! subscribe to; `Channel::send` publishes one [`WebEvent`] per outbound
+//! message. Ported in spirit from gianna's `state.web`/`subscribe_as`
+//! (`src/http/state.rs`, `chat_api.rs`) — simplified because opsclaw has no
+//! per-member scoping (single-tenant, every operator sees the same team-
+//! wide stream) where gianna's hub filtered by household+member.
+//!
+//! The actual auth (short-lived signed stream tickets) lives in
+//! `http::sse` — this module is transport only: a `tokio::sync::broadcast`
+//! channel plus the `Channel` trait adapter.
+
+use async_trait::async_trait;
+use serde::Serialize;
+use tokio::sync::broadcast;
+use uuid::Uuid;
+
+use crate::Result;
+use crate::channels::{Channel, OutboundMessage};
+
+/// One event pushed down the SSE stream. `kind` is a stable, low-cardinality
+/// tag (`"message"`, `"incident"`, `"approval"`, `"status"`) so the client's
+/// `EventSource` listener can dispatch without parsing the body first.
+#[derive(Debug, Clone, Serialize)]
+pub struct WebEvent {
+    pub kind: &'static str,
+    pub body: serde_json::Value,
+}
+
+impl WebEvent {
+    pub fn message(text: &str) -> Self {
+        WebEvent { kind: "message", body: serde_json::json!({ "text": text }) }
+    }
+}
+
+/// Bounded broadcast hub. `capacity` is generous (a slow/disconnected
+/// subscriber lags rather than blocking a sender — `RecvError::Lagged` is
+/// handled at the SSE handler, which logs and continues) — matching
+/// gianna's stance that a dropped proactive event is recoverable (the
+/// client re-syncs via a REST read) where a blocked publisher is not.
+pub struct WebHub {
+    tx: broadcast::Sender<WebEvent>,
+}
+
+impl WebHub {
+    pub fn new() -> Self {
+        let (tx, _rx) = broadcast::channel(256);
+        WebHub { tx }
+    }
+
+    /// A fresh receiver for a newly connected SSE stream. Every subscriber
+    /// gets every event (no per-operator scoping — DESIGN §1: single-tenant,
+    /// team-shared state) — the client filters by `kind` if it only cares
+    /// about some events.
+    pub fn subscribe(&self) -> broadcast::Receiver<WebEvent> {
+        self.tx.subscribe()
+    }
+
+    pub fn publish(&self, event: WebEvent) {
+        // No subscribers is not an error (nobody has a tab open) — `send`
+        // returning Err just means the channel is momentarily empty.
+        let _ = self.tx.send(event);
+    }
+}
+
+impl Default for WebHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Channel for WebHub {
+    fn name(&self) -> &str {
+        "web"
+    }
+
+    async fn send(&self, msg: OutboundMessage) -> Result<()> {
+        self.publish(WebEvent::message(&msg.body));
+        Ok(())
+    }
+
+    /// A tab is open iff at least one subscriber is attached — best-effort
+    /// (a subscriber that's open but the tab is backgrounded still counts,
+    /// matching gianna's "a spouse's tab must not count" caution the other
+    /// direction: this errs toward "reachable" rather than silently
+    /// dropping alerts a human might still see).
+    async fn can_reach(&self, _operator: Option<Uuid>) -> bool {
+        self.tx.receiver_count() > 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn publish_reaches_every_subscriber() {
+        let hub = WebHub::new();
+        let mut a = hub.subscribe();
+        let mut b = hub.subscribe();
+
+        hub.send(OutboundMessage { operator: None, body: "hello".into() }).await.unwrap();
+
+        let ev_a = a.recv().await.unwrap();
+        let ev_b = b.recv().await.unwrap();
+        assert_eq!(ev_a.kind, "message");
+        assert_eq!(ev_b.kind, "message");
+    }
+
+    #[tokio::test]
+    async fn can_reach_reflects_subscriber_count() {
+        let hub = WebHub::new();
+        assert!(!hub.can_reach(None).await, "no subscribers yet");
+        let _rx = hub.subscribe();
+        assert!(hub.can_reach(None).await);
+    }
+
+    #[tokio::test]
+    async fn publish_with_no_subscribers_does_not_error() {
+        let hub = WebHub::new();
+        hub.send(OutboundMessage { operator: None, body: "into the void".into() }).await.unwrap();
+    }
+}

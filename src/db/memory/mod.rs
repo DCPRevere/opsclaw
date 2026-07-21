@@ -10,14 +10,16 @@ mod approvals;
 mod audit;
 mod control;
 mod incidents;
+mod invites;
 mod jobs;
 mod runbook_runs;
+mod tokens;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-use crate::db::{Account, JobFailure, RunbookRun};
+use crate::db::{Account, CliToken, Invite, JobFailure, RunbookRun};
 use crate::domain::{ApprovalRequest, Incident, Job};
 
 #[derive(Default)]
@@ -31,6 +33,13 @@ struct Store {
     claims: std::collections::HashSet<(String, String)>,
     estop_engaged: bool,
     runbook_runs: HashMap<Uuid, RunbookRun>,
+    /// Keyed by token HASH (never the plaintext) — mirrors the sqlite
+    /// backend's unique-hash lookup.
+    cli_tokens: HashMap<String, CliToken>,
+    /// Keyed by invite code; the bool is "consumed" (kept, not removed, so
+    /// a consumed/expired code stays inspectable — mirrors the sqlite
+    /// backend's `consumed_at` column rather than a hard delete).
+    invites: HashMap<String, (Invite, bool)>,
 }
 
 /// A single in-memory store shared across all repo trait impls.

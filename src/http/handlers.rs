@@ -1,0 +1,163 @@
+//! Typed auth extractor + login/logout handlers. Ported from gianna's
+//! `src/http/handlers/auth_gates.rs` — simplified to ONE gate (`Authed`)
+//! rather than gianna's `Authed`/`AuthedRead`/`AuthedWrite` trio: gianna's
+//! extra two encode a subscription-tier gate opsclaw has no analog for
+//! (DESIGN.md doesn't define operator roles or tiers — every signed-in
+//! operator has the same standing, and per-action authorization is the
+//! POLICY layer's job, not auth's). The rationale DESIGN §3 calls out
+//! survives unchanged: "typed auth extractors that encode the permission in
+//! the handler signature... hand-rolled gate calls let a missing check ship
+//! silently" — `Authed` is that same `FromRequestParts` pattern, just with
+//! one tier instead of three.
+
+use axum::extract::{FromRequestParts, State};
+use axum::http::HeaderMap;
+use axum::http::request::Parts;
+use axum::response::{IntoResponse, Response};
+use chrono::Utc;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+use super::auth;
+use super::state::AppState;
+use crate::{Error, Result};
+
+/// A pragmatic email shape check (full RFC 5322 validation is a fool's
+/// errand); ported verbatim from gianna's `handlers/auth_gates.rs::
+/// plausible_email`.
+pub(crate) fn plausible_email(email: &str) -> bool {
+    if email.len() > 254 || email.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some((local, domain)) = email.split_once('@') else { return false };
+    !local.is_empty()
+        && !domain.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !domain.contains('@')
+}
+
+pub(crate) fn bearer(headers: &HeaderMap) -> Result<&str> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .ok_or_else(|| Error::unauthorized("missing bearer token"))
+}
+
+pub(crate) struct Ctx {
+    pub(crate) account_id: Uuid,
+}
+
+pub(crate) async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Ctx> {
+    // The web UI authenticates by the HttpOnly session cookie ONLY — the
+    // token is never exposed to JavaScript, so an XSS can't steal it. (The
+    // remote CLI uses a separate Bearer path over its own `ops_` tokens —
+    // see `cli_auth`/`routes::cli`.)
+    let token =
+        auth::session_cookie_value(headers).ok_or_else(|| Error::unauthorized("not signed in"))?;
+    let claims = auth::verify_token(&state.jwt_secret, &token)?;
+    let account_id: Uuid = claims.sub.parse().map_err(|_| Error::unauthorized("bad token"))?;
+    // Revocation check: the token must carry the account's CURRENT
+    // token_version — a password reset (or explicit sign-out-everywhere)
+    // bumps it, killing every older session. A genuinely-missing account is
+    // a 401; any other repo failure propagates as-is (a 500), never
+    // collapsed into "please sign in again" — that would hide an outage
+    // behind a message that doesn't help and masks the real problem.
+    let account = state.repos.by_id(account_id).await?.ok_or_else(|| Error::unauthorized("unknown account"))?;
+    if claims.ver != account.token_version {
+        return Err(Error::unauthorized("session revoked — please sign in again"));
+    }
+    let span = tracing::Span::current();
+    span.record("account", tracing::field::display(&account_id));
+    span.record("session", claims.ver);
+    Ok(Ctx { account_id })
+}
+
+/// `authenticate` — the signed-in `Ctx`. Every operator has the same
+/// standing (no roles/tiers in DESIGN.md); a route that additionally needs
+/// operator-specific scoping (e.g. "only this account's own CLI tokens")
+/// checks `ctx.account_id` against the resource in the handler body, same
+/// as gianna's account-scoped CLI-token routes do under `Authed`.
+pub struct Authed(pub(crate) Ctx);
+
+impl FromRequestParts<AppState> for Authed {
+    type Rejection = Error;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self> {
+        Ok(Authed(authenticate(state, &parts.headers).await?))
+    }
+}
+
+// ---- login/logout ----
+
+#[derive(Deserialize)]
+pub struct LoginReq {
+    pub email: String,
+    pub password: String,
+}
+
+/// Best-effort client IP for rate-limiting (a reverse proxy/tunnel in front
+/// sets `X-Forwarded-For`; falls back to a constant otherwise — matching
+/// gianna's stance that this is a blunt best-effort control, not the only
+/// line of defense).
+fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+pub(crate) fn check_auth_rate(state: &AppState, headers: &HeaderMap) -> Result<()> {
+    if state.auth_limiter.allow_at(&client_ip(headers), Utc::now().timestamp()) {
+        Ok(())
+    } else {
+        Err(Error::rate_limited("too many attempts — please wait a minute", 60))
+    }
+}
+
+/// POST /api/login — email + password, returning a fresh session cookie. A
+/// uniform error for both unknown-email and wrong-password avoids leaking
+/// which emails are registered operators.
+pub async fn login(State(state): State<AppState>, headers: HeaderMap, axum::Json(req): axum::Json<LoginReq>) -> Result<Response> {
+    check_auth_rate(&state, &headers)?;
+    let invalid = || Error::unauthorized("invalid email or password");
+    let account = state.repos.by_email(&req.email).await?.ok_or_else(invalid)?;
+    if !auth::verify_password(&req.password, &account.password_hash)? {
+        return Err(invalid());
+    }
+    session_response(&state, account.id, account.token_version)
+}
+
+/// Build the auth response: set the HttpOnly session cookie and return the
+/// (token-free) JSON body. The token lives only in the cookie, never in the
+/// body or JavaScript.
+pub(crate) fn session_response(state: &AppState, account_id: Uuid, token_version: i64) -> Result<Response> {
+    let token = auth::issue_token(&state.jwt_secret, account_id, token_version)?;
+    let cookie = auth::session_cookie(&token, state.config.http.cookies_secure);
+    Ok(([(axum::http::header::SET_COOKIE, cookie)], axum::Json(json!({ "account_id": account_id })))
+        .into_response())
+}
+
+/// POST /api/logout — clear the session cookie. Stateless JWT, so this just
+/// drops the cookie; full revocation across devices is the `token_version`
+/// bump (a later "sign out everywhere" action, not built here). Always 200
+/// so the client can clear UI state regardless.
+pub async fn logout(State(state): State<AppState>) -> Response {
+    let cookie = auth::clear_session_cookie(state.config.http.cookies_secure);
+    ([(axum::http::header::SET_COOKIE, cookie)], axum::Json(json!({ "ok": true }))).into_response()
+}
+
+/// GET /api/me — whose session this is (for the SPA to confirm sign-in
+/// state on load).
+pub async fn me(State(state): State<AppState>, Authed(ctx): Authed) -> Result<axum::Json<Value>> {
+    let account = state.repos.by_id(ctx.account_id).await?.ok_or_else(|| Error::unauthorized("unknown account"))?;
+    Ok(axum::Json(json!({
+        "account_id": account.id,
+        "email": account.email,
+        "display_name": account.display_name,
+    })))
+}

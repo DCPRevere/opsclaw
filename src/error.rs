@@ -16,6 +16,26 @@ pub enum Error {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// Additive (Wave 4, `http/`): request auth failed or was never presented
+    /// — no session cookie, a bad/expired JWT, a revoked `token_version`, an
+    /// unrecognised CLI/webhook token. Gianna's variant, ported verbatim
+    /// (`src/error.rs`): `http::IntoResponse` maps this to 401.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
+    /// Additive (Wave 4, `http/`): a request was well-formed but its content
+    /// failed a business-rule check (bad shape, out-of-range value). Distinct
+    /// from `Config` (a boot-time misconfiguration) — this is a per-request
+    /// 400, never fatal to the daemon. Gianna's `Error::validation`, ported.
+    #[error("validation: {0}")]
+    Validation(String),
+
+    /// Additive (Wave 4, `http/`): too many requests from one caller within a
+    /// window (login/auth-exchange abuse). Carries the window so the response
+    /// can set `Retry-After`. Gianna's `Error::RateLimited`, ported.
+    #[error("rate limited: {message}")]
+    RateLimited { message: String, retry_after_secs: u64 },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
@@ -50,6 +70,22 @@ pub enum Error {
 impl Error {
     pub fn other(msg: impl Into<String>) -> Self {
         Error::Other(msg.into())
+    }
+
+    /// Additive (Wave 4): a request auth failure.
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Error::Unauthorized(msg.into())
+    }
+
+    /// Additive (Wave 4): a request failed a business-rule validation.
+    pub fn validation(msg: impl Into<String>) -> Self {
+        Error::Validation(msg.into())
+    }
+
+    /// Additive (Wave 4): too many requests; `retry_after_secs` becomes the
+    /// response's `Retry-After` header.
+    pub fn rate_limited(msg: impl Into<String>, retry_after_secs: u64) -> Self {
+        Error::RateLimited { message: msg.into(), retry_after_secs }
     }
 
     /// A transient LLM failure worth retrying / falling through.

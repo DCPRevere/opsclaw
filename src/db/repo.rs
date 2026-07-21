@@ -184,3 +184,76 @@ pub trait RunbookRunRepo: Send + Sync {
     /// low-success runbooks get surfaced for review).
     async fn success_rate(&self, runbook_name: &str) -> Result<RunbookSuccessRate>;
 }
+
+// ---- Additive (Wave 4, `http/`): remote-CLI tokens + teammate invites. ----
+//
+// Neither existed in the Wave 0 frozen contract (no gianna analog was
+// declared for them there); added here per AGENTS.md's additive-only rule,
+// following gianna's `CliTokenRepo`/invite pattern exactly (hash-only token
+// storage, plaintext returned once; a code-based invite, atomically
+// consumed). Reported in the port summary rather than assumed silently.
+
+/// A remote-CLI personal access token (DESIGN §1/§7: `gcli_`-pattern
+/// bearer auth for the token-auth gateway). The plaintext token is NEVER
+/// stored — only its SHA-256 hash (`CliTokenRepo::find_cli_token` looks up
+/// by hash); the plaintext is returned to the CLI exactly once, at mint
+/// time, by the HTTP layer that owns this repo.
+#[derive(Debug, Clone)]
+pub struct CliToken {
+    pub id: Uuid,
+    pub account: Uuid,
+    /// Device/host label the CLI supplies at mint time (e.g. a hostname),
+    /// so an operator can tell which of several sessions to revoke.
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[async_trait]
+pub trait TokenRepo: Send + Sync {
+    /// Store a freshly minted token under its hash (never the plaintext).
+    async fn create_cli_token(&self, token: CliToken, token_hash: &str) -> Result<()>;
+    /// Resolve a presented token's hash to `(token_id, account_id)`, or
+    /// `None` if unknown/revoked. Bumps `last_used_at` as a side effect
+    /// (best-effort — a failure to record last-use must not fail auth).
+    async fn find_cli_token(&self, token_hash: &str) -> Result<Option<(Uuid, Uuid)>>;
+    /// Every CLI session belonging to one account (metadata only — never
+    /// the hash or plaintext), for the in-app "manage my sessions" surface.
+    async fn list_cli_tokens(&self, account: Uuid) -> Result<Vec<CliToken>>;
+    /// Revoke one token, scoped to `account` so one login can never revoke
+    /// another account's session. Returns whether a row was removed.
+    async fn revoke_cli_token(&self, account: Uuid, token_id: Uuid) -> Result<bool>;
+}
+
+/// A pending teammate invite: a one-time code an existing operator hands to
+/// a new one. Single-tenant (DESIGN §1: "no tenancy ids thread through the
+/// code") — unlike gianna's household-scoped invite, an opsclaw invite
+/// carries no household/team id, just who issued it and when it expires.
+#[derive(Debug, Clone)]
+pub struct Invite {
+    pub code: String,
+    pub issued_by: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[async_trait]
+pub trait InviteRepo: Send + Sync {
+    async fn create_invite(&self, invite: &Invite) -> Result<()>;
+    /// Non-consuming lookup (for a pre-check UI) — a valid, non-expired,
+    /// non-consumed invite is `Some`; an expired invite is `None` even if
+    /// it was never taken (same "expired is gone" contract `take_invite`
+    /// and `list_open_invites` already enforce).
+    async fn get_invite(&self, code: &str, now: DateTime<Utc>) -> Result<Option<Invite>>;
+    /// Atomically resolve AND consume a non-expired invite — the join
+    /// path's TOCTOU-free entry (gianna's `take_household_invite`
+    /// pattern). Returns the invite only for the caller that wins the
+    /// race; a second concurrent join with the same code gets `None`.
+    async fn take_invite(&self, code: &str, now: DateTime<Utc>) -> Result<Option<Invite>>;
+    /// Every currently-open (non-expired, non-consumed) invite, newest
+    /// first, so an operator can see and revoke outstanding invites.
+    async fn list_open_invites(&self, now: DateTime<Utc>) -> Result<Vec<Invite>>;
+    /// Revoke one open invite by code. `Ok(false)` if no such open invite
+    /// exists (already consumed, expired, or never existed).
+    async fn revoke_invite(&self, code: &str) -> Result<bool>;
+}

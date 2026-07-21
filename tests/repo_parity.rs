@@ -29,8 +29,8 @@ use opsclaw::audit::{AuditOutcome, AuditRecord};
 use opsclaw::db::memory::InMemoryDb;
 use opsclaw::db::sqlite::SqliteDb;
 use opsclaw::db::{
-    Account, AccountRepo, ApprovalRepo, AuditRepo, ControlRepo, IncidentRepo, JobRepo, RunbookRun,
-    RunbookRunRepo, StepOutcome, StepStatus,
+    Account, AccountRepo, ApprovalRepo, AuditRepo, CliToken, ControlRepo, IncidentRepo, Invite,
+    InviteRepo, JobRepo, RunbookRun, RunbookRunRepo, StepOutcome, StepStatus, TokenRepo,
 };
 use opsclaw::domain::{
     ApprovalRequest, ApprovalState, FqTarget, Incident, IncidentState, Job, Payload, Principal,
@@ -40,7 +40,15 @@ use opsclaw::domain::{
 /// The union of every repo trait, so a single `&dyn RepoSuite` can drive a
 /// whole test regardless of which implementation backs it.
 pub trait RepoSuite:
-    IncidentRepo + ApprovalRepo + AuditRepo + AccountRepo + ControlRepo + JobRepo + RunbookRunRepo
+    IncidentRepo
+    + ApprovalRepo
+    + AuditRepo
+    + AccountRepo
+    + ControlRepo
+    + JobRepo
+    + RunbookRunRepo
+    + TokenRepo
+    + InviteRepo
 {
 }
 impl<T> RepoSuite for T where
@@ -51,6 +59,8 @@ impl<T> RepoSuite for T where
         + ControlRepo
         + JobRepo
         + RunbookRunRepo
+        + TokenRepo
+        + InviteRepo
 {
 }
 
@@ -167,6 +177,15 @@ fn account(id: Uuid, email: &str) -> Account {
 
 fn job(name: &str) -> Job {
     Job::new(name, Schedule::Interval { every_minutes: 5 }, Payload::Text("ping".into()))
+}
+
+fn cli_token(id: Uuid, account: Uuid, name: &str) -> CliToken {
+    CliToken { id, account, name: name.into(), created_at: Utc::now(), last_used_at: None }
+}
+
+fn invite(code: &str, issued_by: Uuid, ttl: chrono::Duration) -> Invite {
+    let now = Utc::now();
+    Invite { code: code.into(), issued_by, created_at: now, expires_at: now + ttl }
 }
 
 fn runbook_run(id: Uuid, runbook_name: &str, success: bool) -> RunbookRun {
@@ -599,6 +618,102 @@ runbook_run_success_rate => |db| {
     // A DIFFERENT runbook's history doesn't leak in.
     let unrelated = db.success_rate("never-run").await.unwrap();
     assert_eq!(unrelated.total_runs, 0);
+}
+
+// ---- CLI tokens ----
+
+cli_token_create_find_by_hash_bumps_last_used => |db| {
+    let account = Uuid::new_v4();
+    let id = Uuid::new_v4();
+    assert!(db.find_cli_token("no-such-hash").await.unwrap().is_none());
+
+    db.create_cli_token(cli_token(id, account, "laptop"), "hash-abc").await.unwrap();
+    let found = db.find_cli_token("hash-abc").await.unwrap().unwrap();
+    assert_eq!(found, (id, account));
+
+    let listed = db.list_cli_tokens(account).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "laptop");
+    // The plaintext/hash is never exposed on the listed row (CliToken has no
+    // hash field at all — this is a type-level guarantee, not a runtime one,
+    // but pin that the row's own identity fields round-trip correctly).
+    assert_eq!(listed[0].id, id);
+
+    // A DIFFERENT account never sees this token.
+    assert!(db.list_cli_tokens(Uuid::new_v4()).await.unwrap().is_empty());
+}
+
+cli_token_revoke_is_scoped_to_owning_account => |db| {
+    let owner = Uuid::new_v4();
+    let stranger = Uuid::new_v4();
+    let id = Uuid::new_v4();
+    db.create_cli_token(cli_token(id, owner, "phone"), "hash-xyz").await.unwrap();
+
+    // A different account can never revoke someone else's token.
+    assert!(!db.revoke_cli_token(stranger, id).await.unwrap());
+    assert!(db.find_cli_token("hash-xyz").await.unwrap().is_some());
+
+    // The owner can.
+    assert!(db.revoke_cli_token(owner, id).await.unwrap());
+    assert!(db.find_cli_token("hash-xyz").await.unwrap().is_none());
+
+    // Revoking again (already gone) is a clean false, not an error.
+    assert!(!db.revoke_cli_token(owner, id).await.unwrap());
+}
+
+// ---- Invites ----
+
+invite_create_get_and_open_listing => |db| {
+    let issuer = Uuid::new_v4();
+    let now = Utc::now();
+    db.create_invite(&invite("ABC123", issuer, chrono::Duration::hours(1))).await.unwrap();
+
+    let got = InviteRepo::get_invite(db, "ABC123", now).await.unwrap().unwrap();
+    assert_eq!(got.issued_by, issuer);
+
+    assert!(InviteRepo::get_invite(db, "NOSUCH", now).await.unwrap().is_none());
+
+    let open = db.list_open_invites(now).await.unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].code, "ABC123");
+}
+
+invite_take_is_exactly_once_and_expiry_gated => |db| {
+    let issuer = Uuid::new_v4();
+    let now = Utc::now();
+    db.create_invite(&invite("ONESHOT", issuer, chrono::Duration::hours(1))).await.unwrap();
+
+    // First take wins.
+    let taken = db.take_invite("ONESHOT", now).await.unwrap().unwrap();
+    assert_eq!(taken.code, "ONESHOT");
+
+    // A second take of the SAME code — even immediately after — must lose
+    // (the double-join TOCTOU guard).
+    assert!(db.take_invite("ONESHOT", now).await.unwrap().is_none());
+
+    // A consumed invite no longer appears in the open listing or the
+    // non-consuming lookup.
+    assert!(InviteRepo::get_invite(db, "ONESHOT", now).await.unwrap().is_none());
+    assert!(db.list_open_invites(now).await.unwrap().is_empty());
+
+    // An expired (but never-taken) invite cannot be taken either.
+    db.create_invite(&invite("EXPIRED", issuer, chrono::Duration::seconds(-1))).await.unwrap();
+    assert!(db.take_invite("EXPIRED", now).await.unwrap().is_none());
+    assert!(InviteRepo::get_invite(db, "EXPIRED", now).await.unwrap().is_none(), "expired invite must not resolve even before being taken");
+}
+
+invite_revoke_only_touches_open_invites => |db| {
+    let issuer = Uuid::new_v4();
+    let now = Utc::now();
+    db.create_invite(&invite("REVOKEME", issuer, chrono::Duration::hours(1))).await.unwrap();
+
+    assert!(db.revoke_invite("REVOKEME").await.unwrap());
+    assert!(InviteRepo::get_invite(db, "REVOKEME", now).await.unwrap().is_none());
+    assert!(db.list_open_invites(now).await.unwrap().is_empty());
+
+    // Revoking again, or a code that never existed, is a clean false.
+    assert!(!db.revoke_invite("REVOKEME").await.unwrap());
+    assert!(!db.revoke_invite("NEVER-EXISTED").await.unwrap());
 }
 
 }

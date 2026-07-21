@@ -12,8 +12,9 @@ pub mod repo;
 pub mod sqlite;
 
 pub use repo::{
-    Account, AccountRepo, ApprovalRepo, AuditRepo, ControlRepo, IncidentRepo, JobFailure, JobRepo,
-    RunbookRun, RunbookRunRepo, RunbookSuccessRate, StepOutcome, StepStatus,
+    Account, AccountRepo, ApprovalRepo, AuditRepo, CliToken, ControlRepo, IncidentRepo, Invite,
+    InviteRepo, JobFailure, JobRepo, RunbookRun, RunbookRunRepo, RunbookSuccessRate, StepOutcome,
+    StepStatus, TokenRepo,
 };
 
 use std::sync::Arc;
@@ -24,7 +25,15 @@ use std::sync::Arc;
 /// (`src/http/state.rs`). Both [`sqlite::SqliteDb`] and [`memory::InMemoryDb`]
 /// implement every repo trait, so the blanket impl below covers them.
 pub trait AllRepos:
-    IncidentRepo + ApprovalRepo + AuditRepo + AccountRepo + ControlRepo + JobRepo + RunbookRunRepo
+    IncidentRepo
+    + ApprovalRepo
+    + AuditRepo
+    + AccountRepo
+    + ControlRepo
+    + JobRepo
+    + RunbookRunRepo
+    + TokenRepo
+    + InviteRepo
 {
 }
 
@@ -36,6 +45,8 @@ impl<T> AllRepos for T where
         + ControlRepo
         + JobRepo
         + RunbookRunRepo
+        + TokenRepo
+        + InviteRepo
 {
 }
 

@@ -1,8 +1,9 @@
 //! Message delivery abstraction. The trait is gianna's `Channel`, near
 //! verbatim: only `name` and `send` are mandatory so adding a channel is a
 //! small diff. Wave 1 ports Telegram (long-polling; offset persisted only
-//! after genuine hand-off), the CLI capture channel, and `RecordingChannel`;
-//! the web SSE hub and web push land with the web UI (Wave 4).
+//! after genuine hand-off), the CLI capture channel, and `RecordingChannel`.
+//! [`web::WebHub`] (Wave 4) is the SSE-backed channel; its ticket-based auth
+//! lives in `http::sse`. Web push is a later addition, not yet landed.
 //!
 //! Trait-surface additions over the frozen shape (all DEFAULTED, no existing
 //! signature touched): `send_typing`, `self_handle`, `drop_self_messages`.
@@ -13,6 +14,7 @@
 pub mod cli;
 pub mod recording;
 pub mod telegram;
+pub mod web;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;

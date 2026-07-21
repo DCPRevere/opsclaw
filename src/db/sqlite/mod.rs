@@ -15,8 +15,10 @@ mod approvals;
 mod audit;
 mod control;
 mod incidents;
+mod invites;
 mod jobs;
 mod runbook_runs;
+mod tokens;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, SqlitePool};

@@ -29,8 +29,9 @@ use opsclaw::audit::{AuditOutcome, AuditRecord};
 use opsclaw::db::memory::InMemoryDb;
 use opsclaw::db::sqlite::SqliteDb;
 use opsclaw::db::{
-    Account, AccountRepo, ApprovalRepo, AuditRepo, CliToken, ControlRepo, IncidentRepo, Invite,
-    InviteRepo, JobRepo, RunbookRun, RunbookRunRepo, StepOutcome, StepStatus, TokenRepo,
+    Account, AccountRepo, ApprovalRepo, AuditRepo, ChannelStateRepo, CliToken, ControlRepo,
+    IncidentRepo, Invite, InviteRepo, JobRepo, PushSubscription, PushSubscriptionRepo, RunbookRun,
+    RunbookRunRepo, StepOutcome, StepStatus, TokenRepo,
 };
 use opsclaw::domain::{
     ApprovalRequest, ApprovalState, FqTarget, Incident, IncidentState, Job, Payload, Principal,
@@ -49,6 +50,8 @@ pub trait RepoSuite:
     + RunbookRunRepo
     + TokenRepo
     + InviteRepo
+    + PushSubscriptionRepo
+    + ChannelStateRepo
 {
 }
 impl<T> RepoSuite for T where
@@ -61,6 +64,8 @@ impl<T> RepoSuite for T where
         + RunbookRunRepo
         + TokenRepo
         + InviteRepo
+        + PushSubscriptionRepo
+        + ChannelStateRepo
 {
 }
 
@@ -186,6 +191,16 @@ fn cli_token(id: Uuid, account: Uuid, name: &str) -> CliToken {
 fn invite(code: &str, issued_by: Uuid, ttl: chrono::Duration) -> Invite {
     let now = Utc::now();
     Invite { code: code.into(), issued_by, created_at: now, expires_at: now + ttl }
+}
+
+fn push_subscription(endpoint: &str, account_id: Uuid) -> PushSubscription {
+    PushSubscription {
+        endpoint: endpoint.into(),
+        account_id,
+        p256dh: "p256dh-key".into(),
+        auth: "auth-secret".into(),
+        created_at: Utc::now(),
+    }
 }
 
 fn runbook_run(id: Uuid, runbook_name: &str, success: bool) -> RunbookRun {
@@ -714,6 +729,111 @@ invite_revoke_only_touches_open_invites => |db| {
     // Revoking again, or a code that never existed, is a clean false.
     assert!(!db.revoke_invite("REVOKEME").await.unwrap());
     assert!(!db.revoke_invite("NEVER-EXISTED").await.unwrap());
+}
+
+// ---- Push subscriptions ----
+
+push_subscription_upsert_lists_and_deletes => |db| {
+    let account = Uuid::new_v4();
+    let sub = push_subscription("https://push.example/ep1", account);
+    db.upsert_push_subscription(&sub).await.unwrap();
+
+    let listed = db.list_push_subscriptions().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].endpoint, "https://push.example/ep1");
+    assert_eq!(listed[0].account_id, account);
+    assert_eq!(listed[0].p256dh, "p256dh-key");
+    assert_eq!(listed[0].auth, "auth-secret");
+
+    db.delete_push_subscription("https://push.example/ep1").await.unwrap();
+    assert!(db.list_push_subscriptions().await.unwrap().is_empty());
+
+    // Deleting an endpoint that never existed is a clean no-op.
+    db.delete_push_subscription("https://push.example/never-existed").await.unwrap();
+}
+
+push_subscription_upsert_by_endpoint_overwrites_not_duplicates => |db| {
+    let account_a = Uuid::new_v4();
+    let account_b = Uuid::new_v4();
+    let endpoint = "https://push.example/ep-reused";
+
+    let mut sub = push_subscription(endpoint, account_a);
+    db.upsert_push_subscription(&sub).await.unwrap();
+
+    // Same endpoint re-subscribing (e.g. after clearing site data) under a
+    // DIFFERENT account/keys must overwrite the row, not create a second one.
+    sub.account_id = account_b;
+    sub.p256dh = "new-p256dh".into();
+    sub.auth = "new-auth".into();
+    db.upsert_push_subscription(&sub).await.unwrap();
+
+    let listed = db.list_push_subscriptions().await.unwrap();
+    assert_eq!(listed.len(), 1, "upsert must not duplicate rows for the same endpoint");
+    assert_eq!(listed[0].account_id, account_b);
+    assert_eq!(listed[0].p256dh, "new-p256dh");
+    assert_eq!(listed[0].auth, "new-auth");
+}
+
+// ---- Channel state: Telegram roster + generic cursor store ----
+
+telegram_roster_bind_find_and_unbind => |db| {
+    let anna = Uuid::new_v4();
+    assert!(db.find_telegram_operator("111").await.unwrap().is_none());
+
+    db.bind_telegram_chat("111", anna).await.unwrap();
+    assert_eq!(db.find_telegram_operator("111").await.unwrap(), Some(anna));
+
+    db.unbind_telegram_chat("111").await.unwrap();
+    assert!(db.find_telegram_operator("111").await.unwrap().is_none());
+
+    // Unbinding an unknown chat id is a clean no-op.
+    db.unbind_telegram_chat("never-bound").await.unwrap();
+}
+
+telegram_roster_bind_is_upsert_by_chat_id => |db| {
+    let anna = Uuid::new_v4();
+    let tom = Uuid::new_v4();
+    db.bind_telegram_chat("222", anna).await.unwrap();
+    // Re-binding the SAME chat id to a different operator overwrites, it
+    // does not create a second binding (mirrors InMemoryRoster::bind).
+    db.bind_telegram_chat("222", tom).await.unwrap();
+    assert_eq!(db.find_telegram_operator("222").await.unwrap(), Some(tom));
+    assert_eq!(db.telegram_chat_ids_for(Some(anna)).await.unwrap(), Vec::<String>::new());
+    assert_eq!(db.telegram_chat_ids_for(Some(tom)).await.unwrap(), vec!["222"]);
+}
+
+telegram_roster_chat_ids_for_broadcast_and_targeted => |db| {
+    let anna = Uuid::new_v4();
+    let tom = Uuid::new_v4();
+    db.bind_telegram_chat("111", anna).await.unwrap();
+    db.bind_telegram_chat("222", tom).await.unwrap();
+
+    let mut all = db.telegram_chat_ids_for(None).await.unwrap();
+    all.sort();
+    assert_eq!(all, vec!["111", "222"]);
+
+    assert_eq!(db.telegram_chat_ids_for(Some(tom)).await.unwrap(), vec!["222"]);
+    assert_eq!(db.telegram_chat_ids_for(Some(Uuid::new_v4())).await.unwrap(), Vec::<String>::new());
+}
+
+channel_state_get_set_roundtrip_and_overwrites => |db| {
+    assert!(db.get_channel_state("telegram:getUpdates:offset").await.unwrap().is_none());
+
+    db.set_channel_state("telegram:getUpdates:offset", "42").await.unwrap();
+    assert_eq!(
+        db.get_channel_state("telegram:getUpdates:offset").await.unwrap(),
+        Some("42".to_string())
+    );
+
+    // A later set overwrites rather than erroring or duplicating.
+    db.set_channel_state("telegram:getUpdates:offset", "101").await.unwrap();
+    assert_eq!(
+        db.get_channel_state("telegram:getUpdates:offset").await.unwrap(),
+        Some("101".to_string())
+    );
+
+    // A DIFFERENT key is independent.
+    assert!(db.get_channel_state("some:other:key").await.unwrap().is_none());
 }
 
 }

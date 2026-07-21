@@ -273,7 +273,7 @@ mod tests {
             vec![("seed.md".to_string(), rb.clone())],
         );
         assert_eq!(store.list().len(), 1);
-        assert_eq!(store.get(&rb.title().to_string()).unwrap().file, "seed.md");
+        assert_eq!(store.get(rb.title()).unwrap().file, "seed.md");
     }
 
     #[test]

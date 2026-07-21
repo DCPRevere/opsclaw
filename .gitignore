@@ -32,3 +32,6 @@ tarpaulin-report.*
 
 # Scratch workspace
 /scratchpad
+
+# Local eval-run marker (written by `just evals`, checked by `just release`)
+.opsclaw-eval-marker

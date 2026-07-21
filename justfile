@@ -22,8 +22,27 @@ cli *ARGS:
 # Run the full test suite. No throwaway container needed: the repo parity
 # suite runs unconditionally against SQLite under plain `cargo test`
 # (AGENTS.md — this is the one thing gianna needed Postgres-in-CI for).
+# Live evals (tests/evals.rs) self-skip under plain `cargo test` — see `just
+# evals` to actually run them.
 test:
     cargo test
+
+# Hits OpenRouter and spends tokens; needs OPENROUTER_API_KEY in the env or
+# .env. Runs the live-eval tier (DESIGN.md §6 last bullet, docs/EVALS.md)
+# against the SHIPPED provider chain (llm::build_chain from config/env — an
+# eval against a different model than production ships is a comfortable
+# lie). On an all-green run, writes .opsclaw-eval-marker, which `release`
+# checks before tagging. Mirrors gianna's `just evals` shape, with no
+# separate model-pin file yet (OPENROUTER_MODELS is read directly; add a
+# checked-in pin file, gianna's eval-models.env, if/when a CI schedule needs
+# the same pin `just evals` uses locally).
+evals:
+    #!/usr/bin/env sh
+    set -e
+    [ -f .env ] && { set -a; . ./.env; set +a; }
+    [ -n "${OPENROUTER_API_KEY:-}" ] || { echo "✗ OPENROUTER_API_KEY not set (env or .env)"; exit 1; }
+    echo "↳ evals against OPENROUTER_MODELS=${OPENROUTER_MODELS:-<default>}"
+    OPSCLAW_LIVE_EVALS=1 cargo test --test evals -- --nocapture
 
 # Format all code.
 fmt:
@@ -84,11 +103,32 @@ release version:
     [ -z "$dirty" ] || { echo "⚠ uncommitted changes (NOT included in this release):"; echo "$dirty"; }
     # Run CI BEFORE committing/tagging, so a red tree never gets tagged.
     just ci
-    # TODO(evals): once a live-eval workflow exists (gianna's Evals workflow,
-    # IMPLEMENTATION plan / DESIGN.md §6 "Live eval tier"), add the hard gate
-    # here: refuse to tag unless the last scheduled eval run is green, with an
-    # EVALS_OVERRIDE=1 emergency bypass. No eval suite exists yet, so there is
-    # nothing to gate on.
+    # HARD eval gate (DESIGN.md §6 "Live eval tier"): refuse to tag unless
+    # tests/evals.rs's last green run left a FRESH marker (.opsclaw-eval-marker,
+    # written only on an all-green `just evals` / `OPSCLAW_LIVE_EVALS=1 cargo
+    # test --test evals`). "Fresh" = written within the last 7 days — a stale
+    # marker from long ago is as unsafe as no marker (a model/prompt
+    # regression merged since would ship unchecked); gianna's equivalent gate
+    # instead queries a SCHEDULED CI workflow run's conclusion via `gh run
+    # list` (see docs/EVALS.md for why that's not available here yet — no
+    # evals.yml scheduled workflow exists in this repo). Emergency override:
+    # `EVALS_OVERRIDE=1 just release X.Y.Z` (the skip reason is echoed so it's
+    # visible in the release output, matching gianna's override).
+    if [ "${EVALS_OVERRIDE:-}" = "1" ]; then
+      echo "⚠ EVALS_OVERRIDE=1 — skipping the eval-green gate (emergency release)."
+    elif [ ! -f .opsclaw-eval-marker ]; then
+      echo "✗ no .opsclaw-eval-marker — evals have never run green. Run 'just evals'"
+      echo "  (needs OPENROUTER_API_KEY), or EVALS_OVERRIDE=1 just release $ver to bypass."
+      exit 1
+    else
+      age_days=$(( ($(date +%s) - $(date -r .opsclaw-eval-marker +%s 2>/dev/null || echo 0)) / 86400 ))
+      if [ "$age_days" -gt 7 ]; then
+        echo "✗ .opsclaw-eval-marker is $age_days days old (>7) — re-run 'just evals', or"
+        echo "  EVALS_OVERRIDE=1 just release $ver to bypass."
+        exit 1
+      fi
+      echo "✓ eval marker is fresh ($age_days day(s) old): $(cat .opsclaw-eval-marker)"
+    fi
     if ! git diff --quiet -- Cargo.toml Cargo.lock; then
       git add Cargo.toml Cargo.lock
       git commit -q -m "chore(release): v$ver"

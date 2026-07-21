@@ -94,6 +94,24 @@ pub async fn run_turn(
     team_context: Option<&str>,
     message: &str,
 ) -> Result<AgentReply> {
+    run_turn_with_history(deps, ctx, registry, team_context, &[], message).await
+}
+
+/// [`run_turn`] with prior conversational context. `prior` is earlier
+/// user/assistant exchanges the CALLER curates (the chat surfaces' shared
+/// transcript — see `agent::dispatch`'s chat entry point); scan jobs and
+/// webhook ingest have no prior conversation and use plain [`run_turn`].
+/// The prior turns are replayed ahead of `message` in the same history the
+/// in-flight token budget (`replay`) already manages, so an over-long
+/// transcript shrinks by the same rules as an over-long tool chain.
+pub async fn run_turn_with_history(
+    deps: &AgentDeps,
+    ctx: &ToolCtx,
+    registry: &[Box<dyn Tool>],
+    team_context: Option<&str>,
+    prior: &[Turn],
+    message: &str,
+) -> Result<AgentReply> {
     let specs: Vec<ToolSpec> = registry
         .iter()
         .map(|t| ToolSpec {
@@ -104,7 +122,8 @@ pub async fn run_turn(
         .collect();
     let system = assemble_system_prompt(deps.heartbeat, team_context);
 
-    let mut history: Vec<Turn> = vec![Turn::User { content: message.to_string() }];
+    let mut history: Vec<Turn> = prior.to_vec();
+    history.push(Turn::User { content: message.to_string() });
     let mut acted = false;
     // Executed action calls this turn, keyed by (tool name, canonicalized
     // args) -> the result string handed back. On an EXACT repeat of an

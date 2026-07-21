@@ -8,8 +8,8 @@ use std::sync::Mutex;
 
 use uuid::Uuid;
 
-use crate::channels::Channel;
 use crate::channels::web::WebHub;
+use crate::channels::{Channel, ChatHandler, NoopChat};
 use crate::config::{Config, SecretStore};
 use crate::db::AllRepos;
 use crate::http::cli_auth::CliAuthCodes;
@@ -76,6 +76,21 @@ pub struct AppState {
     /// NoopComposer; `boot::daemon_state` swaps in the real
     /// `AgentJobComposer` once the dispatch deps exist.
     pub composer: Arc<dyn JobComposer>,
+    /// The chat seam every conversational surface drives (gateway chat
+    /// route, channel inbound loop, CLI REPL). Boot-safe default is
+    /// `NoopChat` (errors, mapped to 503 by the route); `boot::daemon_state`
+    /// swaps in the real `agent::dispatch::ChatTurn`.
+    pub chat: Arc<dyn ChatHandler>,
+    /// Channels with a real `listen` loop (Telegram today) —
+    /// `http::server::run` spawns `channels::inbound` over exactly this
+    /// list. Empty in fakes mode and when no listening channel is
+    /// configured.
+    pub listen_channels: Vec<Arc<dyn Channel>>,
+    /// The daemon-wide shutdown token. Created HERE (not in `server::run`)
+    /// so boot-time wiring can hand it to components that need it at
+    /// construction (TelegramChannel's long-poll stops on it);
+    /// `server::run` cancels it on SIGINT/SIGTERM.
+    pub shutdown: tokio_util::sync::CancellationToken,
     pub auth_limiter: Arc<RateLimiter>,
     /// Single-use replay guard for SSE stream tickets (gianna's
     /// `used_stream_tickets`) — token string -> expiry unix seconds, swept
@@ -130,6 +145,9 @@ impl AppState {
             channel: web,
             ingest: Arc::new(NoopIngest),
             composer: Arc::new(NoopComposer),
+            chat: Arc::new(NoopChat),
+            listen_channels: Vec::new(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             auth_limiter: Arc::new(RateLimiter::new(10, 60)),
             used_stream_tickets: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cli_auth_codes: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -203,6 +221,9 @@ impl AppState {
             channel: web,
             ingest: Arc::new(NoopIngest),
             composer: Arc::new(NoopComposer),
+            chat: Arc::new(NoopChat),
+            listen_channels: Vec::new(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             auth_limiter: Arc::new(RateLimiter::new(10, 60)),
             used_stream_tickets: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cli_auth_codes: Arc::new(Mutex::new(std::collections::HashMap::new())),

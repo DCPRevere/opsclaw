@@ -197,12 +197,18 @@ async fn logout_clears_the_session() {
     let client = SessionClient::new();
 
     client
-        .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "logout@example.com", "password": "some-password-123" }))
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "logout@example.com", "password": "some-password-123" }),
+        )
         .await;
     assert_eq!(client.get(&format!("{base}/api/status")).await.status(), reqwest::StatusCode::OK);
 
     client.post(&format!("{base}/api/logout")).await;
-    assert_eq!(client.get(&format!("{base}/api/status")).await.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        client.get(&format!("{base}/api/status")).await.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
 }
 
 // ---- invite / join ----
@@ -215,9 +221,13 @@ async fn invite_then_join_creates_a_signed_in_account() {
     let client = SessionClient::new();
 
     client
-        .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "inviter@example.com", "password": "some-password-123" }))
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "inviter@example.com", "password": "some-password-123" }),
+        )
         .await;
-    let invite: serde_json::Value = client.post(&format!("{base}/api/invites")).await.json().await.unwrap();
+    let invite: serde_json::Value =
+        client.post(&format!("{base}/api/invites")).await.json().await.unwrap();
     let code = invite["code"].as_str().unwrap().to_string();
 
     let join_client = SessionClient::new();
@@ -262,17 +272,26 @@ async fn estop_engage_and_resume_round_trip_over_http() {
     let base = spawn_server(state).await;
     let client = SessionClient::new();
     client
-        .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "estop@example.com", "password": "some-password-123" }))
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "estop@example.com", "password": "some-password-123" }),
+        )
         .await;
 
-    let engaged: serde_json::Value =
-        client.post_json(&format!("{base}/api/estop/engage"), &serde_json::json!({ "reason": "test" })).await.json().await.unwrap();
+    let engaged: serde_json::Value = client
+        .post_json(&format!("{base}/api/estop/engage"), &serde_json::json!({ "reason": "test" }))
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(engaged["estop_engaged"], true);
 
-    let status: serde_json::Value = client.get(&format!("{base}/api/status")).await.json().await.unwrap();
+    let status: serde_json::Value =
+        client.get(&format!("{base}/api/status")).await.json().await.unwrap();
     assert_eq!(status["estop_engaged"], true);
 
-    let resumed: serde_json::Value = client.post(&format!("{base}/api/estop/resume")).await.json().await.unwrap();
+    let resumed: serde_json::Value =
+        client.post(&format!("{base}/api/estop/resume")).await.json().await.unwrap();
     assert_eq!(resumed["estop_engaged"], false);
 }
 
@@ -285,10 +304,14 @@ async fn audit_verify_on_an_empty_chain_is_ok() {
     let base = spawn_server(state).await;
     let client = SessionClient::new();
     client
-        .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "audit@example.com", "password": "some-password-123" }))
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "audit@example.com", "password": "some-password-123" }),
+        )
         .await;
 
-    let verify: serde_json::Value = client.get(&format!("{base}/api/audit/verify")).await.json().await.unwrap();
+    let verify: serde_json::Value =
+        client.get(&format!("{base}/api/audit/verify")).await.json().await.unwrap();
     assert_eq!(verify["ok"], true);
     assert_eq!(verify["records_verified"], 0);
 }
@@ -326,7 +349,8 @@ async fn audit_verify_spans_multiple_pages_of_an_intact_chain() {
         .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "bigaudit@example.com", "password": "some-password-123" }))
         .await;
 
-    let verify: serde_json::Value = client.get(&format!("{base}/api/audit/verify")).await.json().await.unwrap();
+    let verify: serde_json::Value =
+        client.get(&format!("{base}/api/audit/verify")).await.json().await.unwrap();
     assert_eq!(verify["ok"], true, "{verify:?}");
     assert_eq!(verify["records_verified"], 1500);
 }
@@ -345,7 +369,12 @@ async fn webhook_without_a_secret_configured_and_not_fully_faked_is_rejected() {
     assert!(!state.config.fully_faked());
     let base = spawn_server(state).await;
 
-    let resp = reqwest::Client::new().post(format!("{base}/webhooks/alertmanager")).body("{}").send().await.unwrap();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/webhooks/alertmanager"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
@@ -355,7 +384,12 @@ async fn webhook_on_the_fully_faked_spine_is_accepted_with_no_secret() {
     assert!(state.config.fully_faked());
     let base = spawn_server(state).await;
 
-    let resp = reqwest::Client::new().post(format!("{base}/webhooks/alertmanager")).body("{}").send().await.unwrap();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/webhooks/alertmanager"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }
 
@@ -369,13 +403,19 @@ async fn jwt_secret_never_appears_in_any_response_body() {
     // SAFETY: test-only env var, unique name, no cross-test interference
     // beyond the usual env-var caveats already accepted elsewhere in this
     // crate's test suite (see config::secrets::tests).
-    unsafe { std::env::set_var("OPSCLAW_E2E_JWT_SECRET_XYZZY", "sekrit-marker-value-do-not-leak-12345") };
+    unsafe {
+        std::env::set_var("OPSCLAW_E2E_JWT_SECRET_XYZZY", "sekrit-marker-value-do-not-leak-12345")
+    };
     let state = AppState::fake_with_config(cfg);
     let base = spawn_server(state).await;
     let client = SessionClient::new();
 
-    let login =
-        client.post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "nobody@example.com", "password": "x" })).await;
+    let login = client
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "nobody@example.com", "password": "x" }),
+        )
+        .await;
     let body = login.text().await.unwrap();
     assert!(!body.contains("sekrit-marker-value-do-not-leak"), "{body}");
 
@@ -414,7 +454,15 @@ async fn unauthed_api_request_against_a_ui_backed_route_is_401_not_the_shell() {
     // empty 200 the JS would misinterpret as "no data").
     let state = AppState::fake();
     let base = spawn_server(state).await;
-    for path in ["/api/me", "/api/incidents", "/api/approvals", "/api/status", "/api/invites", "/api/cli-tokens", "/api/config"] {
+    for path in [
+        "/api/me",
+        "/api/incidents",
+        "/api/approvals",
+        "/api/status",
+        "/api/invites",
+        "/api/cli-tokens",
+        "/api/config",
+    ] {
         let resp = reqwest::get(format!("{base}{path}")).await.unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED, "{path}");
     }
@@ -424,7 +472,20 @@ async fn unauthed_api_request_against_a_ui_backed_route_is_401_not_the_shell() {
 async fn app_modules_manifest_and_service_worker_serve_publicly() {
     let state = AppState::fake();
     let base = spawn_server(state).await;
-    for path in ["/app/main.js", "/app/api.js", "/app/state.js", "/app/auth.js", "/app/chat.js", "/app/incidents.js", "/app/approvals.js", "/app/status.js", "/app/settings.js", "/sw.js", "/static/manifest.json", "/static/img/icon.svg"] {
+    for path in [
+        "/app/main.js",
+        "/app/api.js",
+        "/app/state.js",
+        "/app/auth.js",
+        "/app/chat.js",
+        "/app/incidents.js",
+        "/app/approvals.js",
+        "/app/status.js",
+        "/app/settings.js",
+        "/sw.js",
+        "/static/manifest.json",
+        "/static/img/icon.svg",
+    ] {
         let resp = reqwest::get(format!("{base}{path}")).await.unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::OK, "{path}");
     }
@@ -436,12 +497,19 @@ async fn incidents_and_approvals_backing_routes_round_trip_for_an_authed_operato
     seed_account(&state, "ui@example.com", "some-password-123").await;
     let base = spawn_server(state).await;
     let client = SessionClient::new();
-    client.post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "ui@example.com", "password": "some-password-123" })).await;
+    client
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "ui@example.com", "password": "some-password-123" }),
+        )
+        .await;
 
-    let incidents: serde_json::Value = client.get(&format!("{base}/api/incidents")).await.json().await.unwrap();
+    let incidents: serde_json::Value =
+        client.get(&format!("{base}/api/incidents")).await.json().await.unwrap();
     assert!(incidents["incidents"].as_array().unwrap().is_empty());
 
-    let approvals: serde_json::Value = client.get(&format!("{base}/api/approvals")).await.json().await.unwrap();
+    let approvals: serde_json::Value =
+        client.get(&format!("{base}/api/approvals")).await.json().await.unwrap();
     assert!(approvals["approvals"].as_array().unwrap().is_empty());
 }
 
@@ -455,13 +523,16 @@ async fn settings_surface_backing_routes_round_trip_invites_and_cli_tokens() {
         .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "settings@example.com", "password": "some-password-123" }))
         .await;
 
-    let invite: serde_json::Value = client.post(&format!("{base}/api/invites")).await.json().await.unwrap();
+    let invite: serde_json::Value =
+        client.post(&format!("{base}/api/invites")).await.json().await.unwrap();
     assert!(invite["code"].as_str().is_some());
 
-    let invites: serde_json::Value = client.get(&format!("{base}/api/invites")).await.json().await.unwrap();
+    let invites: serde_json::Value =
+        client.get(&format!("{base}/api/invites")).await.json().await.unwrap();
     assert_eq!(invites["invites"].as_array().unwrap().len(), 1);
 
-    let tokens: serde_json::Value = client.get(&format!("{base}/api/cli-tokens")).await.json().await.unwrap();
+    let tokens: serde_json::Value =
+        client.get(&format!("{base}/api/cli-tokens")).await.json().await.unwrap();
     assert!(tokens["tokens"].as_array().unwrap().is_empty());
 }
 
@@ -517,23 +588,31 @@ async fn config_surface_round_trips_read_then_validated_write() {
     let base = spawn_server(state).await;
     let client = SessionClient::new();
     client
-        .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "config@example.com", "password": "some-password-123" }))
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "config@example.com", "password": "some-password-123" }),
+        )
         .await;
 
-    let got: serde_json::Value = client.get(&format!("{base}/api/config")).await.json().await.unwrap();
+    let got: serde_json::Value =
+        client.get(&format!("{base}/api/config")).await.json().await.unwrap();
     let toml_text = got["toml"].as_str().expect("toml field").to_string();
     // The read-back text must itself parse as valid opsclaw config — the
     // settings tab's textarea is seeded with exactly this.
-    let _: opsclaw::config::Config = toml::from_str(&toml_text).expect("round-tripped config must parse");
+    let _: opsclaw::config::Config =
+        toml::from_str(&toml_text).expect("round-tripped config must parse");
 
-    let saved = client.post_json(&format!("{base}/api/config"), &serde_json::json!({ "toml": toml_text })).await;
+    let saved = client
+        .post_json(&format!("{base}/api/config"), &serde_json::json!({ "toml": toml_text }))
+        .await;
     assert_eq!(saved.status(), reqwest::StatusCode::OK);
     let saved_body: serde_json::Value = saved.json().await.unwrap();
     assert_eq!(saved_body["ok"], true);
 
     // The write actually landed at the isolated path — never the real
     // machine's ~/.opsclaw regardless of what this assertion finds.
-    let written = std::fs::read_to_string(opsclaw::config::default_dir().join("config.toml")).unwrap();
+    let written =
+        std::fs::read_to_string(opsclaw::config::default_dir().join("config.toml")).unwrap();
     assert_eq!(written, toml_text);
 }
 
@@ -547,7 +626,12 @@ async fn config_surface_rejects_invalid_toml_and_invalid_config() {
         .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "badconfig@example.com", "password": "some-password-123" }))
         .await;
 
-    let garbage = client.post_json(&format!("{base}/api/config"), &serde_json::json!({ "toml": "not valid toml {{{" })).await;
+    let garbage = client
+        .post_json(
+            &format!("{base}/api/config"),
+            &serde_json::json!({ "toml": "not valid toml {{{" }),
+        )
+        .await;
     assert_eq!(garbage.status(), reqwest::StatusCode::BAD_REQUEST);
 
     // Valid TOML, but a config `Config::validate()` itself would refuse
@@ -562,6 +646,11 @@ models = ["some/model"]
 [memory]
 hindsight_url = "http://localhost:1"
 "#;
-    let rejected = client.post_json(&format!("{base}/api/config"), &serde_json::json!({ "toml": invalid_but_parseable })).await;
+    let rejected = client
+        .post_json(
+            &format!("{base}/api/config"),
+            &serde_json::json!({ "toml": invalid_but_parseable }),
+        )
+        .await;
     assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
 }

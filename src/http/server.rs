@@ -15,12 +15,24 @@ use crate::Result;
 pub async fn run(state: AppState) -> Result<()> {
     let listen = state.config.daemon.listen.clone();
 
-    let shutdown = tokio_util::sync::CancellationToken::new();
+    // The token lives on `state` (created at boot) so boot-time wiring can
+    // hand it to components that take it at construction (Telegram's
+    // long-poll) — this function is still the ONLY place it gets cancelled.
+    let shutdown = state.shutdown.clone();
     let tracker = tokio_util::task::TaskTracker::new();
 
     crate::scheduler::spawn(
         scheduler_deps(&state),
         state.scheduler.clone(),
+        shutdown.clone(),
+        &tracker,
+    );
+
+    // Inbound chat: listeners + consumer over every listening channel
+    // (no-op when the list is empty — fakes mode, or no Telegram token).
+    crate::channels::inbound::spawn(
+        state.listen_channels.clone(),
+        state.chat.clone(),
         shutdown.clone(),
         &tracker,
     );

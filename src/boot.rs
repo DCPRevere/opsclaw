@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::Result;
-use crate::agent::dispatch::{AgentJobComposer, DispatchDeps, WebhookIngest};
+use crate::agent::dispatch::{AgentJobComposer, ChatTurn, DispatchDeps, WebhookIngest};
 use crate::audit::AuditWriter;
 use crate::channels::telegram::{InMemoryOffsetStore, InMemoryRoster, TelegramChannel};
 use crate::channels::{Channel, MultiChannel};
@@ -105,28 +105,38 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     )?;
 
     // Outbound channel fan-out: the web SSE hub always; Telegram when a bot
-    // token is configured. KNOWN LIMITATION (tracked): the Telegram roster
-    // and poll offset are in-memory only — a restart forgets chat bindings
-    // and may re-see recent updates; gianna persists both. Send-side fan-out
-    // (what incidents/approvals need) is unaffected.
+    // token is configured. Telegram also LISTENS (inbound chat), so it gets
+    // the state's shutdown token at construction (its long-poll stops on
+    // cancel — see `TelegramChannel::with_shutdown`) and joins
+    // `listen_channels`, which `server::run` spawns the inbound consumer
+    // over. KNOWN LIMITATION (tracked): the Telegram roster and poll offset
+    // are in-memory only — a restart forgets chat bindings and may re-see
+    // recent updates; gianna persists both. Send-side fan-out (what
+    // incidents/approvals need) is unaffected.
     let mut channels: Vec<Arc<dyn Channel>> = vec![state.web.clone()];
     if let Some(token_ref) = &state.config.telegram.bot_token {
         let token = token_ref.resolve(&secret_store)?;
         scrubber.register("TELEGRAM_BOT_TOKEN", &token);
-        channels.push(Arc::new(TelegramChannel::new(
-            token,
-            reqwest::Client::new(),
-            Arc::new(InMemoryRoster::default()),
-            Arc::new(InMemoryOffsetStore::default()),
-        )));
+        let telegram = Arc::new(
+            TelegramChannel::new(
+                token,
+                reqwest::Client::new(),
+                Arc::new(InMemoryRoster::default()),
+                Arc::new(InMemoryOffsetStore::default()),
+            )
+            .with_shutdown(state.shutdown.clone()),
+        );
+        channels.push(telegram.clone());
+        state.listen_channels.push(telegram);
     }
     state.channel = Arc::new(MultiChannel::new(channels));
 
     // The real webhook ingest (verified alert → framed observation → full
-    // registry turn) and the real scan-job composer replace the boot-safe
-    // no-ops AppState::new installs.
+    // registry turn), the real scan-job composer, and the real chat handler
+    // replace the boot-safe no-ops AppState::new installs.
     state.ingest = Arc::new(WebhookIngest::new(deps.clone(), state.channel.clone()));
-    state.composer = Arc::new(AgentJobComposer::new(deps));
+    state.composer = Arc::new(AgentJobComposer::new(deps.clone()));
+    state.chat = Arc::new(ChatTurn::new(deps));
 
     Ok(state)
 }

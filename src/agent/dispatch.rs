@@ -25,12 +25,12 @@ use serde_json::Value;
 
 use crate::Result;
 use crate::agent::{self, AgentDeps};
-use crate::channels::Channel;
+use crate::channels::{Channel, ChatHandler};
 use crate::config::{Config, SecretStore};
 use crate::db::{ApprovalRepo, IncidentRepo, RunbookRunRepo};
 use crate::domain::{FqTarget, Job, Principal};
 use crate::http::webhook::IngestAlert;
-use crate::llm::LlmProvider;
+use crate::llm::{LlmProvider, Turn};
 use crate::memory::{self, Memory};
 use crate::policy::PolicyExecute;
 use crate::runbooks::RunbookStore;
@@ -294,6 +294,102 @@ impl IngestAlert for WebhookIngest {
                 .await?;
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ChatTurn — channels::ChatHandler
+// ---------------------------------------------------------------------------
+
+/// How many transcript entries survive between turns. Coarser than the
+/// in-flight token budget (`agent::replay`, which still applies to
+/// whatever is replayed): the transcript stores only user/assistant TEXT
+/// pairs — tool exchanges are already collapsed by construction, the same
+/// end state gianna's replay folding reaches — so a fixed entry cap keeps
+/// the replayed context bounded without a second token estimator here.
+const TRANSCRIPT_KEEP_ENTRIES: usize = 30;
+
+/// The real, agent-backed [`ChatHandler`]: one conversational turn with the
+/// FULL tool registry (a chat message is the interactive path by
+/// definition) and the SHARED TEAM TRANSCRIPT replayed ahead of it.
+///
+/// One transcript, not per-operator, on purpose: the daemon is the team's
+/// agent (DESIGN §1 — "one daemon = one memory store, with per-operator
+/// attribution on everything said"), so every chat surface — web chat,
+/// each operator's Telegram DM, the CLI REPL — is a window onto the SAME
+/// conversation, exactly like the shared memory bank. Attribution rides in
+/// the message framing (`"{speaker} said: …"`), so the model always knows
+/// who said what. The transcript is in-memory (a restart starts the
+/// conversation fresh); durable knowledge belongs to Memory, which
+/// `retain_turn_detached` already feeds.
+pub struct ChatTurn {
+    deps: DispatchDeps,
+    transcript: std::sync::Mutex<Vec<Turn>>,
+}
+
+impl ChatTurn {
+    pub fn new(deps: DispatchDeps) -> Self {
+        ChatTurn { deps, transcript: std::sync::Mutex::new(Vec::new()) }
+    }
+
+    /// A snapshot of the shared transcript (user/assistant text pairs) —
+    /// what a chat surface renders as history on load.
+    pub fn transcript(&self) -> Vec<Turn> {
+        self.transcript.lock().expect("chat transcript lock poisoned").clone()
+    }
+}
+
+#[async_trait]
+impl ChatHandler for ChatTurn {
+    async fn chat(&self, principal: Principal, speaker: &str, message: &str) -> Result<String> {
+        let ctx = build_tool_ctx(&self.deps, principal);
+        // Full registry — chat IS the interactive path (same reasoning as
+        // WebhookIngest: a human is on the other end).
+        let registry = tools::registry(&ctx, /* heartbeat = */ false);
+        let team_context = team_context_line(&ctx.known_targets);
+
+        let agent_deps = AgentDeps {
+            llm: self.deps.llm.clone(),
+            memory: self.deps.memory.clone(),
+            heartbeat: false,
+        };
+
+        // Attribution framing (DESIGN §3 memory: `"{operator} said: …"`) —
+        // in the shared transcript, who spoke is part of the record.
+        let attributed = format!("{speaker} said: {message}");
+        // Snapshot under the lock, run the turn OUTSIDE it (a turn can take
+        // many seconds; holding a std mutex across it would serialize every
+        // chat surface behind one slow tool chain — and panic-poison on a
+        // turn error). Two concurrent turns therefore both replay the
+        // pre-turn transcript and append in completion order: last-writer's
+        // ordering, the same benign race any group chat has.
+        let prior = self.transcript.lock().expect("chat transcript lock poisoned").clone();
+
+        let reply = agent::run_turn_with_history(
+            &agent_deps,
+            &ctx,
+            &registry,
+            team_context.as_deref(),
+            &prior,
+            &attributed,
+        )
+        .await?;
+
+        {
+            let mut t = self.transcript.lock().expect("chat transcript lock poisoned");
+            t.push(Turn::User { content: attributed.clone() });
+            t.push(Turn::Assistant { content: reply.reply.clone(), tool_calls: Vec::new() });
+            if t.len() > TRANSCRIPT_KEEP_ENTRIES {
+                let excess = t.len() - TRANSCRIPT_KEEP_ENTRIES;
+                t.drain(..excess);
+            }
+        }
+
+        if memory::should_retain(&attributed) {
+            agent::retain_turn_detached(&self.deps.memory, speaker, attributed);
+        }
+
+        Ok(reply.reply)
     }
 }
 
@@ -612,5 +708,61 @@ mod tests {
     #[test]
     fn team_context_line_is_none_for_no_targets() {
         assert!(team_context_line(&[]).is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // (d) ChatTurn — attribution framing, shared transcript, bounded size
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn chat_turn_frames_attribution_and_accumulates_the_shared_transcript() {
+        let mut scripted = ScriptedLlm::new();
+        scripted.push_text("hi alice");
+        scripted.push_text("hi bob");
+        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
+        let chat = ChatTurn::new(test_deps(llm, policy));
+
+        let alice = Principal::Operator { account: uuid::Uuid::new_v4() };
+        let bob = Principal::Operator { account: uuid::Uuid::new_v4() };
+        let r1 = chat.chat(alice, "alice", "what's up?").await.unwrap();
+        assert_eq!(r1, "hi alice");
+        let r2 = chat.chat(bob, "bob", "and me?").await.unwrap();
+        assert_eq!(r2, "hi bob");
+
+        // ONE shared transcript across both operators (DESIGN §1: the
+        // daemon is the team's agent), with attribution in the framing.
+        let t = chat.transcript();
+        assert_eq!(t.len(), 4);
+        match (&t[0], &t[2]) {
+            (Turn::User { content: a }, Turn::User { content: b }) => {
+                assert_eq!(a, "alice said: what's up?");
+                assert_eq!(b, "bob said: and me?");
+            }
+            other => panic!("expected user turns at 0 and 2, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_transcript_stays_bounded() {
+        let mut scripted = ScriptedLlm::new();
+        for _ in 0..(TRANSCRIPT_KEEP_ENTRIES + 10) {
+            scripted.push_text("ok");
+        }
+        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
+        let chat = ChatTurn::new(test_deps(llm, policy));
+        let op = Principal::Operator { account: uuid::Uuid::new_v4() };
+
+        for i in 0..(TRANSCRIPT_KEEP_ENTRIES / 2 + 5) {
+            chat.chat(op.clone(), "alice", &format!("msg {i}")).await.unwrap();
+        }
+        let t = chat.transcript();
+        assert!(t.len() <= TRANSCRIPT_KEEP_ENTRIES, "transcript grew to {}", t.len());
+        // The SURVIVING entries are the most recent ones.
+        match t.last().unwrap() {
+            Turn::Assistant { content, .. } => assert_eq!(content, "ok"),
+            other => panic!("expected assistant last, got {other:?}"),
+        }
     }
 }

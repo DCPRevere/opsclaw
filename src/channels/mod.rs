@@ -12,6 +12,7 @@
 //! no-op default.
 
 pub mod cli;
+pub mod inbound;
 pub mod recording;
 pub mod telegram;
 pub mod web;
@@ -21,6 +22,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::Result;
+use crate::domain::Principal;
 
 /// A message leaving the daemon toward operators.
 #[derive(Debug, Clone)]
@@ -86,6 +88,52 @@ pub trait Channel: Send + Sync {
         let s = msg.sender.trim_start_matches('@').to_ascii_lowercase();
         !h.is_empty() && h == s
     }
+
+    /// Resolve an inbound sender handle to a bound OPERATOR ACCOUNT —
+    /// the channel-side half of the trust boundary for channel-originated
+    /// chat: an inbound message may only drive a chat turn under a
+    /// `Principal::Operator` this method vouches for (Telegram resolves
+    /// through its roster allowlist). Default `None` = this channel cannot
+    /// vouch for senders, so [`inbound`]'s consumer loop refuses the
+    /// message (fail closed) — correct for send-only channels and for the
+    /// web channel, whose inbound path is the authenticated HTTP chat
+    /// route, never this loop. DEFAULTED addition.
+    async fn resolve_operator(&self, _sender: &str) -> Option<Uuid> {
+        None
+    }
+}
+
+/// The chat seam: one conversational turn against the team's agent, from
+/// any surface — a channel's inbound loop ([`inbound`]), the gateway's
+/// chat route, or the CLI REPL. Same shape as `scheduler::JobComposer` and
+/// `http::webhook::IngestAlert`: consumers hold the trait, the real
+/// agent-backed impl (`agent::dispatch`'s chat entry) is swapped in by
+/// `boot::daemon_state`, and the boot-safe default is [`NoopChat`].
+///
+/// `principal` is TRUSTED POSITIONAL context resolved by the caller (an
+/// authenticated account on the HTTP path, a roster-vouched binding via
+/// [`Channel::resolve_operator`] on the channel path) — never derived from
+/// the message. `speaker` is a display label for attribution only
+/// (memory framing "`{operator}` said: …", DESIGN §3 memory).
+#[async_trait]
+pub trait ChatHandler: Send + Sync {
+    async fn chat(&self, principal: Principal, speaker: &str, message: &str) -> Result<String>;
+}
+
+/// Boot-safe default: chat is not wired (fakes-mode state before
+/// `boot::daemon_state` swaps in the real handler). Errors rather than
+/// pretending — the HTTP route maps this to a 503, the inbound loop logs
+/// and apologizes, and neither silently swallows an operator's message.
+pub struct NoopChat;
+
+#[async_trait]
+impl ChatHandler for NoopChat {
+    async fn chat(&self, _principal: Principal, _speaker: &str, _message: &str) -> Result<String> {
+        Err(crate::Error::Config(
+            "chat is not wired on this state (boot-safe NoopChat — daemon_state installs the real handler)"
+                .into(),
+        ))
+    }
 }
 
 /// Fan-out over every configured channel (gianna's `MultiChannel`).
@@ -96,6 +144,13 @@ pub struct MultiChannel {
 impl MultiChannel {
     pub fn new(channels: Vec<std::sync::Arc<dyn Channel>>) -> Self {
         MultiChannel { channels }
+    }
+
+    /// The wrapped channels — what [`inbound`]'s consumer loop routes
+    /// replies through (a reply must go back to the ORIGIN channel only,
+    /// which `send`'s fan-out deliberately cannot express).
+    pub fn channels(&self) -> &[std::sync::Arc<dyn Channel>] {
+        &self.channels
     }
 }
 

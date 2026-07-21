@@ -372,6 +372,15 @@ impl Channel for TelegramChannel {
     fn self_handle(&self) -> Option<String> {
         self.self_username.clone()
     }
+
+    /// Vouch for an inbound sender via the roster allowlist — the handle
+    /// the listen loop emits is `tg:<chat_id>`, the roster keys raw chat
+    /// ids (the same ids `chat_ids_for` returns for outbound sends). A
+    /// handle without the prefix is not ours and resolves to nobody.
+    async fn resolve_operator(&self, sender: &str) -> Option<Uuid> {
+        let chat_id = sender.strip_prefix(TELEGRAM_HANDLE_PREFIX)?;
+        self.roster.find_operator(chat_id).await
+    }
 }
 
 impl TelegramChannel {

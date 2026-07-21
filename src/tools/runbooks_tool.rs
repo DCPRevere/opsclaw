@@ -149,6 +149,7 @@ mod tests {
             runbook_runs: Some(runs),
             memory: None,
             config: None,
+            endpoints: None,
         }
     }
 
@@ -198,6 +199,7 @@ mod tests {
             runbook_runs: None,
             memory: None,
             config: None,
+            endpoints: None,
         };
         let err = RunbookHistoryTool
             .call(&ctx, json!({"runbook_name": "x"}))

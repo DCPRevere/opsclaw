@@ -232,6 +232,7 @@ mod tests {
             runbook_runs: None,
             memory: None,
             config: None,
+            endpoints: None,
         }
     }
 

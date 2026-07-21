@@ -137,6 +137,7 @@ mod tests {
             runbook_runs: None,
             memory: None,
             config: None,
+            endpoints: None,
         }
     }
 
@@ -181,6 +182,7 @@ mod tests {
             runbook_runs: None,
             memory: None,
             config: None,
+            endpoints: None,
         };
         let err = ListIncidentsTool.call(&ctx, json!({})).await.unwrap_err();
         assert!(matches!(err, ToolError::Internal(_)));

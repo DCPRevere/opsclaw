@@ -198,6 +198,7 @@ mod tests {
             runbook_runs: None,
             memory: None,
             config: None,
+            endpoints: None,
         }
     }
 
@@ -288,6 +289,7 @@ mod tests {
             runbook_runs: None,
             memory: None,
             config: None,
+            endpoints: None,
         };
         let err = NotifyTool.call(&ctx, base_args()).await.unwrap_err();
         assert!(matches!(err, ToolError::Internal(_)));

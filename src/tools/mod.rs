@@ -23,22 +23,38 @@
 //!   [`memory_tools`] (store/recall/forget), [`incidents_tool`] (incident
 //!   queries), [`runbooks_tool`] (runbook RUN HISTORY queries — see that
 //!   module's doc for the gap: there is no runbook-definition store yet).
-//! - Endpoint-backed (elasticsearch, prometheus, argocd, ...): a later task;
-//!   none are built here (DESIGN.md §4 lists the v1 set).
+//! - [`endpoint`] — shared plumbing for endpoint-backed tools: an already-
+//!   RESOLVED [`endpoint::EndpointAuth`] (base URL + optional bearer token)
+//!   per resource, and [`endpoint::get_json`]/[`endpoint::post_json`]
+//!   helpers with the same error-splitting discipline as [`executor`]. See
+//!   that module's doc for the credential-wiring gap (config already
+//!   declares resources; nothing yet resolves a `SecretRef` into a
+//!   `ToolCtx.endpoints` registry). [`elasticsearch`], [`azure_service_bus`],
+//!   [`eventstore`], [`prometheus`] are pure reads through it;
+//!   [`argocd`]'s reads go the same way, but `rollback` is a MUTATION that
+//!   composes a synthetic command line through [`executor::run_command`]
+//!   exactly like an ssh/kubernetes tool — a rollback over HTTP is as
+//!   classified, gated, and audited as a remote command (DESIGN.md §4).
 //!
 //! [`registry`] applies DESIGN.md §4's context-gating: read-only tools
 //! register whenever their config section exists; mutating tools register
 //! only when a matching target/resource is configured; heartbeat runs get
 //! the `allowed_in_heartbeat` subset.
 
+pub mod argocd;
+pub mod azure_service_bus;
 pub mod config_tool;
 pub mod docker;
+pub mod elasticsearch;
+pub mod endpoint;
+pub mod eventstore;
 pub mod executor;
 pub mod incidents_tool;
 pub mod kubernetes;
 pub mod memory_tools;
 pub mod monitor;
 pub mod notify;
+pub mod prometheus;
 pub mod runbooks_tool;
 pub mod shell;
 pub mod ssh;
@@ -51,9 +67,10 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::db::{ApprovalRepo, IncidentRepo, RunbookRunRepo};
-use crate::domain::{FqTarget, Principal, RiskClass};
+use crate::domain::{FqTarget, Principal, ResourceType, RiskClass};
 use crate::memory::Memory;
 use crate::policy::PolicyExecute;
+use crate::tools::endpoint::EndpointRegistry;
 
 /// Per-turn tool context — everything a `Tool::call` may reach, and no more.
 /// Constructed only by the agent dispatch layer, once per turn.
@@ -87,6 +104,11 @@ pub struct ToolCtx {
     pub runbook_runs: Option<Arc<dyn RunbookRunRepo>>,
     pub memory: Option<Arc<Memory>>,
     pub config: Option<Arc<Config>>,
+    /// Resolved endpoint credentials for configured `Resource`s
+    /// (elasticsearch/azure_service_bus/eventstore/prometheus/argocd — see
+    /// `endpoint`'s module doc for the wiring gap: this is `None` until a
+    /// later wave resolves `ResourceCfg.credential` and populates it).
+    pub endpoints: Option<Arc<EndpointRegistry>>,
 }
 
 impl ToolCtx {
@@ -104,6 +126,25 @@ impl ToolCtx {
                 if valid.is_empty() { "(none configured)".to_string() } else { valid.join(", ") }
             ))
         })
+    }
+
+    /// Resolve a model-supplied RESOURCE string (the resource-qualified
+    /// `FqTarget::Display` form, `project::env::target::resource_type::name`)
+    /// against `endpoints`, returning the target plus its resolved auth.
+    /// Same closed-world discipline as `resolve_target`: the model can only
+    /// ever pick a resource this context was told about.
+    pub fn resolve_resource(
+        &self,
+        s: &str,
+    ) -> std::result::Result<(FqTarget, &endpoint::EndpointAuth), ToolError> {
+        let target = self.resolve_target(s)?;
+        let endpoints = self.endpoints.as_ref().ok_or_else(|| {
+            ToolError::Internal("called with no endpoint credentials wired".to_string())
+        })?;
+        let auth = endpoints.get(&target).ok_or_else(|| {
+            ToolError::UserFacing(format!("no resolved credentials for resource {s:?}"))
+        })?;
+        Ok((target, auth))
     }
 }
 
@@ -194,6 +235,38 @@ pub fn registry(ctx: &ToolCtx, heartbeat: bool) -> Vec<Box<dyn Tool>> {
     }
     if has_kubernetes {
         tools.push(Box::new(kubernetes::KubernetesTool));
+    }
+
+    // --- Endpoint-backed: register per-resource-type, only when at least
+    // one target's resource of that type has resolved credentials. ---
+    if let Some(endpoints) = &ctx.endpoints {
+        let has_resource = |rt: ResourceType| {
+            ctx.known_targets
+                .iter()
+                .any(|t| t.resource.as_ref().is_some_and(|(r, _)| *r == rt) && endpoints.get(t).is_some())
+        };
+        if has_resource(ResourceType::Elasticsearch) {
+            tools.push(Box::new(elasticsearch::ElasticsearchSearchTool));
+            tools.push(Box::new(elasticsearch::ElasticsearchIndexStatsTool));
+            tools.push(Box::new(elasticsearch::ElasticsearchClusterHealthTool));
+        }
+        if has_resource(ResourceType::AzureServiceBus) {
+            tools.push(Box::new(azure_service_bus::QueueDepthTool));
+            tools.push(Box::new(azure_service_bus::PeekMessagesTool));
+        }
+        if has_resource(ResourceType::Eventstore) {
+            tools.push(Box::new(eventstore::ReadStreamTool));
+            tools.push(Box::new(eventstore::ProjectionStatusTool));
+        }
+        if has_resource(ResourceType::Prometheus) {
+            tools.push(Box::new(prometheus::InstantQueryTool));
+            tools.push(Box::new(prometheus::RangeQueryTool));
+        }
+        if has_resource(ResourceType::Argocd) {
+            tools.push(Box::new(argocd::ListAppsTool));
+            tools.push(Box::new(argocd::SyncStatusTool));
+            tools.push(Box::new(argocd::RollbackTool));
+        }
     }
 
     if heartbeat {

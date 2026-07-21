@@ -190,6 +190,7 @@ mod tests {
             runbook_runs: None,
             memory: None,
             config: None,
+            endpoints: None,
         };
         let err = ConfigTool.call(&ctx, json!({})).await.unwrap_err();
         assert!(matches!(err, ToolError::Internal(_)));

@@ -15,14 +15,22 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::domain::{Principal, RiskClass};
-use crate::policy::Policy;
+use crate::policy::PolicyExecute;
 
 /// Per-turn tool context. Grows as waves land (repos, memory, incident store);
 /// constructed only by the agent dispatch layer.
+///
+/// `policy` is `Arc<dyn PolicyExecute>`, not `Arc<Policy>` — a contract
+/// change from the frozen sketch, made so tests can inject a recording fake
+/// instead of the real (fail-closed stub) engine. See the doc comment on
+/// `policy::PolicyExecute` for the full rationale. The safety invariant is
+/// unchanged: this is still the ONLY handle a tool can reach, and its only
+/// method is "classify, gate, audit, maybe execute" — there is no way to get
+/// a `TargetExecutor` out of `ToolCtx`.
 #[derive(Clone)]
 pub struct ToolCtx {
     pub principal: Principal,
-    pub policy: Arc<Policy>,
+    pub policy: Arc<dyn PolicyExecute>,
 }
 
 /// Result of a successful tool call, fed back into the model loop.

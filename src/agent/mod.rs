@@ -19,7 +19,15 @@
 //! anything runs. The loop shape here is gianna's; the dispatch inside a
 //! tool's `call` is not this module's concern — this loop never sees a
 //! `TargetExecutor`, only `Tool::call`'s `Result<ToolResult, ToolError>`.
+//!
+//! [`dispatch`] is the OTHER kind of dispatch — not tool dispatch inside a
+//! turn, but WHO calls `run_turn` at all: it wires a real `ToolCtx` from
+//! config/repos/memory and implements `scheduler::JobComposer` (a fired
+//! scan job becomes one heartbeat-mode turn) and `http::webhook::IngestAlert`
+//! (a verified alert becomes one interactive-mode turn), the two seams both
+//! of those modules already predicted.
 
+pub mod dispatch;
 pub mod prompt;
 mod replay;
 

@@ -42,6 +42,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use crate::config::{Config, SecretStore};
 use crate::domain::FqTarget;
 use crate::tools::ToolError;
 
@@ -93,6 +94,60 @@ impl EndpointRegistry {
         v.sort();
         v
     }
+}
+
+/// Build an `EndpointRegistry` from config, resolving every declared
+/// resource's credential via `store` — the SAME walk
+/// `targets::wiring::build_executors` uses to build its `ExecutorMap`
+/// (project → env → target → resource), so a resource that gets an
+/// executor there gets read-tool credentials here too, with no drift
+/// between the two.
+///
+/// Deliberately does NOT register resolved tokens with the policy
+/// `Scrubber` — `targets::wiring::build_executors` already does that for
+/// every resource with a URL at boot time (before any executor that could
+/// echo the value exists), and scrubber registration is idempotent per
+/// (name, value) but keyed by a caller-chosen NAME
+/// (`"{rtype}_{rname}_TOKEN"` there); calling it a second time from here
+/// with a DIFFERENT name for the same value would register the same secret
+/// under two names, which is harmless for redaction (either name catches
+/// it) but a needless divergence from "register once, at the one
+/// composition root". This function's caller (agent dispatch, `src/agent/
+/// dispatch.rs`) is expected to run `build_executors` (or equivalent) first
+/// so scrubber registration has already happened by the time any tool call
+/// could echo a token back.
+///
+/// A resource with no `url` is skipped (nothing to build an `EndpointAuth`
+/// around) — mirrors `build_executors`'s "no url -> warning, no executor"
+/// rule, but this function has no warnings channel of its own (the caller
+/// already gets those from `build_executors` for the same resources; a
+/// second, identical warning here would be redundant, not new
+/// information). A resource whose credential fails to resolve is a boot
+/// ERROR, same fail-closed direction as `build_executors` — a half-wired
+/// registry must not silently grant read access with no auth where a
+/// credential was declared but unreadable.
+pub fn registry_from_config(config: &Config, store: &SecretStore) -> crate::Result<EndpointRegistry> {
+    let mut registry = EndpointRegistry::new();
+    for project in &config.projects {
+        for env in &project.envs {
+            for target in &env.targets {
+                let base = FqTarget::new(&project.name, &env.name, &target.name);
+                for resource in &target.resources {
+                    let Some(url) = &resource.url else {
+                        continue; // no url -> no executor either; nothing to wire here
+                    };
+                    let token = match &resource.credential {
+                        Some(r) => Some(r.resolve(store)?),
+                        None => None,
+                    };
+                    let mut fq = base.clone();
+                    fq.resource = Some((resource.rtype, resource.name.clone()));
+                    registry.insert(&fq, EndpointAuth::new(url, token));
+                }
+            }
+        }
+    }
+    Ok(registry)
 }
 
 /// Authenticated GET, JSON response. `path` is appended to `auth.base_url`
@@ -335,5 +390,119 @@ mod tests {
         reg.insert(&t2, EndpointAuth::new("http://y", None));
         let known = reg.known_targets();
         assert_eq!(known, vec![t2.to_string(), t1.to_string()]);
+    }
+
+    fn config_from(toml: &str) -> Config {
+        toml::from_str(toml).expect("test config parses")
+    }
+
+    fn secret_store() -> (tempfile::TempDir, SecretStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(dir.path()).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn registry_from_config_wires_resource_qualified_endpoints() {
+        unsafe { std::env::set_var("ENDPOINT_TEST_ARGOCD_TOKEN", "argo-secret") };
+        let config = config_from(
+            r#"
+            [[project]]
+            name = "remundo"
+            [[project.env]]
+            name = "prod"
+            [[project.env.target]]
+            name = "bastion"
+            kind = "local"
+            [[project.env.target.resource]]
+            type = "argocd"
+            name = "main"
+            url = "https://argocd.example"
+            credential = "env:ENDPOINT_TEST_ARGOCD_TOKEN"
+            "#,
+        );
+        let (_dir, store) = secret_store();
+        let reg = registry_from_config(&config, &store).unwrap();
+        let target = FqTarget {
+            project: "remundo".into(),
+            env: "prod".into(),
+            target: "bastion".into(),
+            resource: Some((crate::domain::ResourceType::Argocd, "main".into())),
+        };
+        let auth = reg.get(&target).expect("registered");
+        assert_eq!(auth.base_url, "https://argocd.example");
+        assert_eq!(auth.token.as_deref(), Some("argo-secret"));
+    }
+
+    #[test]
+    fn registry_from_config_skips_a_resource_with_no_url() {
+        let config = config_from(
+            r#"
+            [[project]]
+            name = "p"
+            [[project.env]]
+            name = "e"
+            [[project.env.target]]
+            name = "t"
+            kind = "local"
+            [[project.env.target.resource]]
+            type = "prometheus"
+            name = "prom"
+            "#,
+        );
+        let (_dir, store) = secret_store();
+        let reg = registry_from_config(&config, &store).unwrap();
+        assert!(reg.known_targets().is_empty());
+    }
+
+    #[test]
+    fn registry_from_config_unresolvable_credential_is_a_boot_error() {
+        let config = config_from(
+            r#"
+            [[project]]
+            name = "p"
+            [[project.env]]
+            name = "e"
+            [[project.env.target]]
+            name = "t"
+            kind = "local"
+            [[project.env.target.resource]]
+            type = "prometheus"
+            name = "prom"
+            url = "http://prom.example"
+            credential = "env:ENDPOINT_TEST_DEFINITELY_UNSET"
+            "#,
+        );
+        let (_dir, store) = secret_store();
+        let err = registry_from_config(&config, &store).unwrap_err();
+        assert!(err.to_string().contains("not set"), "{err}");
+    }
+
+    #[test]
+    fn registry_from_config_resource_with_no_credential_has_no_token() {
+        let config = config_from(
+            r#"
+            [[project]]
+            name = "p"
+            [[project.env]]
+            name = "e"
+            [[project.env.target]]
+            name = "t"
+            kind = "local"
+            [[project.env.target.resource]]
+            type = "prometheus"
+            name = "prom"
+            url = "http://prom.example"
+            "#,
+        );
+        let (_dir, store) = secret_store();
+        let reg = registry_from_config(&config, &store).unwrap();
+        let target = FqTarget {
+            project: "p".into(),
+            env: "e".into(),
+            target: "t".into(),
+            resource: Some((crate::domain::ResourceType::Prometheus, "prom".into())),
+        };
+        assert!(reg.get(&target).unwrap().token.is_none());
     }
 }

@@ -9,6 +9,17 @@
 //! the handler signature... hand-rolled gate calls let a missing check ship
 //! silently" — `Authed` is that same `FromRequestParts` pattern, just with
 //! one tier instead of three.
+//!
+//! `Authed` accepts EITHER credential a signed-in operator might be holding:
+//! the web session cookie, or an `ops_` remote-CLI bearer token (see
+//! `authenticate`'s doc). This is the opposite direction from `/cli/v1/*`
+//! (`routes::cli`), which accepts ONLY the bearer and never the cookie —
+//! that route family is reached programmatically and must stay usable even
+//! when no browser session exists; `Authed`-gated routes (estop, incidents,
+//! approvals, ...) are reached by BOTH the web UI and the remote CLI
+//! (DESIGN §7 decision 14's small operator-action set), so accepting either
+//! credential here is what lets the CLI reach them without a second,
+//! duplicate set of routes.
 
 use axum::extract::{FromRequestParts, State};
 use axum::http::HeaderMap;
@@ -52,32 +63,55 @@ pub(crate) struct Ctx {
 }
 
 pub(crate) async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Ctx> {
-    // The web UI authenticates by the HttpOnly session cookie ONLY — the
-    // token is never exposed to JavaScript, so an XSS can't steal it. (The
-    // remote CLI uses a separate Bearer path over its own `ops_` tokens —
-    // see `cli_auth`/`routes::cli`.)
-    let token =
-        auth::session_cookie_value(headers).ok_or_else(|| Error::unauthorized("not signed in"))?;
-    let claims = auth::verify_token(&state.jwt_secret, &token)?;
-    let account_id: Uuid = claims.sub.parse().map_err(|_| Error::unauthorized("bad token"))?;
-    // Revocation check: the token must carry the account's CURRENT
-    // token_version — a password reset (or explicit sign-out-everywhere)
-    // bumps it, killing every older session. A genuinely-missing account is
-    // a 401; any other repo failure propagates as-is (a 500), never
-    // collapsed into "please sign in again" — that would hide an outage
-    // behind a message that doesn't help and masks the real problem.
-    let account = state
-        .repos
-        .by_id(account_id)
-        .await?
-        .ok_or_else(|| Error::unauthorized("unknown account"))?;
-    if claims.ver != account.token_version {
-        return Err(Error::unauthorized("session revoked — please sign in again"));
+    // Two independently-revocable session kinds share this one gate
+    // (DESIGN §7 decision 14: the remote CLI's small operator-action set —
+    // approve/deny, estop, incidents — needs the SAME standing a signed-in
+    // web operator has, not a narrower one). The web UI authenticates by the
+    // HttpOnly session cookie ONLY — the token is never exposed to
+    // JavaScript, so an XSS can't steal it. A request carrying an `ops_`
+    // bearer instead is the remote CLI: resolved the same way
+    // `routes::cli::authenticate_cli` does (bearer -> sha256 -> `CliTokenRepo`
+    // lookup), so a CLI token revocation (`logout`) takes effect here too.
+    // Precedence: cookie first (the common case, and it's what a browser tab
+    // will present even if some proxy also forwards an Authorization
+    // header), bearer only when there is no session cookie at all — a
+    // request never gets to choose the weaker of two credentials it holds.
+    if let Some(token) = auth::session_cookie_value(headers) {
+        let claims = auth::verify_token(&state.jwt_secret, &token)?;
+        let account_id: Uuid = claims.sub.parse().map_err(|_| Error::unauthorized("bad token"))?;
+        // Revocation check: the token must carry the account's CURRENT
+        // token_version — a password reset (or explicit sign-out-everywhere)
+        // bumps it, killing every older session. A genuinely-missing account
+        // is a 401; any other repo failure propagates as-is (a 500), never
+        // collapsed into "please sign in again" — that would hide an outage
+        // behind a message that doesn't help and masks the real problem.
+        let account = state
+            .repos
+            .by_id(account_id)
+            .await?
+            .ok_or_else(|| Error::unauthorized("unknown account"))?;
+        if claims.ver != account.token_version {
+            return Err(Error::unauthorized("session revoked — please sign in again"));
+        }
+        let span = tracing::Span::current();
+        span.record("account", tracing::field::display(&account_id));
+        span.record("session", claims.ver);
+        return Ok(Ctx { account_id });
     }
-    let span = tracing::Span::current();
-    span.record("account", tracing::field::display(&account_id));
-    span.record("session", claims.ver);
-    Ok(Ctx { account_id })
+
+    if let Ok(token) = bearer(headers) {
+        if token.starts_with(super::cli_auth::TOKEN_PREFIX) {
+            let (account_id, _token_id) =
+                state.repos.find_cli_token(&super::cli_auth::token_hash(token)).await?.ok_or_else(
+                    || Error::unauthorized("token revoked — run `opsclaw-cli login`"),
+                )?;
+            let span = tracing::Span::current();
+            span.record("account", tracing::field::display(&account_id));
+            return Ok(Ctx { account_id });
+        }
+    }
+
+    Err(Error::unauthorized("not signed in"))
 }
 
 /// `authenticate` — the signed-in `Ctx`. Every operator has the same

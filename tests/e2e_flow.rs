@@ -263,6 +263,133 @@ async fn invite_then_join_creates_a_signed_in_account() {
     assert_eq!(replay.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
+// ---- remote CLI (PKCE login, then the minted `ops_` bearer reaches
+// `Authed`-gated operator-action routes — DESIGN §7 decision 14) ----
+
+/// Full PKCE round trip against the real router: a signed-in web session
+/// authorizes a CLI login (`POST /api/cli/authorize`), then the CLI
+/// exchanges its code+verifier for a token (`POST /cli/v1/auth/token`) with
+/// NO cookie attached — proving the exchange endpoint is reachable
+/// unauthenticated, as a fresh CLI process would call it.
+#[tokio::test]
+async fn cli_pkce_login_mints_a_bearer_token() {
+    let state = AppState::fake();
+    seed_account(&state, "cliop@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let web = SessionClient::new();
+    web.post_json(
+        &format!("{base}/api/login"),
+        &serde_json::json!({ "email": "cliop@example.com", "password": "some-password-123" }),
+    )
+    .await;
+
+    let verifier = "a".repeat(43);
+    let challenge = opsclaw::http::cli_auth::challenge_for(&verifier);
+    let authorize: serde_json::Value = web
+        .post_json(
+            &format!("{base}/api/cli/authorize"),
+            &serde_json::json!({ "challenge": challenge, "name": "test-host" }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    let code = authorize["code"].as_str().unwrap().to_string();
+
+    // Unauthenticated on purpose — a bare reqwest client, no cookie jar.
+    let exchange: serde_json::Value = reqwest::Client::new()
+        .post(format!("{base}/cli/v1/auth/token"))
+        .json(&serde_json::json!({ "code": code, "verifier": verifier }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = exchange["token"].as_str().unwrap();
+    assert!(token.starts_with("ops_"));
+    assert_eq!(exchange["email"], "cliop@example.com");
+
+    // /cli/v1/me confirms the bearer resolves to the right account.
+    let me: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base}/cli/v1/me"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me["email"], "cliop@example.com");
+}
+
+/// The minted `ops_` token, with NO session cookie, is accepted by an
+/// `Authed`-gated route that lives outside `/cli/v1/*` (e-stop) — the
+/// gateway-side change this wave made so the remote CLI's approve/deny/
+/// estop commands don't need a second, duplicate route family.
+#[tokio::test]
+async fn cli_bearer_token_reaches_authed_gated_routes() {
+    let state = AppState::fake();
+    seed_account(&state, "cliestop@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let web = SessionClient::new();
+    web.post_json(
+        &format!("{base}/api/login"),
+        &serde_json::json!({ "email": "cliestop@example.com", "password": "some-password-123" }),
+    )
+    .await;
+
+    let verifier = "b".repeat(43);
+    let challenge = opsclaw::http::cli_auth::challenge_for(&verifier);
+    let authorize: serde_json::Value = web
+        .post_json(
+            &format!("{base}/api/cli/authorize"),
+            &serde_json::json!({ "challenge": challenge }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    let code = authorize["code"].as_str().unwrap().to_string();
+    let exchange: serde_json::Value = reqwest::Client::new()
+        .post(format!("{base}/cli/v1/auth/token"))
+        .json(&serde_json::json!({ "code": code, "verifier": verifier }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = exchange["token"].as_str().unwrap();
+
+    // No cookie anywhere in this client — bearer only.
+    let cli_client = reqwest::Client::new();
+    let engaged: serde_json::Value = cli_client
+        .post(format!("{base}/api/estop/engage"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "reason": "cli e2e test" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(engaged["estop_engaged"], true);
+
+    // Revoke (logout) then confirm the same token is rejected everywhere.
+    let revoked =
+        cli_client.delete(format!("{base}/cli/v1/token")).bearer_auth(token).send().await.unwrap();
+    assert_eq!(revoked.status(), reqwest::StatusCode::OK);
+
+    let after_revoke = cli_client
+        .post(format!("{base}/api/estop/resume"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after_revoke.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
 // ---- e-stop ----
 
 #[tokio::test]

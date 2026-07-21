@@ -105,7 +105,7 @@ impl DispatchDeps {
 /// `ToolCtx::known_targets` wants (`ToolCtx`'s own doc: "the set of
 /// `project::env::target` paths the dispatcher has already resolved from
 /// config and authorized for the current context").
-fn known_targets_from_config(config: &Config) -> Vec<FqTarget> {
+pub(crate) fn known_targets_from_config(config: &Config) -> Vec<FqTarget> {
     let mut targets = Vec::new();
     for project in &config.projects {
         for env in &project.envs {
@@ -390,6 +390,14 @@ impl ChatHandler for ChatTurn {
         }
 
         Ok(reply.reply)
+    }
+
+    /// Waits for `self.deps.memory`'s in-flight detached retains — the
+    /// `retain_turn_detached` call a few lines above this is exactly what
+    /// this drains. See `ChatHandler::drain`'s doc for why a caller (the
+    /// local REPL) would reach for this instead of just exiting.
+    async fn drain(&self, timeout: std::time::Duration) -> bool {
+        self.deps.memory.drain_detached(timeout).await
     }
 }
 

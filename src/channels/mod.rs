@@ -120,6 +120,19 @@ pub trait Channel: Send + Sync {
 #[async_trait]
 pub trait ChatHandler: Send + Sync {
     async fn chat(&self, principal: Principal, speaker: &str, message: &str) -> Result<String>;
+
+    /// Wait (bounded by `timeout`) for any background work a turn may have
+    /// detached (memory's fire-and-forget retain — see `memory::Memory::
+    /// retain_detached`) to finish, returning whether it drained in time.
+    /// DEFAULTED to an instant no-op: only a handler that actually detaches
+    /// work needs to override it (`agent::dispatch::ChatTurn` does — see its
+    /// impl). Exists so a process that owns its own lifecycle end-to-end —
+    /// the local `opsclaw-cli chat` REPL, which never goes through
+    /// `http::server::run`'s shutdown drain — has a seam to call on exit
+    /// instead of exiting mid-write.
+    async fn drain(&self, _timeout: std::time::Duration) -> bool {
+        true
+    }
 }
 
 /// Boot-safe default: chat is not wired (fakes-mode state before

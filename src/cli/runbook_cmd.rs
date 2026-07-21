@@ -1,32 +1,53 @@
-//! `opsclaw-cli runbook init/list/show` (brief §7: "`runbook
+//! `opsclaw-cli runbook init/list/show/run` (brief §7: "`runbook
 //! init/list/show/run --target ... --var k=v`").
 //!
-//! `list`/`show`'s directory-scan/parse logic now DELEGATES to
+//! `list`/`show`'s directory-scan/parse logic DELEGATES to
 //! `runbooks::RunbookStore` (the runbook definition store built for
 //! `tools::runbooks_tool::RunbookListTool`) rather than duplicating it —
 //! this file used to own that scan loop directly (before `RunbookStore`
 //! existed, `runbooks/mod.rs` was explicitly "no filesystem-scanning
 //! helper... anywhere in the library", so this was the one place it lived).
-//! Public function signatures are UNCHANGED (`init`/`list`/`show`/
-//! `runbooks_dir`, all still `&Path`-based) so `bin/cli/main.rs`'s call
-//! sites need no changes — only the bodies of `list`/`show` moved to call
-//! through the store.
+//! Public function signatures for `init`/`list`/`show`/`runbooks_dir` are
+//! UNCHANGED (all still `&Path`-based) so `bin/cli/main.rs`'s existing call
+//! sites need no changes.
 //!
-//! `runbook run` is NOT implemented here: actually executing a runbook's
-//! steps needs to go through `policy::execute` for risk classification,
-//! e-stop, autonomy gating, and audit (DESIGN.md §4 "no tool owns a
+//! ## `run` — the execution engine
+//!
+//! Every step's command goes through `ctx.policy.execute` — the SAME choke
+//! point every tool call goes through (DESIGN.md §4: "no tool owns a
 //! connection; there is one execution path per target type, and audit and
-//! policy live there") — `runbooks/mod.rs`'s own doc comment is explicit
-//! that this execution engine is later-wave work, not something to
-//! improvise here by calling a `TargetExecutor` directly and skipping the
-//! choke point.
+//! policy live there"). This module composes NO new execution path: it
+//! builds a `policy::CommandRequest` per rendered step (mirroring
+//! `tools::executor::run_command`'s shape, but that helper isn't reused
+//! directly — it takes a `ToolCtx`, which needs an LLM/tool-registry this
+//! command has no business constructing for a plain "run this runbook"
+//! invocation) and calls `Arc<dyn PolicyExecute>::execute` on it directly.
+//! `CommandRequest.runbook` is set to the runbook's title, which is what
+//! unlocks execution at `act_on_known` without a fresh per-step approval
+//! (DESIGN.md §4 Runbooks: "a runbook match is the pre-approval that
+//! unlocks `act_on_known`") — this is legitimate here because `run` is
+//! itself an OPERATOR-INITIATED action naming an already-authored,
+//! human-reviewed runbook by title, the exact trust boundary that
+//! `runbook` front matter authoring is meant to establish; it is not a
+//! model free-composing a command and merely claiming a runbook match.
+//!
+//! Needs the full daemon wiring (`boot::daemon_state` — same as `chat`),
+//! not just a bare DB connection: real command execution needs the policy
+//! engine, which needs the executor registry, e-stop, and audit writer.
+//! `bin/cli/main.rs`'s `Runbook Run` arm boots it the same way `Chat` does.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use chrono::Utc;
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::Result;
-use crate::runbooks::{INIT_TEMPLATE, Runbook, RunbookStore};
+use crate::domain::{FqTarget, Principal};
+use crate::policy::{CommandRequest, PolicyExecute, PolicyOutcome};
+use crate::runbooks::{INIT_TEMPLATE, OnFail, Runbook, RunbookStore, StepOutcome, StepStatus};
 
 /// Where `runbook` commands look for runbook files: `<opsclaw_home>/runbooks/`.
 /// Matches `config::DaemonCfg::runbooks_dir`'s default — kept as a free
@@ -106,6 +127,235 @@ pub fn show(opsclaw_home: &Path, name: &str) -> Result<Runbook> {
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| crate::Error::Config(format!("{}: {e}", path.display())))?;
     Runbook::parse(&raw)
+}
+
+/// One step's rendered command plus how it went — the human-facing
+/// summary `run`'s caller prints; a parallel, denser shape to
+/// `runbooks::StepOutcome` (which is what actually gets persisted) because
+/// this one also carries the rendered command text (not persisted — the
+/// front-matter + `--var`s that produced it already are, via the stored
+/// `RunbookRun`... no: see `record_run`'s call site — the command text is
+/// NOT separately persisted today, only in this in-process summary; a
+/// future wave wanting it in history should extend `StepOutcome` itself
+/// rather than have this module carry a shadow copy).
+#[derive(Debug, Serialize)]
+pub struct StepReport {
+    pub index: usize,
+    pub text: String,
+    pub command: Option<String>,
+    pub status: String,
+    pub output: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunOutcome {
+    pub run_id: Uuid,
+    pub runbook: String,
+    pub target: String,
+    pub steps: Vec<StepReport>,
+    pub succeeded: bool,
+}
+
+fn step_status_str(s: StepStatus) -> &'static str {
+    match s {
+        StepStatus::Ok => "ok",
+        StepStatus::Failed => "failed",
+        StepStatus::Skipped => "skipped",
+        StepStatus::Retried => "retried",
+    }
+}
+
+/// Run every step of the runbook titled `title` against `target`,
+/// substituting `cli_vars` (plus the runbook's own `default_vars` and
+/// target-derived auto vars — see `Runbook::render_all`), executing each
+/// step's command through `policy` (module doc: the one choke point), and
+/// recording the full outcome via `runs` (`db::RunbookRunRepo`).
+///
+/// Per-step failure handling follows each step's own `(on-fail: ...)`
+/// marker (`OnFail`, default `Abort`):
+/// - `Abort` (default): stop the whole run at the first failure; later
+///   steps are recorded `Skipped`, never attempted.
+/// - `Continue`: record the failure and move on to the next step.
+/// - `Retry`: run the step a second time immediately; if the retry also
+///   fails, treat it as `Continue` (record `Failed`, keep going) — a
+///   runbook step is not worth retrying forever from an interactive `run`
+///   (unlike, say, a network client's transient-error backoff), and an
+///   infinite/long retry loop would be a surprising thing for an operator
+///   to be stuck waiting on.
+///
+/// A step with no `command` (pure prose, e.g. "confirm the signal before
+/// acting") is recorded `Ok` with empty output — there is nothing to
+/// execute, and a prose-only step must never block or fail a run.
+pub async fn run(
+    store: &RunbookStore,
+    policy: &Arc<dyn PolicyExecute>,
+    runs: &Arc<dyn crate::db::RunbookRunRepo>,
+    principal: Principal,
+    title: &str,
+    target: &FqTarget,
+    cli_vars: &BTreeMap<String, String>,
+) -> Result<RunOutcome> {
+    let loaded = store.get(title).ok_or_else(|| {
+        crate::Error::Config(format!(
+            "no runbook titled {title:?} — run `opsclaw-cli runbook list` to see what's loaded"
+        ))
+    })?;
+    let rendered = loaded.runbook.render_all(Some(target), cli_vars)?;
+
+    let run_id = Uuid::new_v4();
+    let started_at = Utc::now();
+    let mut reports = Vec::with_capacity(rendered.len());
+    let mut outcomes = Vec::with_capacity(rendered.len());
+    let mut aborted = false;
+
+    for (index, (step, command)) in rendered.into_iter().enumerate() {
+        if aborted {
+            reports.push(StepReport {
+                index,
+                text: step.text.clone(),
+                command: command.clone(),
+                status: step_status_str(StepStatus::Skipped).to_string(),
+                output: String::new(),
+            });
+            outcomes.push(StepOutcome {
+                step_index: index,
+                status: StepStatus::Skipped,
+                output: String::new(),
+            });
+            continue;
+        }
+
+        let Some(cmd) = command else {
+            // Prose-only step: nothing to run, always Ok (see doc above).
+            reports.push(StepReport {
+                index,
+                text: step.text.clone(),
+                command: None,
+                status: step_status_str(StepStatus::Ok).to_string(),
+                output: String::new(),
+            });
+            outcomes.push(StepOutcome {
+                step_index: index,
+                status: StepStatus::Ok,
+                output: String::new(),
+            });
+            continue;
+        };
+
+        let (status, output) = run_one_step(policy, &principal, title, target, &cmd).await;
+
+        let final_status = if status == StepStatus::Failed && step.on_fail == OnFail::Retry {
+            // One immediate retry; a second failure is just Failed (module
+            // doc: no unbounded retry from an interactive `run`).
+            let (retry_status, retry_output) =
+                run_one_step(policy, &principal, title, target, &cmd).await;
+            if retry_status == StepStatus::Ok {
+                reports.push(StepReport {
+                    index,
+                    text: step.text.clone(),
+                    command: Some(cmd.clone()),
+                    status: step_status_str(StepStatus::Retried).to_string(),
+                    output: retry_output.clone(),
+                });
+                outcomes.push(StepOutcome {
+                    step_index: index,
+                    status: StepStatus::Retried,
+                    output: retry_output,
+                });
+                continue;
+            }
+            retry_status
+        } else {
+            status
+        };
+
+        reports.push(StepReport {
+            index,
+            text: step.text.clone(),
+            command: Some(cmd.clone()),
+            status: step_status_str(final_status).to_string(),
+            output: output.clone(),
+        });
+        outcomes.push(StepOutcome { step_index: index, status: final_status, output });
+
+        if final_status == StepStatus::Failed && step.on_fail == OnFail::Abort {
+            aborted = true;
+        }
+    }
+
+    let record = crate::runbooks::RunbookRun {
+        id: run_id,
+        runbook: title.to_string(),
+        target: target.clone(),
+        principal: Some(principal),
+        started_at,
+        finished_at: Some(Utc::now()),
+        steps: outcomes,
+    };
+    let succeeded = record.succeeded();
+    runs.record_run(&record).await?;
+
+    Ok(RunOutcome {
+        run_id,
+        runbook: title.to_string(),
+        target: target.to_string(),
+        steps: reports,
+        succeeded,
+    })
+}
+
+/// Execute one rendered command through the policy choke point and reduce
+/// its `PolicyOutcome` to a `(StepStatus, output-for-humans)` pair. A
+/// queued/blocked/e-stopped outcome is `Failed` from the runbook's
+/// perspective (module doc's abort/continue/retry handling above treats
+/// "did not run to completion" uniformly, whatever the reason) — but the
+/// reason is preserved verbatim in `output` so an operator reading the run
+/// report sees "blocked by policy: ..." rather than a bare "failed".
+async fn run_one_step(
+    policy: &Arc<dyn PolicyExecute>,
+    principal: &Principal,
+    runbook_title: &str,
+    target: &FqTarget,
+    command: &str,
+) -> (StepStatus, String) {
+    let req = CommandRequest {
+        principal: principal.clone(),
+        tool: "runbook".to_string(),
+        target: target.clone(),
+        command: command.to_string(),
+        // Floor only — `policy::classify` raises based on the command's
+        // own content regardless of what a caller declares (`CommandRequest
+        // .declared_risk`'s own doc: "the classifier may raise (never
+        // lower) it"), so declaring `Read` here costs nothing: a genuinely
+        // destructive step still gets classified as such.
+        declared_risk: crate::domain::RiskClass::Read,
+        hypothesis: Some(format!("runbook {runbook_title:?} step")),
+        runbook: Some(runbook_title.to_string()),
+    };
+    match policy.execute(req).await {
+        Ok(PolicyOutcome::Executed(out)) => {
+            let status = if out.exit_code == 0 { StepStatus::Ok } else { StepStatus::Failed };
+            let mut text = format!("exit {} ({}ms)", out.exit_code, out.duration_ms);
+            if !out.stdout.is_empty() {
+                text.push_str(&format!("\nstdout:\n{}", out.stdout));
+            }
+            if !out.stderr.is_empty() {
+                text.push_str(&format!("\nstderr:\n{}", out.stderr));
+            }
+            (status, text)
+        }
+        Ok(PolicyOutcome::NeedsApproval(id)) => {
+            (StepStatus::Failed, format!("queued for human approval (request {id}) — did not run"))
+        }
+        Ok(PolicyOutcome::Blocked { reason, dry_run_logged }) => {
+            let logged = if dry_run_logged { " (logged to the dry-run log)" } else { "" };
+            (StepStatus::Failed, format!("blocked by policy: {reason}{logged}"))
+        }
+        Ok(PolicyOutcome::EStopped) => {
+            (StepStatus::Failed, "blocked: the emergency stop is engaged".to_string())
+        }
+        Err(e) => (StepStatus::Failed, format!("policy engine error: {e}")),
+    }
 }
 
 #[cfg(test)]
@@ -210,5 +460,246 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = show(dir.path(), "nope").unwrap_err();
         assert!(err.to_string().contains("nope.md"));
+    }
+
+    // ---- `run` ----
+
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    /// A `PolicyExecute` whose outcome is scripted per call (in order),
+    /// repeating the last scripted outcome once the queue runs out — lets a
+    /// test express "step 1 succeeds, step 2 fails" without a full fake
+    /// executor. Also records every `CommandRequest` it saw, so tests can
+    /// assert `runbook`/`principal`/`declared_risk` were threaded through
+    /// correctly.
+    struct ScriptedPolicy {
+        outcomes: Mutex<std::collections::VecDeque<PolicyOutcome>>,
+        seen: Mutex<Vec<CommandRequest>>,
+    }
+
+    impl ScriptedPolicy {
+        fn new(outcomes: Vec<PolicyOutcome>) -> Self {
+            ScriptedPolicy { outcomes: Mutex::new(outcomes.into()), seen: Mutex::new(Vec::new()) }
+        }
+
+        fn ok(exit_code: i32) -> PolicyOutcome {
+            PolicyOutcome::Executed(crate::targets::ExecOutput {
+                exit_code,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 1,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl PolicyExecute for ScriptedPolicy {
+        async fn execute(&self, req: CommandRequest) -> crate::Result<PolicyOutcome> {
+            self.seen.lock().unwrap().push(req);
+            let mut q = self.outcomes.lock().unwrap();
+            Ok(if q.len() > 1 { q.pop_front().unwrap() } else { clone_outcome(q.front().unwrap()) })
+        }
+    }
+
+    // `PolicyOutcome` has no `Clone`; hand-roll the narrow clone this test
+    // fake needs (only the variants these tests script).
+    fn clone_outcome(o: &PolicyOutcome) -> PolicyOutcome {
+        match o {
+            PolicyOutcome::Executed(e) => PolicyOutcome::Executed(crate::targets::ExecOutput {
+                exit_code: e.exit_code,
+                stdout: e.stdout.clone(),
+                stderr: e.stderr.clone(),
+                duration_ms: e.duration_ms,
+            }),
+            PolicyOutcome::NeedsApproval(id) => PolicyOutcome::NeedsApproval(*id),
+            PolicyOutcome::Blocked { reason, dry_run_logged } => {
+                PolicyOutcome::Blocked { reason: reason.clone(), dry_run_logged: *dry_run_logged }
+            }
+            PolicyOutcome::EStopped => PolicyOutcome::EStopped,
+        }
+    }
+
+    fn store_with(body: &str) -> RunbookStore {
+        let rb = Runbook::parse(body).unwrap();
+        RunbookStore::from_parsed(std::env::temp_dir(), vec![("test.md".to_string(), rb)])
+    }
+
+    fn test_target() -> FqTarget {
+        FqTarget::new("remundo", "prod", "web-1")
+    }
+
+    #[tokio::test]
+    async fn run_executes_every_step_and_records_a_successful_run() {
+        let body = "+++\ntitle = \"t\"\n+++\n- step one\n  ```sh\n  echo one {target}\n  ```\n- step two\n  ```sh\n  echo two\n  ```\n";
+        let store = store_with(body);
+        let policy: Arc<dyn PolicyExecute> =
+            Arc::new(ScriptedPolicy::new(vec![ScriptedPolicy::ok(0)]));
+        let db = crate::db::Db::fake();
+        let runs: Arc<dyn crate::db::RunbookRunRepo> = db.repos();
+
+        let outcome =
+            run(&store, &policy, &runs, Principal::System, "t", &test_target(), &BTreeMap::new())
+                .await
+                .unwrap();
+
+        assert!(outcome.succeeded);
+        assert_eq!(outcome.steps.len(), 2);
+        assert_eq!(outcome.steps[0].status, "ok");
+        assert_eq!(outcome.steps[1].status, "ok");
+
+        let persisted =
+            crate::db::RunbookRunRepo::get(runs.as_ref(), outcome.run_id).await.unwrap().unwrap();
+        assert_eq!(persisted.runbook, "t");
+        assert!(persisted.succeeded());
+    }
+
+    #[tokio::test]
+    async fn run_renders_target_and_var_placeholders_before_executing() {
+        let body = "+++\ntitle = \"t\"\n+++\n- one step\n  ```sh\n  restart {target} --queue {queue}\n  ```\n";
+        let store = store_with(body);
+        let policy = Arc::new(ScriptedPolicy::new(vec![ScriptedPolicy::ok(0)]));
+        let policy_dyn: Arc<dyn PolicyExecute> = policy.clone();
+        let db = crate::db::Db::fake();
+        let runs: Arc<dyn crate::db::RunbookRunRepo> = db.repos();
+
+        let mut vars = BTreeMap::new();
+        vars.insert("queue".to_string(), "orders-dlq".to_string());
+
+        run(&store, &policy_dyn, &runs, Principal::System, "t", &test_target(), &vars)
+            .await
+            .unwrap();
+
+        let seen = policy.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        // Leading whitespace inside the fenced block is preserved verbatim
+        // by `steps::parse_steps` (see that module's own
+        // `parses_command_block` test) — `render`/`render_all` only
+        // substitute `{placeholder}`s, they don't reformat the command.
+        assert_eq!(seen[0].command.trim(), "restart web-1 --queue orders-dlq");
+        assert_eq!(seen[0].runbook.as_deref(), Some("t"));
+    }
+
+    #[tokio::test]
+    async fn run_aborts_on_default_on_fail_and_skips_later_steps() {
+        let body = "+++\ntitle = \"t\"\n+++\n- fails\n  ```sh\n  false\n  ```\n- never runs\n  ```sh\n  echo nope\n  ```\n";
+        let store = store_with(body);
+        let policy: Arc<dyn PolicyExecute> =
+            Arc::new(ScriptedPolicy::new(vec![ScriptedPolicy::ok(1)]));
+        let db = crate::db::Db::fake();
+        let runs: Arc<dyn crate::db::RunbookRunRepo> = db.repos();
+
+        let outcome =
+            run(&store, &policy, &runs, Principal::System, "t", &test_target(), &BTreeMap::new())
+                .await
+                .unwrap();
+
+        assert!(!outcome.succeeded);
+        assert_eq!(outcome.steps[0].status, "failed");
+        assert_eq!(outcome.steps[1].status, "skipped");
+    }
+
+    #[tokio::test]
+    async fn run_continues_past_a_continue_marked_failure() {
+        let body = "+++\ntitle = \"t\"\n+++\n- fails but continues (on-fail: continue)\n  ```sh\n  false\n  ```\n- still runs\n  ```sh\n  echo ok\n  ```\n";
+        let store = store_with(body);
+        let policy: Arc<dyn PolicyExecute> =
+            Arc::new(ScriptedPolicy::new(vec![ScriptedPolicy::ok(1), ScriptedPolicy::ok(0)]));
+        let db = crate::db::Db::fake();
+        let runs: Arc<dyn crate::db::RunbookRunRepo> = db.repos();
+
+        let outcome =
+            run(&store, &policy, &runs, Principal::System, "t", &test_target(), &BTreeMap::new())
+                .await
+                .unwrap();
+
+        assert_eq!(outcome.steps[0].status, "failed");
+        assert_eq!(outcome.steps[1].status, "ok", "the second step must still have run");
+        assert!(!outcome.succeeded, "a run with any failed step is not a success");
+    }
+
+    #[tokio::test]
+    async fn run_retries_once_then_succeeds() {
+        let body = "+++\ntitle = \"t\"\n+++\n- flaky (on-fail: retry)\n  ```sh\n  maybe\n  ```\n";
+        let store = store_with(body);
+        let policy: Arc<dyn PolicyExecute> =
+            Arc::new(ScriptedPolicy::new(vec![ScriptedPolicy::ok(1), ScriptedPolicy::ok(0)]));
+        let db = crate::db::Db::fake();
+        let runs: Arc<dyn crate::db::RunbookRunRepo> = db.repos();
+
+        let outcome =
+            run(&store, &policy, &runs, Principal::System, "t", &test_target(), &BTreeMap::new())
+                .await
+                .unwrap();
+
+        assert_eq!(outcome.steps[0].status, "retried");
+        assert!(outcome.succeeded);
+    }
+
+    #[tokio::test]
+    async fn run_retry_that_fails_twice_is_just_failed() {
+        let body = "+++\ntitle = \"t\"\n+++\n- flaky (on-fail: retry)\n  ```sh\n  maybe\n  ```\n";
+        let store = store_with(body);
+        let policy: Arc<dyn PolicyExecute> =
+            Arc::new(ScriptedPolicy::new(vec![ScriptedPolicy::ok(1)]));
+        let db = crate::db::Db::fake();
+        let runs: Arc<dyn crate::db::RunbookRunRepo> = db.repos();
+
+        let outcome =
+            run(&store, &policy, &runs, Principal::System, "t", &test_target(), &BTreeMap::new())
+                .await
+                .unwrap();
+
+        assert_eq!(outcome.steps[0].status, "failed");
+        assert!(!outcome.succeeded);
+    }
+
+    #[tokio::test]
+    async fn run_unknown_title_errors_clearly() {
+        let store = store_with("+++\ntitle = \"t\"\n+++\n- step\n");
+        let policy: Arc<dyn PolicyExecute> =
+            Arc::new(ScriptedPolicy::new(vec![ScriptedPolicy::ok(0)]));
+        let db = crate::db::Db::fake();
+        let runs: Arc<dyn crate::db::RunbookRunRepo> = db.repos();
+
+        let err = run(
+            &store,
+            &policy,
+            &runs,
+            Principal::System,
+            "does-not-exist",
+            &test_target(),
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("does-not-exist"));
+    }
+
+    #[tokio::test]
+    async fn run_prose_only_step_is_ok_without_executing_anything() {
+        let store = store_with("+++\ntitle = \"t\"\n+++\n- just look at the dashboard\n");
+        let policy = Arc::new(ScriptedPolicy::new(vec![ScriptedPolicy::ok(0)]));
+        let policy_dyn: Arc<dyn PolicyExecute> = policy.clone();
+        let db = crate::db::Db::fake();
+        let runs: Arc<dyn crate::db::RunbookRunRepo> = db.repos();
+
+        let outcome = run(
+            &store,
+            &policy_dyn,
+            &runs,
+            Principal::System,
+            "t",
+            &test_target(),
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.steps[0].status, "ok");
+        assert!(outcome.succeeded);
+        assert!(
+            policy.seen.lock().unwrap().is_empty(),
+            "a prose-only step must never call policy.execute"
+        );
     }
 }

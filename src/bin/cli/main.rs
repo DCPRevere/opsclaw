@@ -1,10 +1,23 @@
 //! `opsclaw-cli` — operator/developer CLI. Links the library crate and
 //! drives the same orchestrator path as every channel (gianna pattern).
-//! **Local mode only** — every command here either has no daemon
-//! counterpart (onboard, config wizards) or opens the same SQLite file the
-//! daemon would (doctor, estop, incidents, audit, postmortem, runbook).
-//! Remote mode (talking to a live daemon's gateway over the token-auth API)
-//! is a later wave; this binary never opens an HTTP client to a daemon.
+//!
+//! **Two modes.** Most commands here either have no daemon counterpart
+//! (onboard, config wizards) or open the same SQLite file the daemon would
+//! (doctor, estop, incidents, audit, postmortem, runbook) — that's LOCAL
+//! mode, and it never opens an HTTP client to a daemon. `login`/`logout`
+//! and the `--remote`-flagged small set (`chat`, `incidents`, `approve`,
+//! `deny`, `estop`, `status`, `whoami` — DESIGN §7 decision 14) instead
+//! speak to a live daemon's gateway over its token-auth API
+//! (`opsclaw::cli::remote::*`, resolved through [`remote_session`] below).
+//! The rule is explicit, not auto-detected from whether a session happens
+//! to be saved: `chat`/`incidents`/`estop` default to LOCAL and take a
+//! literal `--remote` flag to use the saved gateway session instead (a
+//! fresh install with no `login` ever run still gets a working `chat`);
+//! `status`/`approve`/`deny`/`whoami` are remote-ONLY (no local analogue —
+//! they act on a live daemon's own state, which a local invocation has no
+//! way to ask about). Every remote arm calls `remote_session()`, which
+//! errors clearly ("run `opsclaw-cli login` first") when nothing is saved,
+//! rather than silently falling back to local behaviour.
 //!
 //! Argument parsing lives here (clap types); all actual logic is in
 //! `opsclaw::cli::*`, kept free of clap so it's callable from tests without
@@ -14,6 +27,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use opsclaw::cli::prompt::StdioPrompter;
+use opsclaw::cli::remote::session::Session;
 use opsclaw::config::Config;
 use opsclaw::http::server;
 use uuid::Uuid;
@@ -28,6 +42,16 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+/// Parse one `key=value` `--var` argument (runbook `run`'s `--var k=v`,
+/// repeatable). A clap `value_parser` rather than post-hoc parsing so a
+/// malformed `--var` is rejected at argv-parse time with clap's own
+/// pointing-at-the-bad-arg error, not a generic runtime failure later.
+fn parse_var(s: &str) -> Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .ok_or_else(|| format!("expected key=value, got {s:?}"))
 }
 
 #[derive(Subcommand)]
@@ -56,13 +80,19 @@ enum Command {
     },
     /// Run the daemon (identical to the `opsclaw` binary).
     Daemon,
-    /// Freeze all agent action across all targets instantly.
+    /// Freeze all agent action across all targets instantly. LOCAL by
+    /// default (writes the sentinel file directly — works even with the
+    /// daemon wedged, see `cli::estop`'s doc); `--remote` instead calls a
+    /// live daemon's gateway (DESIGN §7 decision 14) for the "away from the
+    /// box" case.
     Estop {
         /// Resume normal operation.
         #[arg(long)]
         resume: bool,
         #[arg(long, default_value = "operator requested via CLI")]
         reason: String,
+        #[arg(long)]
+        remote: bool,
     },
     /// Config management: project/env/target wizards, validation.
     Config {
@@ -81,10 +111,68 @@ enum Command {
     },
     /// Render a structured postmortem for an incident.
     Postmortem { id: Uuid },
-    /// Runbook authoring.
+    /// Runbook authoring + execution.
     Runbook {
         #[command(subcommand)]
         command: RunbookCommand,
+    },
+    /// Team memory: recall/store/forget (local mode; honest no-op when
+    /// memory.hindsight_url isn't configured).
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+    /// Talk to the agent. One-shot with a message, else a REPL. LOCAL by
+    /// default (drives the daemon's own library wiring, no HTTP); `--remote`
+    /// forces the saved gateway session instead — see module doc.
+    Chat {
+        /// Send once and print the reply, instead of an interactive REPL.
+        message: Option<String>,
+        #[arg(long)]
+        remote: bool,
+    },
+    /// Daemon status. LOCAL mode has no analogue for this (there is no
+    /// running-daemon introspection without a daemon to ask) — this
+    /// command is REMOTE-ONLY, over the saved gateway session.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve a pending approval (remote-only — DESIGN §7 decision 14;
+    /// acts on a live daemon's approval queue over its gateway).
+    Approve {
+        id: Uuid,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deny a pending approval (remote-only; see `Approve`).
+    Deny {
+        id: Uuid,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sign in to a gateway's remote CLI surface (browser hand-off); saves
+    /// a revocable token under ~/.opsclaw/cli.toml.
+    Login {
+        /// The gateway to sign in to.
+        #[arg(long)]
+        remote: String,
+    },
+    /// Revoke the saved remote session (server-side) and delete it locally.
+    Logout,
+    /// Show which account the saved remote session belongs to.
+    Whoami {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the web UI in a browser ($BROWSER or the platform default);
+    /// with --tunnel, first stand up an SSH port-forward to a remote
+    /// daemon and open the local end.
+    Ui {
+        /// SSH to `user@host[:port]` and forward the daemon's port locally
+        /// before opening the browser.
+        #[arg(long)]
+        tunnel: Option<String>,
     },
 }
 
@@ -116,11 +204,15 @@ enum IncidentsCommand {
         limit: i64,
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        remote: bool,
     },
     Show {
         id: Uuid,
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        remote: bool,
     },
 }
 
@@ -145,6 +237,53 @@ enum RunbookCommand {
     /// Show one runbook's parsed shape.
     Show {
         name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Execute a runbook's steps against a target, through policy.
+    Run {
+        /// The runbook's TITLE (its `title` front-matter field, not the
+        /// file name — matches `RunbookStore`'s own title-keyed identity).
+        title: String,
+        #[arg(long)]
+        target: String,
+        /// `key=value`, repeatable — overrides the runbook's `[default_vars]`.
+        #[arg(long = "var", value_parser = parse_var)]
+        vars: Vec<(String, String)>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryCommand {
+    /// Recall facts relevant to a query.
+    Recall {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Store an explicit note.
+    Store {
+        text: String,
+        /// Attribution label. Defaults to the same "no authenticated local
+        /// account" label the local chat REPL uses — see
+        /// `cli::chat_repl::LOCAL_SPEAKER`'s doc for the reasoning; kept as
+        /// a literal here (not a `const` reference) because clap's
+        /// `default_value` wants a string literal, not an expression.
+        #[arg(long, default_value = "local operator")]
+        speaker: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget one fact by id, or every fact matching a query.
+    Forget {
+        /// An opaque memory id (no spaces), or a free-text query.
+        target: String,
+        #[arg(long, default_value = "operator requested via CLI")]
+        reason: String,
         #[arg(long)]
         json: bool,
     },
@@ -244,7 +383,17 @@ async fn dispatch(
             }
         }
 
-        Command::Estop { resume, reason } => {
+        Command::Estop { resume, reason, remote } if remote => {
+            let session = remote_session()?;
+            let engaged = if resume {
+                opsclaw::cli::remote::estop::resume(&session).await?
+            } else {
+                opsclaw::cli::remote::estop::engage(&session, &reason).await?
+            };
+            println!("estop_engaged: {engaged}");
+        }
+
+        Command::Estop { resume, reason, remote: _ } => {
             let sentinel = sentinel_path();
             let db_path = resolve_db_path(cfg_path);
             let outcome = if resume {
@@ -283,11 +432,20 @@ async fn dispatch(
         },
 
         Command::Incidents { command } => match command {
-            IncidentsCommand::List { include_closed, limit, json } => {
+            IncidentsCommand::List { include_closed, limit, json, remote: true } => {
+                let session = remote_session()?;
+                opsclaw::cli::remote::incidents::list(&session, include_closed, limit, json)
+                    .await?;
+            }
+            IncidentsCommand::List { include_closed, limit, json, remote: false } => {
                 let db = open_db(cfg_path).await?;
                 opsclaw::cli::incidents_cmd::list(&db, include_closed, limit, json).await?;
             }
-            IncidentsCommand::Show { id, json } => {
+            IncidentsCommand::Show { id, json, remote: true } => {
+                let session = remote_session()?;
+                opsclaw::cli::remote::incidents::show(&session, id, json).await?;
+            }
+            IncidentsCommand::Show { id, json, remote: false } => {
                 let db = open_db(cfg_path).await?;
                 let found = opsclaw::cli::incidents_cmd::show(&db, id, json).await?;
                 if found.is_none() && !json {
@@ -377,9 +535,186 @@ async fn dispatch(
                     }
                 }
             }
+            RunbookCommand::Run { title, target, vars, json } => {
+                let config = Config::load(Some(cfg_path))?;
+                config.validate()?;
+                let target = opsclaw::domain::FqTarget::parse(&target)?;
+                let cli_vars: std::collections::BTreeMap<String, String> =
+                    vars.into_iter().collect();
+
+                // Full daemon wiring (no HTTP bind) — a real command needs
+                // the policy engine, which needs executors/e-stop/audit
+                // (same reasoning as `Chat`'s local arm below).
+                let state =
+                    opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
+                let store = opsclaw::runbooks::RunbookStore::load(
+                    opsclaw::cli::runbook_cmd::runbooks_dir(home),
+                )?;
+                let runs: std::sync::Arc<dyn opsclaw::db::RunbookRunRepo> = state.repos.clone();
+                let outcome = opsclaw::cli::runbook_cmd::run(
+                    &store,
+                    &state.policy,
+                    &runs,
+                    opsclaw::domain::Principal::System,
+                    &title,
+                    &target,
+                    &cli_vars,
+                )
+                .await?;
+
+                if json {
+                    opsclaw::cli::output::print_json(&outcome);
+                } else {
+                    println!("run {} — {} ({})", outcome.run_id, outcome.runbook, outcome.target);
+                    for step in &outcome.steps {
+                        println!("{}. [{}] {}", step.index + 1, step.status, step.text.trim());
+                        if !step.output.is_empty() {
+                            for line in step.output.lines() {
+                                println!("     {line}");
+                            }
+                        }
+                    }
+                    println!(
+                        "{}",
+                        if outcome.succeeded {
+                            "OK — run succeeded"
+                        } else {
+                            "FAIL — run did not succeed"
+                        }
+                    );
+                }
+                if !outcome.succeeded {
+                    std::process::exit(1);
+                }
+            }
         },
+
+        Command::Memory { command } => match command {
+            MemoryCommand::Recall { query, limit, json } => {
+                let outcome = opsclaw::cli::memory_cmd::recall(cfg_path, &query, limit).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&outcome);
+                } else if !outcome.enabled {
+                    println!("{}", opsclaw::cli::memory_cmd::DISABLED_MESSAGE);
+                } else if outcome.records.is_empty() {
+                    println!("(nothing recalled for {query:?})");
+                } else {
+                    for r in &outcome.records {
+                        println!("• {}  [{}]", r.fact, r.id);
+                    }
+                }
+            }
+            MemoryCommand::Store { text, speaker, json } => {
+                let outcome = opsclaw::cli::memory_cmd::store(cfg_path, &speaker, &text).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&outcome);
+                } else if outcome.stored {
+                    println!("stored.");
+                } else {
+                    println!("{}", opsclaw::cli::memory_cmd::DISABLED_MESSAGE);
+                }
+            }
+            MemoryCommand::Forget { target, reason, json } => {
+                let outcome = opsclaw::cli::memory_cmd::forget(cfg_path, &target, &reason).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&outcome);
+                } else if !outcome.enabled {
+                    println!("{}", opsclaw::cli::memory_cmd::DISABLED_MESSAGE);
+                } else if outcome.forgotten.is_empty() {
+                    println!("nothing matched {target:?} — nothing forgotten");
+                } else {
+                    println!(
+                        "forgot {} fact(s): {}",
+                        outcome.forgotten.len(),
+                        outcome.forgotten.join(", ")
+                    );
+                }
+            }
+        },
+
+        // `chat` picks local-vs-remote per invocation: `--remote` forces
+        // the gateway path (erroring clearly if nothing is logged in);
+        // otherwise it's always local (module doc: local is the default
+        // for commands that support both, so a fresh install with no
+        // `login` ever run still gets a working `chat`).
+        Command::Chat { message, remote } if remote => {
+            let session = remote_session()?;
+            match message {
+                Some(m) => {
+                    opsclaw::cli::remote::chat::one_shot(&session, &m).await?;
+                }
+                None => opsclaw::cli::remote::chat::repl(&session).await?,
+            }
+        }
+        Command::Chat { message, remote: _ } => match message {
+            Some(m) => {
+                let config = Config::load(Some(cfg_path))?;
+                config.validate()?;
+                let state =
+                    opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
+                let reply = state
+                    .chat
+                    .chat(
+                        opsclaw::domain::Principal::System,
+                        opsclaw::cli::chat_repl::LOCAL_SPEAKER,
+                        &m,
+                    )
+                    .await?;
+                println!("{reply}");
+                state.chat.drain(std::time::Duration::from_secs(20)).await;
+            }
+            None => opsclaw::cli::chat_repl::run(cfg_path, home).await?,
+        },
+
+        // `status` is remote-only (see `Command::Status`'s doc).
+        Command::Status { json } => {
+            let session = remote_session()?;
+            opsclaw::cli::remote::status::status(&session, json).await?;
+        }
+
+        Command::Approve { id, json } => {
+            let session = remote_session()?;
+            opsclaw::cli::remote::approvals::approve(&session, id, json).await?;
+        }
+        Command::Deny { id, json } => {
+            let session = remote_session()?;
+            opsclaw::cli::remote::approvals::deny(&session, id, json).await?;
+        }
+
+        Command::Login { remote } => {
+            let mut io = opsclaw::cli::remote::auth::RealLoginIo;
+            opsclaw::cli::remote::auth::login(&remote, &mut io).await?;
+        }
+        Command::Logout => {
+            let outcome = opsclaw::cli::remote::auth::logout().await?;
+            if !outcome.had_session {
+                println!("no saved session.");
+            } else if outcome.server_revoked {
+                println!("token revoked on the server; local session deleted.");
+            } else {
+                println!(
+                    "could not revoke on the server (already revoked, or unreachable) — local session deleted."
+                );
+            }
+        }
+        Command::Whoami { json } => {
+            let session = remote_session()?;
+            opsclaw::cli::remote::status::whoami(&session, json).await?;
+        }
+
+        Command::Ui { tunnel } => {
+            let outcome = opsclaw::cli::ui_cmd::run(cfg_path, tunnel.as_deref()).await?;
+            println!("opened {}", outcome.url);
+        }
     }
     Ok(())
+}
+
+/// Load the saved remote session or fail with the standard "please log in"
+/// message — the one place every `--remote`-capable arm below goes through,
+/// so that message (and its wording) never drifts between commands.
+fn remote_session() -> opsclaw::Result<Session> {
+    opsclaw::cli::remote::client::require_session()
 }
 
 async fn open_db(cfg_path: &std::path::Path) -> opsclaw::Result<opsclaw::db::Db> {
@@ -418,13 +753,55 @@ mod tests {
             &["opsclaw-cli", "config", "validate"],
             &["opsclaw-cli", "incidents", "list"],
             &["opsclaw-cli", "incidents", "list", "--include-closed", "--limit", "10"],
+            &["opsclaw-cli", "incidents", "list", "--remote"],
             &["opsclaw-cli", "incidents", "show", "00000000-0000-0000-0000-000000000000"],
+            &[
+                "opsclaw-cli",
+                "incidents",
+                "show",
+                "00000000-0000-0000-0000-000000000000",
+                "--remote",
+            ],
             &["opsclaw-cli", "audit", "verify"],
             &["opsclaw-cli", "postmortem", "00000000-0000-0000-0000-000000000000"],
             &["opsclaw-cli", "runbook", "init", "dlq-backlog"],
             &["opsclaw-cli", "runbook", "list"],
             &["opsclaw-cli", "runbook", "show", "dlq-backlog"],
+            &["opsclaw-cli", "runbook", "run", "DLQ backlog", "--target", "p::e::t"],
+            &[
+                "opsclaw-cli",
+                "runbook",
+                "run",
+                "DLQ backlog",
+                "--target",
+                "p::e::t",
+                "--var",
+                "queue=orders-dlq",
+                "--var",
+                "strategy=requeue",
+                "--json",
+            ],
             &["opsclaw-cli", "--config", "/tmp/x.toml", "doctor"],
+            &["opsclaw-cli", "memory", "recall", "payments pod"],
+            &["opsclaw-cli", "memory", "recall", "payments pod", "--limit", "5", "--json"],
+            &["opsclaw-cli", "memory", "store", "the payments pod OOMs above 400 req/s"],
+            &["opsclaw-cli", "memory", "store", "some fact", "--speaker", "dcp"],
+            &["opsclaw-cli", "memory", "forget", "some-id"],
+            &["opsclaw-cli", "memory", "forget", "some free text query", "--reason", "wrong"],
+            &["opsclaw-cli", "chat"],
+            &["opsclaw-cli", "chat", "is prod healthy?"],
+            &["opsclaw-cli", "chat", "is prod healthy?", "--remote"],
+            &["opsclaw-cli", "status"],
+            &["opsclaw-cli", "status", "--json"],
+            &["opsclaw-cli", "approve", "00000000-0000-0000-0000-000000000000"],
+            &["opsclaw-cli", "deny", "00000000-0000-0000-0000-000000000000", "--json"],
+            &["opsclaw-cli", "login", "--remote", "https://gw.example.com"],
+            &["opsclaw-cli", "logout"],
+            &["opsclaw-cli", "whoami"],
+            &["opsclaw-cli", "ui"],
+            &["opsclaw-cli", "ui", "--tunnel", "op@bastion.example.com"],
+            &["opsclaw-cli", "estop", "--remote"],
+            &["opsclaw-cli", "estop", "--resume", "--remote"],
         ];
         for argv in cases {
             let result = Cli::try_parse_from(*argv);
@@ -436,5 +813,48 @@ mod tests {
     fn postmortem_requires_a_uuid_argument() {
         assert!(Cli::try_parse_from(["opsclaw-cli", "postmortem"]).is_err());
         assert!(Cli::try_parse_from(["opsclaw-cli", "postmortem", "not-a-uuid"]).is_err());
+    }
+
+    #[test]
+    fn runbook_run_requires_a_target() {
+        assert!(Cli::try_parse_from(["opsclaw-cli", "runbook", "run", "some-title"]).is_err());
+    }
+
+    #[test]
+    fn runbook_run_rejects_a_malformed_var() {
+        let result = Cli::try_parse_from([
+            "opsclaw-cli",
+            "runbook",
+            "run",
+            "t",
+            "--target",
+            "p::e::t",
+            "--var",
+            "no-equals-sign",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn approve_and_deny_require_a_uuid() {
+        assert!(Cli::try_parse_from(["opsclaw-cli", "approve"]).is_err());
+        assert!(Cli::try_parse_from(["opsclaw-cli", "approve", "not-a-uuid"]).is_err());
+        assert!(Cli::try_parse_from(["opsclaw-cli", "deny", "not-a-uuid"]).is_err());
+    }
+
+    #[test]
+    fn login_requires_remote() {
+        assert!(Cli::try_parse_from(["opsclaw-cli", "login"]).is_err());
+    }
+
+    #[test]
+    fn parse_var_splits_on_first_equals() {
+        assert_eq!(
+            parse_var("queue=orders-dlq").unwrap(),
+            ("queue".to_string(), "orders-dlq".to_string())
+        );
+        // A value containing '=' stays whole (split_once, not split).
+        assert_eq!(parse_var("k=a=b").unwrap(), ("k".to_string(), "a=b".to_string()));
+        assert!(parse_var("no-equals").is_err());
     }
 }

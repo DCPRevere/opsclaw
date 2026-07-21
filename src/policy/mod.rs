@@ -11,6 +11,8 @@
 //! module builds against it. Until the engine lands, `execute` fails CLOSED
 //! (blocks everything) — the safe direction.
 
+pub mod classify;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

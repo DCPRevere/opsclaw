@@ -2223,6 +2223,7 @@ dependencies = [
  "html2text",
  "jsonwebtoken",
  "rand 0.10.2",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

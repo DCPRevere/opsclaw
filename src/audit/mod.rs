@@ -6,6 +6,8 @@
 //! order is a breaking change to `verify` and needs deliberate migration.
 //! Chain implementation lands in Wave 2; the record shape is frozen here.
 
+pub mod chain;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

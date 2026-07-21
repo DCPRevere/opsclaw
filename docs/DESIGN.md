@@ -480,12 +480,15 @@ separate mock layer to drift.
 - **The harness must be unable to harm the host — a hard requirement, not a
   nicety.** A fault-injection scenario deliberately creates the fault it
   tests, so its blast radius must be bounded to the sandbox by construction:
-  (a) every resource a scenario can exhaust is a **size-capped mount inside
-  the container** (`--tmpfs /data:size=200m`), never the container's writable
-  layer — otherwise `df` inside an overlay container reports the *host*
-  filesystem and a "fill 90% of the disk" fault fills 90% of the host (this
-  is not hypothetical: an un-capped `/data` wedged the dev machine at 100%
-  during this build); (b) scenario containers are **force-reaped on every
+  (a) every resource a scenario can exhaust is **capped inside the sandbox**:
+  disk via size-capped mounts (`--tmpfs /data:size=200m`), never the
+  container's writable layer — otherwise `df` inside an overlay container
+  reports the *host* filesystem and a "fill 90% of the disk" fault fills 90%
+  of the host (not hypothetical: an un-capped `/data` wedged the dev machine
+  at 100% during this build) — and memory/CPU via `--memory`/`--cpus`, the
+  same escape by another door: a percentage-based stressor sizes itself off
+  `/proc/meminfo`, and an unlimited container sees the host's RAM (observed
+  as a ~50GB attempted allocation before the cap landed); (b) scenario containers are **force-reaped on every
   exit path** — normal, failure, and signal (a Ctrl-C'd parallel run is
   exactly how a ballooned container survives to hoard host disk); (c)
   fill-style scenarios carry an absolute ceiling and refuse rather than

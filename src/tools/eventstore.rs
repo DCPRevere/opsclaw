@@ -12,9 +12,6 @@ use crate::domain::RiskClass;
 use crate::tools::endpoint::get_json;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
-fn client() -> reqwest::Client {
-    crate::tools::endpoint::client()
-}
 
 /// Read events from a stream (most recent first, capped) — the
 /// synchroniser-lag diagnostic starting point (REMUNDO.md: "Synchroniser
@@ -71,7 +68,6 @@ impl Tool for ReadStreamTool {
         let count = args["count"].as_i64().unwrap_or(20);
         let (_, auth) = ctx.resolve_resource(resource)?;
         let result = get_json(
-            &client(),
             auth,
             self.name(),
             &format!("/streams/{stream}/head/backward/{count}?embed=body"),
@@ -132,7 +128,7 @@ impl Tool for ProjectionStatusTool {
             )
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
-        let result = get_json(&client(), auth, self.name(), &format!("/projection/{name}")).await?;
+        let result = get_json(auth, self.name(), &format!("/projection/{name}")).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }

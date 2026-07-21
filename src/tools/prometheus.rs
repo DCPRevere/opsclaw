@@ -10,9 +10,6 @@ use crate::domain::RiskClass;
 use crate::tools::endpoint::get_json;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
-fn client() -> reqwest::Client {
-    crate::tools::endpoint::client()
-}
 
 /// A single point-in-time PromQL evaluation.
 pub struct InstantQueryTool;
@@ -71,7 +68,7 @@ impl Tool for InstantQueryTool {
         if let Some(time) = args["time"].as_str() {
             path.push_str(&format!("&time={}", urlencode(time)));
         }
-        let result = get_json(&client(), auth, self.name(), &path).await?;
+        let result = get_json(auth, self.name(), &path).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -150,7 +147,7 @@ impl Tool for RangeQueryTool {
             urlencode(end),
             urlencode(step)
         );
-        let result = get_json(&client(), auth, self.name(), &path).await?;
+        let result = get_json(auth, self.name(), &path).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }

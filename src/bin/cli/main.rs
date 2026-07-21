@@ -754,11 +754,10 @@ async fn dispatch(
                 let value = read_secret_value(&name, from_env.as_deref(), from_file.as_deref())?;
                 let outcome = opsclaw::cli::secret_cmd::set(home, &name, &value)?;
                 println!(
-                    "{} store:{} — reference it from config as \"store:{}\"{}",
+                    "{} store:{n} — reference it from config as \"store:{n}\" (restart the \
+                     daemon to pick up the change)",
                     if outcome.replaced { "replaced" } else { "stored" },
-                    outcome.name,
-                    outcome.name,
-                    " (restart the daemon to pick up the change)",
+                    n = outcome.name,
                 );
             }
             SecretCommand::List { json } => {

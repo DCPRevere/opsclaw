@@ -500,6 +500,9 @@ mod tests {
                             name: "metrics".into(),
                             url: None, // no url -> endpoint registry skips it; fine for these tests
                             credential: None,
+                            username: None,
+                            ca_cert_path: None,
+                            insecure_tls: false,
                         }],
                     }],
                 }],

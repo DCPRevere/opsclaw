@@ -311,6 +311,19 @@ pub struct ResourceCfg {
     pub name: String,
     pub url: Option<String>,
     pub credential: Option<SecretRef>,
+    /// Set ⇒ HTTP basic auth: this username + `credential` as the password
+    /// (ECK Elasticsearch: `elastic` + the operator-generated password).
+    /// Unset ⇒ `credential` is a bearer token (the original behaviour).
+    pub username: Option<String>,
+    /// Extra trusted root CA (PEM file path) for this resource only — an
+    /// in-cluster ECK Elasticsearch presents a self-signed CA that must not
+    /// pollute global trust.
+    pub ca_cert_path: Option<PathBuf>,
+    /// Disable certificate verification for THIS resource. Loudly warned at
+    /// boot; acceptable only for a localhost port-forward hop where the
+    /// hostname can never match the cert. Never a default.
+    #[serde(default)]
+    pub insecure_tls: bool,
 }
 
 impl Config {

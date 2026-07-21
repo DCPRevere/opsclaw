@@ -48,18 +48,97 @@ use crate::tools::ToolError;
 
 /// A resolved endpoint credential — never a `SecretRef`. See module doc for
 /// why resolution happens outside `tools/`.
+///
+/// Carries its OWN pre-built HTTP client: TLS trust is a per-resource
+/// property (an in-cluster ECK Elasticsearch presents a self-signed CA a
+/// public ArgoCD does not), and a `reqwest::Client`'s TLS config is fixed
+/// at build time — so the client is constructed once here, at registry
+/// build, not per call and never shared across resources with different
+/// trust requirements.
 #[derive(Debug, Clone)]
 pub struct EndpointAuth {
     /// Already trimmed of a trailing slash.
     pub base_url: String,
     /// `None` for an endpoint with no auth configured (a local dev
-    /// prometheus, say) — not every resource requires a credential.
+    /// prometheus, say) — not every resource requires a credential. With
+    /// `username` unset this is a BEARER token; with `username` set it is
+    /// the basic-auth PASSWORD (ECK Elasticsearch's `elastic` user).
     pub token: Option<String>,
+    /// Set ⇒ HTTP basic auth (`username`:`token`) instead of bearer.
+    pub username: Option<String>,
+    /// The client every call against this endpoint uses.
+    pub client: reqwest::Client,
 }
 
 impl EndpointAuth {
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Self {
-        EndpointAuth { base_url: base_url.into().trim_end_matches('/').to_string(), token }
+        EndpointAuth {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            token,
+            username: None,
+            client: client(),
+        }
+    }
+
+    /// Switch this endpoint to HTTP basic auth: `username` + the existing
+    /// `token` as password.
+    pub fn with_basic_user(mut self, username: impl Into<String>) -> Self {
+        self.username = Some(username.into());
+        self
+    }
+
+    /// Rebuild the client with per-resource TLS trust: an extra root CA
+    /// (PEM file), and/or certificate-verification bypass. `insecure` is
+    /// for a dev/port-forward hop ONLY and is logged loudly at registry
+    /// build time by the caller — never the default for anything.
+    pub fn with_tls_options(
+        mut self,
+        ca_cert_path: Option<&std::path::Path>,
+        insecure: bool,
+    ) -> crate::Result<Self> {
+        if ca_cert_path.is_none() && !insecure {
+            return Ok(self); // default client already correct
+        }
+        let mut builder = client_builder();
+        if let Some(path) = ca_cert_path {
+            let pem = std::fs::read(path).map_err(|e| {
+                crate::Error::Config(format!("ca_cert_path {}: {e}", path.display()))
+            })?;
+            // reqwest tolerates PEM input containing zero certificates —
+            // which would silently trust NOTHING extra. Refuse that here so
+            // a wrong path/file fails at boot, not as a mystery TLS error
+            // at first use.
+            if !pem.windows(b"BEGIN CERTIFICATE".len()).any(|w| w == b"BEGIN CERTIFICATE") {
+                return Err(crate::Error::Config(format!(
+                    "ca_cert_path {} is not a valid PEM certificate (no BEGIN CERTIFICATE block)",
+                    path.display()
+                )));
+            }
+            let cert = reqwest::Certificate::from_pem(&pem).map_err(|e| {
+                crate::Error::Config(format!(
+                    "ca_cert_path {} is not a valid PEM certificate: {e}",
+                    path.display()
+                ))
+            })?;
+            builder = builder.add_root_certificate(cert);
+        }
+        if insecure {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        self.client = builder
+            .build()
+            .map_err(|e| crate::Error::Config(format!("endpoint TLS client build failed: {e}")))?;
+        Ok(self)
+    }
+
+    /// Apply this endpoint's auth scheme to a request: basic when a
+    /// username is set, bearer when only a token is, nothing otherwise.
+    fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match (&self.username, &self.token) {
+            (Some(user), password) => req.basic_auth(user, password.as_deref()),
+            (None, Some(token)) => req.bearer_auth(token),
+            (None, None) => req,
+        }
     }
 }
 
@@ -145,7 +224,22 @@ pub fn registry_from_config(
                     };
                     let mut fq = base.clone();
                     fq.resource = Some((resource.rtype, resource.name.clone()));
-                    registry.insert(&fq, EndpointAuth::new(url, token));
+                    let mut auth = EndpointAuth::new(url, token);
+                    if let Some(user) = &resource.username {
+                        auth = auth.with_basic_user(user);
+                    }
+                    if resource.insecure_tls {
+                        // Loud, once per offending resource, at boot — the
+                        // same "never a silent degrade" rule as FakeLlm.
+                        tracing::warn!(
+                            resource = %fq,
+                            "insecure_tls = true — certificate verification is DISABLED for \
+                             this resource; acceptable only for a localhost port-forward hop"
+                        );
+                    }
+                    auth = auth
+                        .with_tls_options(resource.ca_cert_path.as_deref(), resource.insecure_tls)?;
+                    registry.insert(&fq, auth);
                 }
             }
         }
@@ -160,16 +254,8 @@ pub fn registry_from_config(
 /// things), and a transport-level failure (connection refused, DNS,
 /// timeout) to `ToolError::Internal` with the standard do-not-retry framing
 /// — mirrors the executor-backed tools' error-splitting discipline exactly.
-pub async fn get_json(
-    client: &reqwest::Client,
-    auth: &EndpointAuth,
-    tool: &str,
-    path: &str,
-) -> Result<Value, ToolError> {
-    let mut req = client.get(format!("{}{path}", auth.base_url));
-    if let Some(token) = &auth.token {
-        req = req.bearer_auth(token);
-    }
+pub async fn get_json(auth: &EndpointAuth, tool: &str, path: &str) -> Result<Value, ToolError> {
+    let req = auth.apply_auth(auth.client.get(format!("{}{path}", auth.base_url)));
     let resp = req.send().await.map_err(|e| {
         ToolError::Internal(format!(
             "{tool} is temporarily unreachable ({e}) — do NOT retry it this turn"
@@ -195,16 +281,12 @@ pub async fn get_json(
 /// callers must not use this for anything that changes remote state; a
 /// mutation goes through `tools::executor::run_command`, never this helper.
 pub async fn post_json(
-    client: &reqwest::Client,
     auth: &EndpointAuth,
     tool: &str,
     path: &str,
     body: &Value,
 ) -> Result<Value, ToolError> {
-    let mut req = client.post(format!("{}{path}", auth.base_url)).json(body);
-    if let Some(token) = &auth.token {
-        req = req.bearer_auth(token);
-    }
+    let req = auth.apply_auth(auth.client.post(format!("{}{path}", auth.base_url)).json(body));
     let resp = req.send().await.map_err(|e| {
         ToolError::Internal(format!(
             "{tool} is temporarily unreachable ({e}) — do NOT retry it this turn"
@@ -224,14 +306,16 @@ pub async fn post_json(
         .map_err(|e| ToolError::Internal(format!("{tool} returned unparseable JSON: {e}")))
 }
 
-/// A `reqwest::Client` with a bounded per-request timeout — endpoint calls
-/// happen inside the agent tool loop (like `memory::hindsight`'s
+/// The shared client-builder base: a bounded per-request timeout — endpoint
+/// calls happen inside the agent tool loop (like `memory::hindsight`'s
 /// `READ_TIMEOUT`), so a hung backend must not stall the whole turn.
+fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().timeout(std::time::Duration::from_secs(10))
+}
+
+/// The default endpoint client (no extra trust, verification on).
 pub fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .expect("reqwest builds")
+    client_builder().build().expect("reqwest builds")
 }
 
 #[cfg(test)]
@@ -263,7 +347,7 @@ mod tests {
             .await;
 
         let result =
-            get_json(&client(), &auth(&server.uri(), Some("secret-token")), "es", "/health")
+            get_json(&auth(&server.uri(), Some("secret-token")), "es", "/health")
                 .await
                 .unwrap();
         assert_eq!(result["status"], "green");
@@ -284,7 +368,7 @@ mod tests {
         // succeeds with no token configured, proving the header is skipped
         // without erroring.
         let result =
-            get_json(&client(), &auth(&server.uri(), None), "es", "/health").await.unwrap();
+            get_json(&auth(&server.uri(), None), "es", "/health").await.unwrap();
         assert_eq!(result["ok"], true);
     }
 
@@ -298,7 +382,7 @@ mod tests {
             .await;
 
         let err =
-            get_json(&client(), &auth(&server.uri(), None), "es", "/health").await.unwrap_err();
+            get_json(&auth(&server.uri(), None), "es", "/health").await.unwrap_err();
         match err {
             ToolError::UserFacing(msg) => {
                 assert!(msg.contains("503"));
@@ -314,7 +398,7 @@ mod tests {
         // ordinary process — a reliable "nothing is listening here" target,
         // unlike dropping a MockServer (the OS can keep the socket usable
         // briefly after Drop, making that pattern flaky).
-        let err = get_json(&client(), &auth("http://127.0.0.1:1", None), "es", "/health")
+        let err = get_json(&auth("http://127.0.0.1:1", None), "es", "/health")
             .await
             .unwrap_err();
         match err {
@@ -337,7 +421,7 @@ mod tests {
 
         let body = serde_json::json!({"query": "up"});
         let result =
-            post_json(&client(), &auth(&server.uri(), Some("tok")), "prometheus", "/query", &body)
+            post_json(&auth(&server.uri(), Some("tok")), "prometheus", "/query", &body)
                 .await
                 .unwrap();
         assert_eq!(result["result"], serde_json::json!([]));
@@ -351,16 +435,89 @@ mod tests {
             .respond_with(ResponseTemplate::new(400).set_body_string("bad promql"))
             .mount(&server)
             .await;
-        let err = post_json(
-            &client(),
-            &auth(&server.uri(), None),
-            "prometheus",
-            "/query",
-            &serde_json::json!({}),
-        )
-        .await
-        .unwrap_err();
+        let err =
+            post_json(&auth(&server.uri(), None), "prometheus", "/query", &serde_json::json!({}))
+                .await
+                .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
+    }
+
+    #[tokio::test]
+    async fn basic_auth_sends_the_basic_header_not_bearer() {
+        let server = MockServer::start().await;
+        // base64("elastic:hunter2")
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .and(header("authorization", "Basic ZWxhc3RpYzpodW50ZXIy"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+
+        let a = auth(&server.uri(), Some("hunter2")).with_basic_user("elastic");
+        let result = get_json(&a, "es", "/health").await.unwrap();
+        assert_eq!(result["ok"], true);
+    }
+
+    #[test]
+    fn tls_options_missing_ca_file_is_a_config_error() {
+        let err = auth("https://es.local", None)
+            .with_tls_options(Some(std::path::Path::new("/does/not/exist.pem")), false)
+            .unwrap_err();
+        assert!(err.to_string().contains("ca_cert_path"), "{err}");
+    }
+
+    #[test]
+    fn tls_options_garbage_pem_is_a_config_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let pem = dir.path().join("ca.pem");
+        std::fs::write(&pem, "not a certificate").unwrap();
+        let err =
+            auth("https://es.local", None).with_tls_options(Some(&pem), false).unwrap_err();
+        assert!(err.to_string().contains("not a valid PEM"), "{err}");
+    }
+
+    #[test]
+    fn tls_options_insecure_builds_a_client() {
+        // Construction-level check only (wiremock has no TLS listener):
+        // the insecure client must build without error.
+        auth("https://localhost:9201", None).with_tls_options(None, true).unwrap();
+    }
+
+    #[test]
+    fn registry_from_config_wires_basic_auth_and_insecure_tls() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_d, store) = secret_store();
+        let ca = dir.path().join("absent.pem");
+        // insecure + username, no CA file (a CA path that doesn't exist is
+        // covered above as an error; here prove the happy wiring).
+        let _ = ca;
+        let config = config_from(
+            r#"
+            [[project]]
+            name = "remundo"
+            [[project.env]]
+            name = "sandbox"
+            [[project.env.target]]
+            name = "cluster"
+            kind = "local"
+            [[project.env.target.resource]]
+            type = "elasticsearch"
+            name = "logs"
+            url = "https://localhost:9201"
+            username = "elastic"
+            insecure_tls = true
+            "#,
+        );
+        let reg = registry_from_config(&config, &store).unwrap();
+        let target = FqTarget {
+            project: "remundo".into(),
+            env: "sandbox".into(),
+            target: "cluster".into(),
+            resource: Some((crate::domain::ResourceType::Elasticsearch, "logs".into())),
+        };
+        let a = reg.get(&target).expect("registered");
+        assert_eq!(a.username.as_deref(), Some("elastic"));
+        assert!(a.token.is_none(), "no credential declared — password absent, basic user only");
     }
 
     #[test]

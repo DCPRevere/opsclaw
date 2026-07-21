@@ -49,9 +49,6 @@ use crate::tools::endpoint::get_json;
 use crate::tools::executor::run_command;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
-fn client() -> reqwest::Client {
-    crate::tools::endpoint::client()
-}
 
 /// List applications and their sync/health status for the fleet (or a
 /// filtered subset).
@@ -93,7 +90,7 @@ impl Tool for ListAppsTool {
             ToolError::UserFacing("argocd_list_apps requires a \"resource\" argument".to_string())
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
-        let result = get_json(&client(), auth, self.name(), "/api/v1/applications").await?;
+        let result = get_json(auth, self.name(), "/api/v1/applications").await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -147,7 +144,7 @@ impl Tool for SyncStatusTool {
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
         let result =
-            get_json(&client(), auth, self.name(), &format!("/api/v1/applications/{app}")).await?;
+            get_json(auth, self.name(), &format!("/api/v1/applications/{app}")).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }

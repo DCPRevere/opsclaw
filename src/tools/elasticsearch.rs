@@ -10,9 +10,6 @@ use crate::domain::RiskClass;
 use crate::tools::endpoint::{get_json, post_json};
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
-fn client() -> reqwest::Client {
-    crate::tools::endpoint::client()
-}
 
 /// `_search` against an index or index pattern — the vocabulary for both
 /// read-model queries and log search (REMUNDO.md: same ES instance serves
@@ -77,7 +74,7 @@ impl Tool for ElasticsearchSearchTool {
             map.entry("size").or_insert(json!(size));
         }
         let result =
-            post_json(&client(), auth, self.name(), &format!("/{index}/_search"), &body).await?;
+            post_json(auth, self.name(), &format!("/{index}/_search"), &body).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -132,7 +129,7 @@ impl Tool for ElasticsearchIndexStatsTool {
             )
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
-        let result = get_json(&client(), auth, self.name(), &format!("/{index}/_stats")).await?;
+        let result = get_json(auth, self.name(), &format!("/{index}/_stats")).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -181,7 +178,7 @@ impl Tool for ElasticsearchClusterHealthTool {
             )
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
-        let result = get_json(&client(), auth, self.name(), "/_cluster/health").await?;
+        let result = get_json(auth, self.name(), "/_cluster/health").await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }

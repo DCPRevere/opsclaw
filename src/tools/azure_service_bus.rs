@@ -19,9 +19,6 @@ use crate::domain::RiskClass;
 use crate::tools::endpoint::get_json;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
-fn client() -> reqwest::Client {
-    crate::tools::endpoint::client()
-}
 
 /// Active + dead-letter message counts for a queue.
 pub struct QueueDepthTool;
@@ -75,7 +72,7 @@ impl Tool for QueueDepthTool {
         })?;
         let (_, auth) = ctx.resolve_resource(resource)?;
         let result =
-            get_json(&client(), auth, self.name(), &format!("/{queue}?api-version=2021-05"))
+            get_json(auth, self.name(), &format!("/{queue}?api-version=2021-05"))
                 .await?;
         Ok(ToolResult { output: result.to_string() })
     }
@@ -140,7 +137,6 @@ impl Tool for PeekMessagesTool {
         let sub_path =
             if dead_letter { format!("{queue}/$deadletterqueue") } else { queue.to_string() };
         let result = get_json(
-            &client(),
             auth,
             self.name(),
             &format!("/{sub_path}/messages/head?api-version=2021-05&count={count}"),

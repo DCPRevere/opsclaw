@@ -75,7 +75,20 @@ pub enum ChainError {
 /// Walk records (must be in seq order, starting at the chain head) and verify
 /// every link. Empty input verifies trivially.
 pub fn verify<'a>(records: impl IntoIterator<Item = &'a AuditRecord>) -> Result<u64, ChainError> {
-    let mut prev: Option<&AuditRecord> = None;
+    verify_from(None, records)
+}
+
+/// Verify a SUBSEQUENCE of the chain against a trusted tail: `records` must
+/// continue directly from `tail` (or from genesis when `tail` is `None`).
+/// This is what paged verification needs — `verify()` on page 2 of an intact
+/// chain would fail, because with no tail the first record is required to be
+/// the genesis record (seq 1, zero prev-hash). `tail` itself is trusted as
+/// already verified and is not re-counted.
+pub fn verify_from<'a>(
+    tail: Option<&'a AuditRecord>,
+    records: impl IntoIterator<Item = &'a AuditRecord>,
+) -> Result<u64, ChainError> {
+    let mut prev: Option<&AuditRecord> = tail;
     let mut count = 0u64;
     for r in records {
         let (expected_seq, expected_prev) = match prev {
@@ -132,6 +145,34 @@ mod tests {
             out.push(sealed);
         }
         out
+    }
+
+    #[test]
+    fn verify_from_accepts_a_mid_chain_page_against_its_tail() {
+        let full = chain(&["a", "b", "c", "d", "e"]);
+        // Page boundary after record 2: page 2 continues from record 2's tail.
+        let (page1, page2) = full.split_at(2);
+        assert_eq!(verify(page1.iter()).unwrap(), 2);
+        assert_eq!(verify_from(page1.last(), page2.iter()).unwrap(), 3);
+        // Plain verify on page 2 must still refuse — it is not a chain head.
+        assert!(matches!(verify(page2.iter()), Err(ChainError::BadSeq { seq: 3, expected: 1 })));
+    }
+
+    #[test]
+    fn verify_from_detects_a_splice_at_the_page_boundary() {
+        let full = chain(&["a", "b", "c"]);
+        let forged_tail = seal(record(2, "tampered"), Some(&full[0])).unwrap();
+        // Page 2 doesn't link from the forged tail's hash.
+        assert!(matches!(
+            verify_from(Some(&forged_tail), full[2..].iter()),
+            Err(ChainError::BrokenLink { seq: 3 })
+        ));
+    }
+
+    #[test]
+    fn verify_from_none_is_exactly_verify() {
+        let full = chain(&["a", "b"]);
+        assert_eq!(verify_from(None, full.iter()).unwrap(), verify(full.iter()).unwrap());
     }
 
     #[test]

@@ -41,7 +41,7 @@ sqlx = { version = "0.9", default-features = false, features = [
 ] }
 
 # HTTP client (LLM providers, Hindsight, Telegram, endpoint tools)
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "form", "query"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "form", "query", "cookies"] }
 url = "2"
 html2text = "0.17"
 

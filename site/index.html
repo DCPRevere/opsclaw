@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpsClaw — an SRE agent your audit log can vouch for</title>
+<meta name="description" content="OpsClaw is a self-hosted autonomous SRE agent: a single Rust daemon per team that watches your infrastructure, diagnoses faults, and acts only within the autonomy you grant — every command risk-classified, gated, and hash-chain audited.">
+<style>
+  :root {
+    --bg: #0f1115; --fg: #e6e6e6; --dim: #9aa3ad; --line: #262b33;
+    --accent: #e8a33d; --card: #161a20; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #fcfcfa; --fg: #1c1e21; --dim: #5c6570; --line: #e3e1da; --accent: #b06d10; --card: #f4f2ec; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 46rem; margin: 0 auto; padding: 0 1.25rem 5rem; }
+  header { padding: 4.5rem 0 3rem; }
+  h1 { font-size: 2.4rem; line-height: 1.15; letter-spacing: -0.02em; }
+  h1 .claw { color: var(--accent); }
+  .tagline { margin-top: 1rem; font-size: 1.2rem; color: var(--dim); max-width: 38rem; }
+  h2 { font-size: 1.05rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--accent); margin: 3.2rem 0 1rem; }
+  p { margin-bottom: 1rem; }
+  p + p { margin-top: -0.25rem; }
+  section p, section li { color: var(--fg); }
+  .dim { color: var(--dim); }
+  code, pre { font-family: var(--mono); font-size: 0.88em; }
+  code { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 0.1em 0.35em; }
+  pre { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.2rem; overflow-x: auto; margin: 1.2rem 0; }
+  pre code { background: none; border: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.95rem; }
+  th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; white-space: nowrap; }
+  td:first-child { font-family: var(--mono); font-size: 0.85em; white-space: nowrap; }
+  ul { padding-left: 1.2rem; margin-bottom: 1rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--accent); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 0.8rem; margin: 1.2rem 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.1rem; }
+  .card b { display: block; margin-bottom: 0.3rem; }
+  .card p { color: var(--dim); font-size: 0.92rem; margin: 0; }
+  footer { margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--dim); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Ops<span class="claw">Claw</span></h1>
+    <p class="tagline">A self-hosted SRE agent that watches your
+    infrastructure, diagnoses faults, and acts only within the autonomy you
+    grant — with every command risk-classified, gated, and written to a
+    hash-chained audit log.</p>
+  </header>
+
+  <section>
+    <h2>What it is</h2>
+    <p>One team runs one daemon: a single Rust binary that owns the
+    heartbeat loop, the incident lifecycle, the approval queue, a shared
+    team memory, and the audit chain. Your team reaches it through the web
+    UI it serves (an installable PWA with push to your lock screen),
+    Telegram, or the CLI. It is an installed product — your infrastructure
+    credentials live on your host, and there is deliberately no hosted
+    console that can reach into your deployment.</p>
+  </section>
+
+  <section>
+    <h2>Autonomy is a dial, not a promise</h2>
+    <table>
+      <tr><th>level</th><th>what the agent may do</th></tr>
+      <tr><td>observe</td><td>Read-only. Every mutation it would have run is written to a dry-run log instead — you see what it <em>would</em> do before letting it.</td></tr>
+      <tr><td>suggest</td><td>Mutations queue as approval requests — full context, decidable from a phone. The default.</td></tr>
+      <tr><td>act_on_known</td><td>Executes on its own only when a runbook you wrote matches — human knowledge as the boundary of automation.</td></tr>
+      <tr><td>auto</td><td>Executes routine and moderate-risk commands autonomously.</td></tr>
+    </table>
+    <p>Destructive commands never auto-execute at any level, and a
+    hard-block list is refused always. Autonomy resolves per target — prod
+    can sit at <code>suggest</code> while staging runs <code>auto</code>.</p>
+  </section>
+
+  <section>
+    <h2>Built so you can trust the log</h2>
+    <div class="cards">
+      <div class="card"><b>One choke point</b><p>Every remote command — ssh, kubectl, an ArgoCD rollback — passes through a single policy gate. No code path reaches an executor around it.</p></div>
+      <div class="card"><b>Risk classified in code</b><p>Pattern-based classification decides what a command is. The model never decides its own permissions.</p></div>
+      <div class="card"><b>Hash-chained audit</b><p>Append-only, sealed on both sides of execution, verifiable with <code>opsclaw audit verify</code>. Secrets are scrubbed before anything is persisted.</p></div>
+      <div class="card"><b>E-stop that works</b><p>A sentinel file the CLI writes directly — no daemon round-trip — halts everything, even a wedged daemon.</p></div>
+      <div class="card"><b>Approvals run verbatim</b><p>Approving executes the stored command exactly — never a fresh interpretation of “yes, do it”.</p></div>
+      <div class="card"><b>Dead-man heartbeat</b><p>An internal watchdog catches a stalled loop; an external heartbeat pages you when the daemon itself goes silent.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Install</h2>
+    <p>The standard install is a docker-compose file — the daemon plus a
+    pinned memory backend — and a ten-minute onboarding:</p>
+    <pre><code>opsclaw-cli onboard        # wizard: team, targets, credentials, VAPID keys
+opsclaw-cli doctor         # probe every target, verify the wiring
+opsclaw                    # run the daemon</code></pre>
+    <p>Targets in v1: ssh (jump hosts included), local, kubernetes, cloud.
+    Endpoint tools for Elasticsearch, Prometheus, ArgoCD, Azure Service
+    Bus, and EventStore/KurrentDB ship enabled; more sit behind the same
+    trait. Run it adjacent to what it watches — a bastion or ops host —
+    so it can report a dead cluster from outside; an in-cluster Helm chart
+    exists for teams that want it.</p>
+  </section>
+
+  <footer>
+    <p>OpsClaw is proprietary software, currently pre-release. Docs and
+    downloads will appear here with the first tagged release.</p>
+  </footer>
+</main>
+</body>
+</html>

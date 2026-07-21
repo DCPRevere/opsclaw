@@ -1,15 +1,18 @@
-//! Memory: retain / recall / reflect, delegated to a self-hosted Hindsight
-//! service (the SOLE backend — one bank per household, fully SHARED across the
-//! household's members with no per-member visibility filter; facts are framed
-//! with the speaker's name so a pooled first-person statement stays anchored to
-//! the right person; see `hindsight`). Without `HINDSIGHT_URL`, memory is an
-//! honest no-op: there is deliberately no in-process fallback, and the tools
-//! tell the user so via `is_enabled`.
+//! Team memory via Hindsight (adapted from gianna's `src/memory/{mod,hindsight}.rs`
+//! — see `hindsight` for the client-level tenancy/mission changes). OpsClaw is
+//! single-tenant (DESIGN §1): one daemon, one team, one shared Hindsight bank.
+//! There is no per-operator visibility filter — every operator and the agent
+//! itself read and write the same bank — but every retained fact is framed
+//! with its source so a pooled statement stays attributable: `"{speaker} said:
+//! …"` for something an operator or the agent said, `"scan of {fq_target}
+//! observed: …"` for a passive finding from a heartbeat scan. Without
+//! `HINDSIGHT_URL`, memory is an honest no-op: there is deliberately no
+//! in-process fallback, and tools tell the operator so via `is_enabled`
+//! instead of silently pretending to remember.
 
 pub mod hindsight;
 
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::Result;
 
@@ -22,16 +25,39 @@ pub struct MemoryRecord {
     pub fact: String,
 }
 
-/// Whether a message should be considered for fact extraction. We skip:
-/// - pure questions (they're queries, not durable facts about the family);
-/// - doctrinal/teaching queries (a weak extractor can invent a doctrinal
-///   assertion from them, which must never enter memory — cited-only).
+/// Whether a message should be considered for fact extraction. Adapted from
+/// gianna's household filter (which skipped questions and doctrinal queries)
+/// for SRE content. We skip:
 ///
-/// Deterministic + cheap (no LLM call). Errs toward NOT retaining ambiguous
-/// queries; genuine statements ("my wife is Catherine") always pass.
+/// - **pure questions** — they're queries, not durable operational facts
+///   ("is the payments pod healthy?" carries nothing to remember);
+/// - **bare control-flow acknowledgements** — "yes", "approve", "ok" and
+///   similar turn-taking noise from the approval/chat flow carry no fact on
+///   their own;
+/// - **content that looks like a secret** — long base64/hex runs, a PEM
+///   private-key block, or a bearer/API token shape. This is defence in
+///   depth, NOT the primary control: the scrubber (policy layer, DESIGN §4)
+///   is what's actually relied on to keep secrets out of tool output and
+///   logs. A memory store is an especially bad place for a credential to
+///   leak into, though — it is long-lived, gets recalled back into future
+///   prompts, and Hindsight's own LLM extractor sees the raw text — so this
+///   filter drops the retain outright rather than trust redaction alone.
+///
+/// Deliberately DOES retain genuine operational statements: target quirks
+/// ("the payments pod OOMs above 400 req/s"), incident resolutions ("restarting
+/// the connection pool fixed it"), and operator preferences ("dcp wants
+/// approval for anything touching prod DNS"). Deterministic + cheap (no LLM
+/// call). Errs toward NOT retaining ambiguous input; genuine statements always
+/// pass.
 pub fn should_retain(message: &str) -> bool {
     let m = message.trim();
     if m.is_empty() {
+        return false;
+    }
+    if looks_like_secret(m) {
+        return false;
+    }
+    if is_bare_control_answer(m) {
         return false;
     }
     let lower = m.to_lowercase();
@@ -46,27 +72,6 @@ pub fn should_retain(message: &str) -> bool {
     .iter()
     .any(|q| lower.starts_with(q));
 
-    // Doctrinal / teaching content — never store as a household fact, even if
-    // phrased as a statement ("the Church teaches that…").
-    let doctrinal = [
-        "church teach",
-        "the church say",
-        "catechism",
-        "is it a sin",
-        "is it sinful",
-        "mortal sin",
-        "venial sin",
-        "magisterium",
-        "doctrine",
-        "what does the church",
-        "according to the church",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-
-    if doctrinal {
-        return false;
-    }
     // Skip pure questions; keep statements (even if they contain a '?' mid-text,
     // a leading question word is the stronger signal).
     if (ends_question || opens_question) && !looks_like_statement(&lower) {
@@ -75,28 +80,35 @@ pub fn should_retain(message: &str) -> bool {
     true
 }
 
-/// Gate for ONBOARDING turns. Deliberately LENIENT: a user can volunteer
-/// anything mid-setup ("one on the way", "Catherine and I pray for the day's
-/// saint") and it should reach memory — the extraction LLM decides what is
-/// actually memorable. The only thing filtered out is the pure control answer
-/// ("yes please", "7am", "Sunday"): structured data that lands in the
-/// household record, where retention would just feed the extractor noise.
-pub fn carries_family_fact(message: &str) -> bool {
-    should_retain(message) && !is_bare_control_answer(message)
-}
-
 fn looks_like_statement(lower: &str) -> bool {
-    ["remember ", "my ", "our ", "we are", "we're", "i am", "i'm", "she is", "he is"]
-        .iter()
-        .any(|s| lower.contains(s))
+    [
+        "remember that",
+        "the issue was",
+        "root cause",
+        "we found",
+        "turns out",
+        "always ",
+        "never ",
+        "known issue",
+        "workaround",
+        "prefers",
+        "wants approval",
+        "i am",
+        "i'm",
+        "it is",
+        "it's",
+    ]
+    .iter()
+    .any(|s| lower.contains(s))
 }
 
-/// True when every word is setup-flow furniture (assent, numbers, clock times,
-/// weekdays, dayparts) — an answer that carries nothing beyond the question it
-/// answers. Any word outside that vocabulary means substance: retain it.
+/// True when the message is pure control-flow acknowledgement in the
+/// approval/chat loop ("yes", "approve", "ok", "no", "ack") — SRE's analog of
+/// gianna's onboarding "bare control answer": an assent/refusal that answers a
+/// prior prompt but carries no fact of its own. Any word outside that small
+/// vocabulary means substance: retain it.
 fn is_bare_control_answer(message: &str) -> bool {
     const CONTROL: &[&str] = &[
-        // assent / refusal / politeness
         "yes",
         "no",
         "yeah",
@@ -110,141 +122,98 @@ fn is_bare_control_answer(message: &str) -> bool {
         "okay",
         "sure",
         "fine",
-        "sounds",
         "good",
-        "lovely",
-        "grand",
-        "perfect",
-        "not",
-        "now",
-        "skip",
-        "none",
-        "nothing",
-        "pick",
-        "choose",
-        "whatever",
-        "whenever",
-        "suits",
-        "anytime",
-        // numbers and time furniture
-        "zero",
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-        "six",
-        "seven",
-        "eight",
-        "nine",
-        "ten",
-        "half",
-        "quarter",
-        "past",
-        "to",
-        "at",
-        "am",
-        "pm",
-        "oclock",
-        "o'clock",
-        "around",
-        "about",
-        "ish",
-        "sharp",
-        // dayparts and flow words
-        "morning",
-        "evening",
-        "night",
-        "afternoon",
-        "noon",
-        "midday",
-        "midnight",
-        "today",
-        "tomorrow",
-        "daily",
-        "weekly",
-        "review",
-        "examen",
-        "time",
-        "day",
+        "approve",
+        "approved",
+        "deny",
+        "denied",
+        "reject",
+        "rejected",
+        "ack",
+        "acked",
+        "acknowledge",
+        "acknowledged",
+        "confirm",
+        "confirmed",
+        "go",
+        "ahead",
+        "proceed",
+        "cancel",
+        "cancelled",
+        "stop",
+        "continue",
         "the",
         "a",
         "an",
         "and",
         "or",
-        "of",
-        "us",
-        "me",
-        "just",
-        "that",
-        "thats",
         "it",
-        "its",
-        "is",
-        "works",
-        "on",
-        "in",
-        "for",
-        // weekdays
-        "monday",
-        "tuesday",
-        "wednesday",
-        "thursday",
-        "friday",
-        "saturday",
-        "sunday",
-        "mon",
-        "tue",
-        "wed",
-        "thu",
-        "fri",
-        "sat",
-        "sun",
-        "sundays",
-        "mondays",
-        "tuesdays",
-        "wednesdays",
-        "thursdays",
-        "fridays",
-        "saturdays",
+        "that",
+        "this",
     ];
     message
         .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric() && c != ':' && c != '\'')
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
-        .all(|w| w.chars().all(|c| c.is_ascii_digit() || c == ':') || CONTROL.contains(&w))
+        .all(|w| CONTROL.contains(&w))
 }
 
-/// The memory service: a thin facade over the Hindsight backend.
+/// Defence-in-depth secret-shape filter: content that structurally resembles a
+/// credential never reaches the memory store, independent of the scrubber.
+/// Deliberately conservative (pattern-based, not entropy-scored) to avoid
+/// false negatives at the cost of the occasional false positive — a dropped
+/// retain is cheap; a leaked credential sitting in a long-lived, recalled-into
+/// prompts memory store is not.
+fn looks_like_secret(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    if lower.contains("-----begin") && lower.contains("private key") {
+        return true;
+    }
+    if lower.contains("bearer ") {
+        // "bearer <token>" — a live credential, not a fact about one.
+        return true;
+    }
+    // A long contiguous run of base64/hex-alphabet characters (>= 32 chars) is
+    // treated as an embedded secret (API key, token, encoded credential),
+    // regardless of surrounding prose.
+    message.split(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')).any(
+        |tok| {
+            tok.chars().count() >= 32
+                && tok
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        },
+    )
+}
+
+/// The memory service: a thin facade over the Hindsight backend, scoped to
+/// this team's single bank.
 pub struct Memory {
-    /// Hindsight is the sole backend. None => memory is a no-op (CI/fakes, or a
-    /// prod deploy that hasn't set HINDSIGHT_URL yet). There is deliberately no
-    /// in-process store: its extraction was unreliable and must never be used.
+    /// Hindsight is the sole backend. None => memory is a no-op (fakes mode,
+    /// or a deploy that hasn't set HINDSIGHT_URL yet). There is deliberately
+    /// no in-process store: gianna's experience is that in-process extraction
+    /// is unreliable and must never be used.
     hindsight: Option<Arc<hindsight::HindsightClient>>,
-    /// Tracks every in-flight detached retain (`retain_detached`). On deploy the
-    /// app is SIGTERM'd mid-work (Watchtower recreates the container every
-    /// release), and a background retain in flight would otherwise silently drop
-    /// a just-learned fact. The shutdown path calls `drain_detached` to wait
-    /// (bounded) for these to finish before the process exits.
+    /// Tracks every in-flight detached retain (`retain_detached`). A deploy
+    /// SIGTERMs the daemon mid-work, and a background retain in flight would
+    /// otherwise silently drop a just-learned fact. The shutdown path calls
+    /// `drain_detached` to wait (bounded) for these to finish before the
+    /// process exits.
     detached: tokio_util::task::TaskTracker,
 }
 
 impl Default for Memory {
     fn default() -> Self {
-        Self::new()
+        Self::disabled()
     }
 }
 
 impl Memory {
-    /// Construct with no backend (no-op memory; tests/fakes).
-    pub fn new() -> Self {
-        Self { hindsight: None, detached: tokio_util::task::TaskTracker::new() }
-    }
-
-    /// No backend attached — the honest no-op (fakes mode). Kept as the frozen
-    /// facade entry point; equivalent to `new()`.
+    /// No backend attached — the honest no-op (fakes mode). Frozen facade entry
+    /// point: tools call `is_enabled()` and tell the operator the truth rather
+    /// than fake a save.
     pub fn disabled() -> Self {
-        Self::new()
+        Self { hindsight: None, detached: tokio_util::task::TaskTracker::new() }
     }
 
     /// Whether a real memory backend is configured. Tools consult this so the
@@ -255,13 +224,14 @@ impl Memory {
     }
 
     /// Cheap health probe for the deep readiness check (`/ready?deep=1`). When a
-    /// Hindsight backend is configured, ping its `GET /health`; the container
-    /// healthcheck uses this so a Hindsight outage marks the app not-ready
-    /// instead of leaving monitors green while every chat turn hangs on it. When
-    /// no backend is configured (fakes/CI, or a deploy that hasn't set
+    /// Hindsight backend is configured, ping its `GET /health`; the daemon
+    /// healthcheck uses this so a Hindsight outage marks the daemon not-ready
+    /// instead of leaving monitors green while every recall hangs on it. When no
+    /// backend is configured (fakes mode, or a deploy that hasn't set
     /// HINDSIGHT_URL) memory is a deliberate no-op, so there is nothing to probe
-    /// — that is reported as healthy: readiness must not fail on an intentionally
-    /// disabled dependency (config.rs refuses to boot LIVE without one anyway).
+    /// — that is reported as healthy: readiness must not fail on an
+    /// intentionally disabled dependency (config.rs refuses to boot LIVE
+    /// without one anyway).
     pub async fn health(&self) -> Result<()> {
         match &self.hindsight {
             Some(h) => h.health().await,
@@ -270,124 +240,135 @@ impl Memory {
     }
 
     /// Attach a Hindsight backend (builder-style). When set, it handles all
-    /// retain/recall/reflect.
+    /// retain/recall/reflect against this team's single bank.
     pub fn with_hindsight(mut self, client: Arc<hindsight::HindsightClient>) -> Self {
         self.hindsight = Some(client);
         self
     }
 
-    /// Store an explicit note the model chose to keep (the `remember` tool). We
-    /// hand Hindsight the RAW text and let its extractor decompose it — we do not
-    /// pre-summarise. A content-derived `document_id` makes re-saving the same
-    /// note upsert rather than duplicate.
-    pub async fn store_fact(
-        &self,
-        household_id: Uuid,
-        speaker: Option<&str>,
-        _sender: Option<Uuid>,
-        fact: &str,
-    ) -> Result<()> {
+    /// Store an explicit note the agent or an operator chose to keep (a
+    /// `remember` tool). We hand Hindsight the RAW text and let its extractor
+    /// decompose it — we do not pre-summarise. A content-derived `document_id`
+    /// makes re-saving the same note upsert rather than duplicate.
+    pub async fn store_fact(&self, speaker: &str, fact: &str) -> Result<()> {
         // Hindsight is the ONLY memory backend (it does its own extraction +
-        // reconciliation). Without it, memory is a no-op. Production must set
-        // HINDSIGHT_URL for Gianna to remember anything.
+        // reconciliation). Without it, memory is a no-op. Live mode must set
+        // HINDSIGHT_URL for OpsClaw to remember anything (config.rs refuses to
+        // boot live otherwise).
         match &self.hindsight {
             Some(h) => {
+                let framed = frame_said(speaker, fact);
                 let opts = hindsight::RetainOpts {
-                    document_id: Some(doc_id(household_id, "note", fact)),
+                    document_id: Some(doc_id("note", &framed)),
                     // Receipt time as the event anchor: strictly better than None
                     // (which disables temporal retrieval) and always available.
                     timestamp: Some(now_rfc3339()),
-                    context: Some("explicit note Gianna was asked to remember".into()),
+                    context: Some("explicit note the agent was asked to remember".into()),
                 };
-                h.retain(household_id, speaker, fact, &opts).await
+                h.retain(&framed, &opts).await
             }
             None => Ok(()),
         }
     }
 
-    /// Erase the household's ENTIRE remote memory (GDPR / PRIVACY.md §6). Errors
-    /// propagate — account deletion must not claim success while the remote bank
-    /// survives. No-op when Hindsight isn't configured (nothing was stored).
-    pub async fn erase(&self, household_id: Uuid) -> Result<()> {
+    /// Erase the team's ENTIRE remote memory. Errors propagate — a wipe must
+    /// not claim success while the remote bank survives. No-op when Hindsight
+    /// isn't configured (nothing was stored).
+    pub async fn erase(&self) -> Result<()> {
         match &self.hindsight {
-            Some(h) => h.delete_bank(household_id).await,
+            Some(h) => h.delete_bank().await,
             None => Ok(()),
         }
     }
 
-    /// `speaker` (the member's display name) is woven into the stored fact so a
-    /// shared, household-wide bank can anchor first-person statements to the
-    /// right person; `sender` is kept as provenance. Memory is fully shared —
-    /// there is no per-member read visibility.
-    pub async fn retain(
-        &self,
-        household_id: Uuid,
-        speaker: Option<&str>,
-        sender: Option<Uuid>,
-        message: &str,
-    ) -> Result<()> {
-        // Only retain genuine user statements. Questions and doctrinal queries
-        // carry no durable family fact, and a weak extractor can turn a doctrinal
-        // QUESTION into a stored (uncited, possibly wrong) doctrinal ASSERTION —
-        // which would back-door the cited-only doctrine guardrail. Skip them.
+    /// Retain a conversational turn. `speaker` is the operator's name, or
+    /// `"agent"` for something OpsClaw itself asserted — woven into the stored
+    /// fact ("{speaker} said: …") so the shared, team-wide bank can anchor
+    /// first-person statements to the right source. Memory is fully shared —
+    /// there is no per-operator read visibility.
+    pub async fn retain(&self, speaker: &str, message: &str) -> Result<()> {
+        // Only retain genuine operational statements. Questions and bare
+        // control-flow acks carry no durable fact — skip them (see
+        // `should_retain` for the reasoning, including the secret-shape
+        // defence-in-depth layer).
         if !should_retain(message) {
-            // Logged so "why didn't Gianna remember X?" is answerable: the gate,
-            // not the backend, dropped it. Length only (no message text → PII).
-            tracing::debug!(%household_id, len = message.chars().count(), "memory.retain skipped (not a durable statement)");
+            // Logged so "why didn't OpsClaw remember X?" is answerable: the
+            // gate, not the backend, dropped it. Length only (no message text
+            // — may carry operational detail or, per the filter, a secret).
+            tracing::debug!(
+                speaker,
+                len = message.chars().count(),
+                "memory.retain skipped (not a durable statement)"
+            );
             return Ok(());
         }
-        // Hindsight extracts + reconciles facts itself — hand it the raw message.
+        // Hindsight extracts + reconciles facts itself — hand it the raw,
+        // attribution-framed message.
         if let Some(h) = &self.hindsight {
-            let _ = sender; // provenance lives in the speaker frame, not a tag
+            let framed = frame_said(speaker, message);
             let opts = hindsight::RetainOpts {
-                // Stable per-(member,message) id so re-sending the same statement
-                // upserts rather than duplicating.
-                document_id: Some(doc_id(household_id, "msg", message)),
+                // Stable per-(speaker,message) id so re-sending the same
+                // statement upserts rather than duplicating.
+                document_id: Some(doc_id("msg", &framed)),
                 // Receipt time as the event anchor (see store_fact): omitting it
                 // disables Hindsight's temporal retrieval; Utc::now() costs nothing.
                 timestamp: Some(now_rfc3339()),
-                context: Some("household conversation with Gianna".into()),
+                context: Some("operator chat with OpsClaw".into()),
             };
-            h.retain(household_id, speaker, message, &opts).await?;
+            h.retain(&framed, &opts).await?;
+        }
+        Ok(())
+    }
+
+    /// Retain a passive scan observation: `fq_target` is the fully-qualified
+    /// target the finding came from (e.g. `remundo::prod::cluster`), `finding`
+    /// the raw observed content. Framed as "scan of {fq_target} observed: …" —
+    /// distinct from `retain`'s "{speaker} said: …" — so a heartbeat's passive
+    /// finding is never confused with something an operator or the agent
+    /// asserted. Goes through the same `should_retain` filter (a scan can
+    /// surface log lines that happen to contain a secret shape).
+    pub async fn retain_observation(&self, fq_target: &str, finding: &str) -> Result<()> {
+        let framed = frame_observed(fq_target, finding);
+        if !should_retain(&framed) {
+            tracing::debug!(
+                fq_target,
+                len = finding.chars().count(),
+                "memory.retain_observation skipped"
+            );
+            return Ok(());
+        }
+        if let Some(h) = &self.hindsight {
+            let opts = hindsight::RetainOpts {
+                document_id: Some(doc_id("scan", &framed)),
+                timestamp: Some(now_rfc3339()),
+                context: Some("scan finding".into()),
+            };
+            h.retain(&framed, &opts).await?;
         }
         Ok(())
     }
 
     /// Fire-and-forget retain: spawn a background task that retains and retries
-    /// on failure, then return immediately so a slow Hindsight write never blocks
-    /// the user's reply. The reply does NOT depend on the retain result (it is
-    /// discarded; failures were already only `warn!`-logged), so detaching it is
-    /// safe — but because *remembering matters*, the background task retries (3
-    /// attempts, exponential backoff) before giving up. Owns its arguments so the
-    /// task can outlive the caller; `self` is held as `Arc<Memory>` everywhere
-    /// (AppState, Agent), which is cheap to clone.
+    /// on failure, then return immediately so a slow Hindsight write never
+    /// blocks the caller (e.g. a chat reply or a scan tick). The result is
+    /// discarded (failures were already only `warn!`-logged), so detaching it
+    /// is safe — but because *remembering matters*, the background task
+    /// retries (3 attempts, exponential backoff 500ms→2s→8s) before giving up.
+    /// Owns its arguments so the task can outlive the caller; `self` is held as
+    /// `Arc<Memory>` everywhere it's shared, which is cheap to clone.
     ///
-    /// Use this for pure best-effort per-turn writes. Do NOT use it where a later
-    /// step depends on the retain having completed (e.g. `configure`, which
-    /// 404-skips on a not-yet-created bank): keep those synchronous.
-    pub fn retain_detached(
-        self: &Arc<Self>,
-        household_id: Uuid,
-        speaker: Option<String>,
-        sender: Option<Uuid>,
-        message: String,
-    ) {
-        self.retain_detached_with_backoff(
-            household_id,
-            speaker,
-            sender,
-            message,
-            std::time::Duration::from_millis(500),
-        );
+    /// Use this for pure best-effort per-turn writes. Do NOT use it where a
+    /// later step depends on the retain having completed (e.g. `configure`,
+    /// which 404-skips on a not-yet-created bank): keep those synchronous.
+    pub fn retain_detached(self: &Arc<Self>, speaker: String, message: String) {
+        self.retain_detached_with_backoff(speaker, message, std::time::Duration::from_millis(500));
     }
 
     /// Backoff base extracted so tests can drive the retry path with a tiny delay
-    /// (no real 2.5s wait) while production keeps the 500ms→2s→… schedule.
+    /// (no real 2.5s wait) while production keeps the 500ms→2s→8s schedule.
     fn retain_detached_with_backoff(
         self: &Arc<Self>,
-        household_id: Uuid,
-        speaker: Option<String>,
-        sender: Option<Uuid>,
+        speaker: String,
         message: String,
         initial_delay: std::time::Duration,
     ) {
@@ -399,10 +380,10 @@ impl Memory {
         self.detached.spawn(async move {
             let mut delay = initial_delay;
             for attempt in 1..=3u32 {
-                match me.retain(household_id, speaker.as_deref(), sender, &message).await {
+                match me.retain(&speaker, &message).await {
                     Ok(_) => return,
                     Err(e) => {
-                        tracing::warn!(household = %household_id, attempt, "background retain failed: {e}");
+                        tracing::warn!(speaker, attempt, "background retain failed: {e}");
                         if attempt < 3 {
                             tokio::time::sleep(delay).await;
                             delay *= 4;
@@ -410,7 +391,7 @@ impl Memory {
                     }
                 }
             }
-            tracing::warn!(household = %household_id, "background retain gave up after 3 attempts");
+            tracing::warn!(speaker, "background retain gave up after 3 attempts");
         });
     }
 
@@ -436,53 +417,41 @@ impl Memory {
 
     /// recall: the facts most RELEVANT to a query (semantic ranking) — the
     /// agent's topical lookup. For "show me everything", use `all` instead.
-    pub async fn recall(
-        &self,
-        household_id: Uuid,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<MemoryRecord>> {
+    pub async fn recall(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>> {
         match &self.hindsight {
-            // ~256 tokens per fact is plenty for short household facts.
+            // ~256 tokens per fact is plenty for short operational facts.
             Some(h) => {
-                let items = h.recall(household_id, query, (limit as u32).max(1) * 256).await?;
+                let items = h.recall(query, (limit as u32).max(1) * 256).await?;
                 Ok(items.into_iter().take(limit).map(record).collect())
             }
             None => Ok(Vec::new()),
         }
     }
 
-    /// ALL stored facts for a household — the complete, deterministic enumeration
-    /// (`GET /memories/list`), for "what do you know about us?" and the user-facing
-    /// memory/GDPR panel. This is NOT a recall: it returns every stored fact, not
-    /// just those that rank for a canned query (the old fake-list-all silently
-    /// dropped facts and re-ordered by relevance).
-    pub async fn all(&self, household_id: Uuid, limit: usize) -> Result<Vec<MemoryRecord>> {
-        Ok(self.all_with_total(household_id, limit).await?.0)
+    /// ALL stored facts for the team — the complete, deterministic enumeration
+    /// (`GET /memories/list`), for "what do you know about our infra?" and the
+    /// operator-facing memory panel. This is NOT a recall: it returns every
+    /// stored fact, not just those that rank for a canned query.
+    pub async fn all(&self, limit: usize) -> Result<Vec<MemoryRecord>> {
+        Ok(self.all_with_total(limit).await?.0)
     }
 
-    /// As `all`, but also reports the household's TOTAL stored-fact count for the
+    /// As `all`, but also reports the team's TOTAL stored-fact count for the
     /// layer returned, so callers can mark truncation ("showing 25 of 212") when
     /// `limit` cut the list. `total` counts the same layer the items came from
     /// (observations if consolidated, else all facts).
-    pub async fn all_with_total(
-        &self,
-        household_id: Uuid,
-        limit: usize,
-    ) -> Result<(Vec<MemoryRecord>, usize)> {
+    pub async fn all_with_total(&self, limit: usize) -> Result<(Vec<MemoryRecord>, usize)> {
         match &self.hindsight {
             Some(h) => {
                 // Prefer the CONSOLIDATED belief layer (observations): Hindsight
                 // folds the raw world/experience facts into deduplicated beliefs,
-                // so the panel shows "Brigid is a teacher in Galway" once, not the
-                // 3 near-duplicate raw extractions. Consolidation is async, so a
-                // brand-new bank may have none yet — fall back to ALL facts so a
-                // just-onboarded user still sees what they shared.
-                let (mut items, mut total) =
-                    h.list_with_total(household_id, Some("observation"), limit).await?;
+                // so the panel shows "the payments pod OOMs above 400 req/s" once,
+                // not the 3 near-duplicate raw extractions. Consolidation is
+                // async, so a brand-new bank may have none yet — fall back to ALL
+                // facts so a just-onboarded team still sees what it's shared.
+                let (mut items, mut total) = h.list_with_total(Some("observation"), limit).await?;
                 if items.is_empty() {
-                    let (all_items, all_total) =
-                        h.list_with_total(household_id, None, limit).await?;
+                    let (all_items, all_total) = h.list_with_total(None, limit).await?;
                     items = all_items;
                     total = all_total;
                 }
@@ -495,34 +464,49 @@ impl Memory {
     /// Forget ONE stored fact — soft-retire it by id (Hindsight `invalidate`:
     /// excluded from recall/consolidation/graph, derived observations recomputed
     /// without it, kept in the archive for audit, reversible). This is NOT a hard
-    /// erase (that is `erase`, the whole-bank GDPR wipe); it is the per-fact
-    /// "forget that" a user reaches for when Gianna has one thing wrong. No-op
+    /// erase (that is `erase`, the whole-bank wipe); it is the per-fact "forget
+    /// that" an operator reaches for when OpsClaw has one thing wrong. No-op
     /// when Hindsight isn't configured — but callers gate on `is_enabled` so they
     /// never falsely claim a fact was forgotten. `reason` rides along for the
     /// audit trail.
-    pub async fn forget(&self, household_id: Uuid, memory_id: &str, reason: &str) -> Result<()> {
+    pub async fn forget(&self, memory_id: &str, reason: &str) -> Result<()> {
         match &self.hindsight {
-            Some(h) => h.invalidate(household_id, memory_id, reason).await,
+            Some(h) => h.invalidate(memory_id, reason).await,
             None => Ok(()),
         }
     }
 
-    /// Configure the household's Hindsight bank for first use (no-op without a
-    /// backend). Idempotent; callers run it once at household creation.
-    pub async fn configure(&self, household_id: Uuid) -> Result<()> {
+    /// Configure the team's Hindsight bank for first use (no-op without a
+    /// backend). Idempotent; callers run it once at daemon startup.
+    pub async fn configure(&self) -> Result<()> {
         match &self.hindsight {
-            Some(h) => h.ensure_configured(household_id).await,
+            Some(h) => h.ensure_configured().await,
             None => Ok(()),
         }
     }
 
     /// reflect: synthesise a single concise answer from memory (Hindsight only).
-    pub async fn reflect(&self, household_id: Uuid, question: &str) -> Result<String> {
+    pub async fn reflect(&self, question: &str) -> Result<String> {
         match &self.hindsight {
-            Some(h) => h.reflect(household_id, question).await,
+            Some(h) => h.reflect(question).await,
             None => Ok(String::new()),
         }
     }
+}
+
+/// Frame a conversational statement with its speaker, so a pooled first-person
+/// statement in the shared team bank stays anchored to the right source.
+/// `speaker` is the operator's name or `"agent"`/`"scan"` for OpsClaw itself.
+fn frame_said(speaker: &str, content: &str) -> String {
+    let who = if speaker.trim().is_empty() { "the operator" } else { speaker.trim() };
+    format!("{who} said: {content}")
+}
+
+/// Frame a passive scan finding with the target it came from — distinct from
+/// `frame_said` so a heartbeat observation is never confused with something
+/// someone asserted.
+fn frame_observed(fq_target: &str, finding: &str) -> String {
+    format!("scan of {fq_target} observed: {finding}")
 }
 
 /// Map a Hindsight item to our `MemoryRecord`.
@@ -536,22 +520,25 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// A stable `document_id` for a retained statement, so re-retaining the same
-/// thing UPSERTS (Hindsight replaces the prior facts) instead of duplicating.
-/// Scoped by household + kind so an explicit note and a chat line never collide.
+/// A stable `document_id` for a retained (already attribution-framed)
+/// statement, so re-retaining the same thing UPSERTS (Hindsight replaces the
+/// prior facts) instead of duplicating. Scoped by kind so a note, a chat line,
+/// and a scan finding never collide. There is no per-tenant id to fold in
+/// (single-tenant, one bank per daemon) — the bank itself is the isolation
+/// boundary, unlike gianna's per-household id in the hash.
 ///
 /// Uses SHA-256 (not `std`'s `DefaultHasher`, whose algorithm is explicitly not
 /// stable across Rust releases): the id must survive toolchain upgrades or a
 /// correction stops superseding the fact it means to replace and duplicates.
-fn doc_id(household_id: Uuid, kind: &str, content: &str) -> String {
+fn doc_id(kind: &str, framed_content: &str) -> String {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(content.trim().as_bytes());
-    // First 8 bytes of the digest are ample to avoid collisions per (household,kind).
+    let digest = Sha256::digest(framed_content.trim().as_bytes());
+    // First 8 bytes of the digest are ample to avoid collisions per kind.
     let mut tag = 0u64;
     for b in &digest[..8] {
         tag = (tag << 8) | u64::from(*b);
     }
-    format!("gianna-{household_id}-{kind}-{tag:016x}")
+    format!("opsclaw-{kind}-{tag:016x}")
 }
 
 #[cfg(test)]
@@ -579,17 +566,15 @@ mod tests {
     }
 
     fn memory_against(server: &MockServer) -> Arc<Memory> {
-        let client = hindsight::HindsightClient::new(server.uri(), None);
-        Arc::new(Memory::new().with_hindsight(Arc::new(client)))
+        let client = hindsight::HindsightClient::new(server.uri(), None, "acme");
+        Arc::new(Memory::disabled().with_hindsight(Arc::new(client)))
     }
 
     /// Tiny backoff so the retry path runs fast (real HTTP to the stub, but ~1ms
-    /// between attempts instead of the production 500ms→2s).
+    /// between attempts instead of the production 500ms→2s→8s).
     fn detach_fast(memory: &Arc<Memory>, message: &str) {
         memory.retain_detached_with_backoff(
-            Uuid::new_v4(),
-            Some("David".into()),
-            None,
+            "dcp".into(),
             message.to_owned(),
             std::time::Duration::from_millis(1),
         );
@@ -617,7 +602,7 @@ mod tests {
             .await;
         let memory = memory_against(&server);
 
-        detach_fast(&memory, "My wife Catherine and I live in Galway");
+        detach_fast(&memory, "restarted the payments pod, it recovered");
 
         // 2 failures + 1 success = exactly 3 attempts. Wait for the success, then
         // confirm it stopped there (no 4th attempt).
@@ -638,7 +623,7 @@ mod tests {
             .await;
         let memory = memory_against(&server);
 
-        detach_fast(&memory, "We're in London");
+        detach_fast(&memory, "cluster is in us-east-1");
 
         wait_for(&calls, 3).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -647,7 +632,7 @@ mod tests {
 
     // The caller does NOT wait for the retain: even when the backend is slow,
     // `retain_detached` returns synchronously (it only spawns), so a chat reply
-    // built around it is never blocked by a slow Hindsight write.
+    // or scan tick built around it is never blocked by a slow Hindsight write.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn retain_detached_does_not_block_the_caller() {
         let server = MockServer::start().await;
@@ -668,7 +653,7 @@ mod tests {
         // Returns immediately: the spawn happens, but we never await the retain,
         // so the 800ms backend latency is NOT on the caller's critical path.
         let before = std::time::Instant::now();
-        memory.retain_detached(Uuid::new_v4(), None, None, "We're in London".into());
+        memory.retain_detached("dcp".into(), "cluster is in us-east-1".into());
         assert!(
             before.elapsed() < std::time::Duration::from_millis(100),
             "retain_detached must return promptly without awaiting the slow write"
@@ -698,7 +683,7 @@ mod tests {
             .await;
         let memory = memory_against(&server);
 
-        memory.retain_detached(Uuid::new_v4(), None, None, "We live in Galway".into());
+        memory.retain_detached("dcp".into(), "cluster is in us-east-1".into());
         // The spawn has been registered on the tracker; it is in flight.
         assert_eq!(memory.detached_in_flight(), 1, "one retain should be tracked");
 
@@ -725,7 +710,7 @@ mod tests {
             .await;
         let memory = memory_against(&server);
 
-        memory.retain_detached(Uuid::new_v4(), None, None, "We live in Galway".into());
+        memory.retain_detached("dcp".into(), "cluster is in us-east-1".into());
         let before = std::time::Instant::now();
         let ok = memory.drain_detached(std::time::Duration::from_millis(150)).await;
         assert!(!ok, "an un-drainable retain must time out, not hang the shutdown");
@@ -736,32 +721,13 @@ mod tests {
     }
 
     // A no-op memory (no in-flight work) drains instantly and reports success —
-    // the common CI/fakes path must not stall or falsely fail the shutdown.
+    // the common fakes-mode path must not stall or falsely fail the shutdown.
     #[tokio::test]
     async fn drain_detached_is_instant_when_idle() {
-        let memory = Arc::new(Memory::new());
+        let memory = Arc::new(Memory::disabled());
         assert_eq!(memory.detached_in_flight(), 0);
         assert!(memory.drain_detached(std::time::Duration::from_secs(1)).await);
-    }
-
-    #[test]
-    fn onboarding_gate_keeps_facts_drops_answers() {
-        assert!(carries_family_fact("my mother Anne has been quite unwell"));
-        assert!(carries_family_fact("My wife and I live in Galway with our baby daughter Maire."));
-        assert!(!carries_family_fact("yes please, around 7"));
-        assert!(!carries_family_fact("no weekly review thanks"));
-        assert!(!carries_family_fact("Sunday"));
-        assert!(!carries_family_fact("half six"));
-        assert!(!carries_family_fact("ok, you pick"));
-        assert!(!carries_family_fact("7:30 works"));
-        // Anything beyond the control vocabulary is substance — the user can
-        // volunteer ANYTHING mid-setup; the extraction LLM sorts it out.
-        assert!(carries_family_fact("One on the way"));
-        assert!(carries_family_fact("Me and Catherine"));
-        assert!(carries_family_fact(
-            "Yes please, I would like to know whose feast day it is, \
-             Catherine and I like to pray for their intercession every day"
-        ));
+        assert!(!memory.is_enabled());
     }
 
     // doc_id must be a FIXED value for a fixed input, not merely stable within
@@ -769,33 +735,65 @@ mod tests {
     // stops upserting the fact it means to replace). Pins the exact hash.
     #[test]
     fn doc_id_is_stable_across_builds() {
-        let hh = Uuid::nil();
-        let id = doc_id(hh, "msg", "  We live in Galway  ");
+        let id = doc_id("msg", "  dcp said: cluster is in us-east-1  ");
         // Trimming is applied before hashing, so surrounding whitespace is ignored.
-        assert_eq!(id, doc_id(hh, "msg", "We live in Galway"));
-        // The literal value is pinned: if SHA-256 or the framing changes, this
-        // fails loudly rather than silently forking upsert identity.
-        assert_eq!(id, "gianna-00000000-0000-0000-0000-000000000000-msg-abf539f1a13eef27");
+        assert_eq!(id, doc_id("msg", "dcp said: cluster is in us-east-1"));
         // Scope separates kinds and content.
-        assert_ne!(doc_id(hh, "note", "We live in Galway"), id);
-        assert_ne!(doc_id(hh, "msg", "We live in Cork"), id);
+        assert_ne!(doc_id("note", "dcp said: cluster is in us-east-1"), id);
+        assert_ne!(doc_id("msg", "dcp said: cluster is in us-west-2"), id);
+        // Deterministic across repeated calls in the same run too.
+        assert_eq!(id, doc_id("msg", "dcp said: cluster is in us-east-1"));
     }
 
     #[test]
-    fn retains_statements_skips_questions_and_doctrine() {
-        // Genuine family facts -> retain.
-        assert!(should_retain("My wife Catherine and I are expecting a child"));
-        assert!(should_retain("Thérèse is allergic to peanuts"));
-        assert!(should_retain("We're in London"));
-        assert!(should_retain("remember that my wife is Catherine?")); // statement w/ '?'
+    fn frame_said_and_frame_observed_carry_correct_attribution() {
+        assert_eq!(frame_said("dcp", "restarted the pod"), "dcp said: restarted the pod");
+        assert_eq!(frame_said("", "restarted the pod"), "the operator said: restarted the pod");
+        assert_eq!(
+            frame_said("agent", "escalated to pagerduty"),
+            "agent said: escalated to pagerduty"
+        );
+        assert_eq!(
+            frame_observed("remundo::prod::cluster", "pod payments-7 in CrashLoopBackOff"),
+            "scan of remundo::prod::cluster observed: pod payments-7 in CrashLoopBackOff"
+        );
+    }
+
+    #[test]
+    fn retains_operational_statements_skips_questions_and_acks() {
+        // Genuine operational facts -> retain.
+        assert!(should_retain("the payments pod OOMs above 400 req/s"));
+        assert!(should_retain("restarting the connection pool fixed the timeout issue"));
+        assert!(should_retain("dcp prefers approval for anything touching prod DNS"));
+        assert!(should_retain("root cause was a stale DNS cache on the edge nodes"));
+        assert!(should_retain("remember that the staging cluster is always cold on Mondays"));
         // Questions -> skip (no durable fact).
-        assert!(!should_retain("what's the weather like?"));
-        assert!(!should_retain("how do I start a novena?"));
-        assert!(!should_retain("when is Easter?"));
-        // Doctrinal queries -> NEVER retain (cited-only guardrail).
-        assert!(!should_retain("what does the Church teach about contraception?"));
-        assert!(!should_retain("is it a sin to miss Mass?"));
-        assert!(!should_retain("The Church teaches that life begins at conception")); // even as a statement
+        assert!(!should_retain("is the payments pod healthy?"));
+        assert!(!should_retain("what's the current error rate?"));
+        assert!(!should_retain("can you restart the pod?"));
         assert!(!should_retain(""));
+        // Bare control-flow acks (approval/chat loop noise) -> skip.
+        assert!(!should_retain("yes"));
+        assert!(!should_retain("approve"));
+        assert!(!should_retain("ok"));
+        assert!(!should_retain("no"));
+        assert!(!should_retain("ack"));
+        assert!(!should_retain("yes, please go ahead"));
+    }
+
+    #[test]
+    fn secret_shapes_are_never_retained() {
+        // PEM private key block.
+        assert!(!should_retain(
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----"
+        ));
+        // Bearer token.
+        assert!(!should_retain("use Authorization: Bearer sk_live_abcdef1234567890abcdef"));
+        // A long base64/hex-looking run embedded in an otherwise ordinary sentence.
+        assert!(!should_retain(
+            "the api key is AKIAIOSFODNN7EXAMPLEAKIAIOSFODNN7EXAMPLE1234567890abcdef and it's prod"
+        ));
+        // A genuine operational statement with a short token-like word is fine.
+        assert!(should_retain("the deploy tag was v1.2.3 and it fixed the memory leak"));
     }
 }

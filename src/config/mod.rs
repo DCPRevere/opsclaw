@@ -80,12 +80,24 @@ pub struct LlmCfg {
     pub base_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MemoryCfg {
     /// Hindsight base URL. Live mode refuses to boot without it (memory is a
     /// core promise); absent in fakes mode ⇒ honest no-op.
     pub hindsight_url: Option<String>,
+    /// Identifies this team's Hindsight bank (`opsclaw-{team_id}`). OpsClaw is
+    /// single-tenant (DESIGN §1: "no tenancy ids thread through the code"), so
+    /// this exists only to namespace the bank when a Hindsight instance is
+    /// shared across multiple team daemons; a lone daemon never needs to set
+    /// it. Defaults to "default".
+    pub team_id: String,
+}
+
+impl Default for MemoryCfg {
+    fn default() -> Self {
+        MemoryCfg { hindsight_url: None, team_id: "default".to_string() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

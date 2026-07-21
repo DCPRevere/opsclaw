@@ -208,6 +208,127 @@ pub fn wizard_project(p: &mut dyn Prompter) -> Result<ProjectCfg> {
     Ok(ProjectCfg { name, autonomy, envs })
 }
 
+/// Prompt for one new resource, TYPE-AWARE: each resource kind asks only
+/// the questions that make sense for it (an ECK Elasticsearch defaults to
+/// basic auth as `elastic` behind a self-signed CA; ArgoCD/Prometheus/
+/// Service Bus/EventStore take a bearer/SAS token). The connection SHAPE is
+/// the same flat `ResourceCfg` for every kind — the per-type knowledge
+/// lives here, at intake, where an operator actually needs it.
+fn wizard_resource(p: &mut dyn Prompter) -> Result<ResourceCfg> {
+    let type_str = ask_choice(
+        p,
+        "resource type",
+        &["elasticsearch", "prometheus", "argocd", "azure_service_bus", "eventstore"],
+        "elasticsearch",
+    )?;
+    let rtype: crate::domain::ResourceType = type_str
+        .parse()
+        .map_err(|()| crate::Error::Config(format!("unknown resource type {type_str:?}")))?;
+    let name = p.ask("resource name (e.g. logs, metrics, main)", None)?;
+    let url = {
+        let u = p.ask("base url (e.g. https://localhost:9201)", None)?;
+        if u.is_empty() { None } else { Some(u) }
+    };
+
+    // Auth scheme per type: Elasticsearch (ECK) is basic-auth; everything
+    // else here is bearer/SAS. Blank username on ES = bearer after all (an
+    // ES behind an API-key proxy exists).
+    let username = if rtype == crate::domain::ResourceType::Elasticsearch {
+        let u = p.ask("basic-auth username (blank for bearer-token auth)", Some("elastic"))?;
+        if u.is_empty() { None } else { Some(u) }
+    } else {
+        None
+    };
+    let cred_question = if username.is_some() {
+        "password reference (env:VAR or store:KEY)"
+    } else {
+        "token reference (env:VAR or store:KEY; blank for no auth)"
+    };
+    let credential = loop {
+        let raw = p.ask(cred_question, None)?;
+        if raw.is_empty() {
+            if username.is_some() {
+                p.say("  basic auth needs a password — enter a reference");
+                continue;
+            }
+            break None;
+        }
+        match SecretRef::parse(&raw) {
+            Ok(r) => break Some(r),
+            Err(e) => p.say(&format!("  {e} — try again")),
+        }
+    };
+
+    // TLS trust: worth asking whenever the endpoint is https — in-cluster
+    // endpoints (ECK's self-signed CA) are the norm for ES, possible for
+    // any of them. Skipped entirely for plain http.
+    let is_https = url.as_deref().is_some_and(|u| u.starts_with("https://"));
+    let (ca_cert_path, insecure_tls) = if is_https {
+        let ca = p.ask("custom CA certificate path (PEM; blank for system trust)", None)?;
+        let ca_cert_path =
+            if ca.is_empty() { None } else { Some(std::path::PathBuf::from(ca)) };
+        let insecure_tls = if ca_cert_path.is_none() {
+            p.confirm(
+                "DISABLE certificate verification? (only for a localhost port-forward hop)",
+                false,
+            )?
+        } else {
+            false
+        };
+        (ca_cert_path, insecure_tls)
+    } else {
+        (None, false)
+    };
+
+    Ok(ResourceCfg { rtype, name, url, credential, username, ca_cert_path, insecure_tls })
+}
+
+/// `config resource add`: pick an existing `project::env::target`, run the
+/// resource wizard, validate the WHOLE config, then write — same
+/// never-persist-invalid rule as `add_project`. Returns the added resource
+/// and the fully-qualified path it landed on.
+pub fn add_resource(p: &mut dyn Prompter, config_path: &Path) -> Result<(String, ResourceCfg)> {
+    let mut cfg = load_for_edit(config_path)?;
+    let paths: Vec<String> = cfg
+        .projects
+        .iter()
+        .flat_map(|pr| {
+            pr.envs.iter().flat_map(move |e| {
+                e.targets.iter().map(move |t| format!("{}::{}::{}", pr.name, e.name, t.name))
+            })
+        })
+        .collect();
+    if paths.is_empty() {
+        return Err(crate::Error::Config(
+            "no targets configured yet — run `opsclaw-cli config project add` first".into(),
+        ));
+    }
+    let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let chosen = ask_choice(p, "attach to target", &path_refs, path_refs[0])?;
+    let resource = wizard_resource(p)?;
+
+    let (proj, rest) = chosen.split_once("::").expect("validated shape");
+    let (env, tgt) = rest.split_once("::").expect("validated shape");
+    let target = cfg
+        .projects
+        .iter_mut()
+        .find(|pr| pr.name == proj)
+        .and_then(|pr| pr.envs.iter_mut().find(|e| e.name == env))
+        .and_then(|e| e.targets.iter_mut().find(|t| t.name == tgt))
+        .expect("chosen from the listed paths");
+    if target.resources.iter().any(|r| r.rtype == resource.rtype && r.name == resource.name) {
+        return Err(crate::Error::Config(format!(
+            "resource {}::{} already exists on {chosen} — edit it by hand or pick another name",
+            resource.rtype, resource.name
+        )));
+    }
+    target.resources.push(resource.clone());
+
+    cfg.validate()?;
+    write_config(config_path, &cfg)?;
+    Ok((chosen, resource))
+}
+
 /// `config project add`: run the wizard, append the result to the config at
 /// `config_path` (loaded fresh, or `Config::default()` if absent), validate
 /// the WHOLE result, and only then write it back. On validation failure the
@@ -353,6 +474,103 @@ mod tests {
         ]);
         let t = wizard_target(&mut p).unwrap();
         assert_eq!(t.credential.as_ref().map(|c| c.to_string()), Some("env:GOOD".to_string()));
+    }
+
+    fn seeded_config(dir: &Path) -> std::path::PathBuf {
+        let config_path = dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+            [[project]]
+            name = "remundo"
+            [[project.env]]
+            name = "sandbox"
+            [[project.env.target]]
+            name = "cluster"
+            kind = "kubernetes"
+            credential = "store:sandbox-kubeconfig"
+            "#,
+        )
+        .unwrap();
+        config_path
+    }
+
+    #[test]
+    fn add_resource_elasticsearch_asks_basic_auth_and_tls() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = seeded_config(dir.path());
+
+        let mut p = ScriptedPrompter::new([
+            "remundo::sandbox::cluster",  // attach to target
+            "elasticsearch",              // type
+            "logs",                       // name
+            "https://localhost:9201",     // url
+            "elastic",                    // basic-auth username
+            "store:es-password",          // password reference
+            "",                           // custom CA path: none
+            "y",                          // disable cert verification (port-forward hop)
+        ]);
+        let (target, resource) = add_resource(&mut p, &config_path).unwrap();
+        assert_eq!(target, "remundo::sandbox::cluster");
+        assert_eq!(resource.username.as_deref(), Some("elastic"));
+        assert!(resource.insecure_tls);
+
+        let reloaded = Config::load(Some(&config_path)).unwrap();
+        let r = &reloaded.projects[0].envs[0].targets[0].resources[0];
+        assert_eq!(r.name, "logs");
+        assert_eq!(r.username.as_deref(), Some("elastic"));
+        assert_eq!(r.credential.as_ref().map(|c| c.to_string()), Some("store:es-password".into()));
+        assert!(r.insecure_tls);
+        reloaded.validate().unwrap();
+    }
+
+    #[test]
+    fn add_resource_prometheus_skips_es_only_questions() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = seeded_config(dir.path());
+
+        // http url → no TLS questions; prometheus → no username question.
+        let mut p = ScriptedPrompter::new([
+            "remundo::sandbox::cluster",
+            "prometheus",
+            "metrics",
+            "http://localhost:9090",
+            "", // token: none
+        ]);
+        let (_, resource) = add_resource(&mut p, &config_path).unwrap();
+        assert_eq!(resource.rtype, crate::domain::ResourceType::Prometheus);
+        assert!(resource.username.is_none());
+        assert!(resource.credential.is_none());
+        assert!(!resource.insecure_tls);
+    }
+
+    #[test]
+    fn add_resource_rejects_duplicate_and_leaves_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = seeded_config(dir.path());
+        let answers = [
+            "remundo::sandbox::cluster",
+            "prometheus",
+            "metrics",
+            "http://localhost:9090",
+            "",
+        ];
+        let mut p1 = ScriptedPrompter::new(answers);
+        add_resource(&mut p1, &config_path).unwrap();
+        let mut p2 = ScriptedPrompter::new(answers);
+        let err = add_resource(&mut p2, &config_path).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        let reloaded = Config::load(Some(&config_path)).unwrap();
+        assert_eq!(reloaded.projects[0].envs[0].targets[0].resources.len(), 1);
+    }
+
+    #[test]
+    fn add_resource_with_no_targets_says_run_project_add_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut p = ScriptedPrompter::new(Vec::<String>::new());
+        let err = add_resource(&mut p, &config_path).unwrap_err();
+        assert!(err.to_string().contains("config project add"), "{err}");
     }
 
     #[test]

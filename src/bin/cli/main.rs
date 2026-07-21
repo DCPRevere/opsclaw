@@ -230,6 +230,12 @@ enum ConfigCommand {
         #[command(subcommand)]
         command: ConfigProjectCommand,
     },
+    /// Type-aware resource wizard: attach an elasticsearch/prometheus/
+    /// argocd/service-bus/eventstore endpoint to an existing target.
+    Resource {
+        #[command(subcommand)]
+        command: ConfigResourceCommand,
+    },
     /// Validate the config and print every failure.
     Validate {
         #[arg(long)]
@@ -239,6 +245,11 @@ enum ConfigCommand {
 
 #[derive(Subcommand)]
 enum ConfigProjectCommand {
+    Add,
+}
+
+#[derive(Subcommand)]
+enum ConfigResourceCommand {
     Add,
 }
 
@@ -460,6 +471,17 @@ async fn dispatch(
                 let mut prompter = StdioPrompter::new();
                 let project = opsclaw::cli::config_cmd::add_project(&mut prompter, cfg_path)?;
                 println!("added project {:?} to {}", project.name, cfg_path.display());
+            }
+            ConfigCommand::Resource { command: ConfigResourceCommand::Add } => {
+                let mut prompter = StdioPrompter::new();
+                let (target, resource) =
+                    opsclaw::cli::config_cmd::add_resource(&mut prompter, cfg_path)?;
+                println!(
+                    "added {}::{} to {target} in {} (restart the daemon to pick it up)",
+                    resource.rtype,
+                    resource.name,
+                    cfg_path.display()
+                );
             }
             ConfigCommand::Validate { json } => {
                 let errors = opsclaw::cli::config_cmd::validate(cfg_path)?;
@@ -902,6 +924,7 @@ mod tests {
             &["opsclaw-cli", "estop", "--resume"],
             &["opsclaw-cli", "estop", "--reason", "testing"],
             &["opsclaw-cli", "config", "project", "add"],
+            &["opsclaw-cli", "config", "resource", "add"],
             &["opsclaw-cli", "config", "validate"],
             &["opsclaw-cli", "incidents", "list"],
             &["opsclaw-cli", "incidents", "list", "--include-closed", "--limit", "10"],

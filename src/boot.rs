@@ -14,7 +14,8 @@ use std::sync::Arc;
 use crate::Result;
 use crate::agent::dispatch::{AgentJobComposer, ChatTurn, DispatchDeps, WebhookIngest};
 use crate::audit::AuditWriter;
-use crate::channels::telegram::{InMemoryOffsetStore, InMemoryRoster, TelegramChannel};
+use crate::channels::push::{PushChannel, WebPushSender};
+use crate::channels::telegram::{DbOffsetStore, DbTelegramRoster, TelegramChannel};
 use crate::channels::{Channel, MultiChannel};
 use crate::config::{Config, SecretStore};
 use crate::db::Db;
@@ -105,14 +106,13 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     )?;
 
     // Outbound channel fan-out: the web SSE hub always; Telegram when a bot
-    // token is configured. Telegram also LISTENS (inbound chat), so it gets
-    // the state's shutdown token at construction (its long-poll stops on
-    // cancel — see `TelegramChannel::with_shutdown`) and joins
-    // `listen_channels`, which `server::run` spawns the inbound consumer
-    // over. KNOWN LIMITATION (tracked): the Telegram roster and poll offset
-    // are in-memory only — a restart forgets chat bindings and may re-see
-    // recent updates; gianna persists both. Send-side fan-out (what
-    // incidents/approvals need) is unaffected.
+    // token is configured. The Telegram roster and poll offset are DB-backed
+    // (`DbTelegramRoster`/`DbOffsetStore` over `ChannelStateRepo`) — a
+    // restart neither forgets chat bindings nor re-sees already-handled
+    // updates. Telegram also LISTENS (inbound chat), so it gets the state's
+    // shutdown token at construction (its long-poll stops on cancel — see
+    // `TelegramChannel::with_shutdown`) and joins `listen_channels`, which
+    // `server::run` spawns the inbound consumer over.
     let mut channels: Vec<Arc<dyn Channel>> = vec![state.web.clone()];
     if let Some(token_ref) = &state.config.telegram.bot_token {
         let token = token_ref.resolve(&secret_store)?;
@@ -121,13 +121,27 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
             TelegramChannel::new(
                 token,
                 reqwest::Client::new(),
-                Arc::new(InMemoryRoster::default()),
-                Arc::new(InMemoryOffsetStore::default()),
+                Arc::new(DbTelegramRoster::new(state.repos.clone())),
+                Arc::new(DbOffsetStore::new(state.repos.clone())),
             )
             .with_shutdown(state.shutdown.clone()),
         );
         channels.push(telegram.clone());
         state.listen_channels.push(telegram);
+    }
+    // Web push, when the VAPID pair is configured (`Config::validate`
+    // already rejects a half-set pair, so `vapid_private_key.is_some()` here
+    // implies the public key is set too). Push is best-effort by design
+    // (DESIGN §3 decision 5): Telegram/webhook above are the guaranteed
+    // escalation paths, so a push wiring/delivery failure never blocks boot
+    // or the rest of the fan-out — only a genuinely malformed configured key
+    // (caught by `WebPushSender::new`'s `Result`) fails loudly, the same way
+    // a malformed Telegram token would.
+    if let Some(private_key_ref) = &state.config.push.vapid_private_key {
+        let private_key = private_key_ref.resolve(&secret_store)?;
+        scrubber.register("VAPID_PRIVATE_KEY", &private_key);
+        let sender = Arc::new(WebPushSender::new(&private_key)?);
+        channels.push(Arc::new(PushChannel::new(state.repos.clone(), sender)));
     }
     state.channel = Arc::new(MultiChannel::new(channels));
 

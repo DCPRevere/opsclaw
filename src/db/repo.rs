@@ -257,3 +257,79 @@ pub trait InviteRepo: Send + Sync {
     /// exists (already consumed, expired, or never existed).
     async fn revoke_invite(&self, code: &str) -> Result<bool>;
 }
+
+// ---- Additive (push channel task, `src/channels/push.rs`): web-push device
+// subscriptions. No Wave 0 analog was declared; ported from gianna's
+// `ControlRepo::push_subscriptions`/`add_push_subscription`/
+// `delete_push_subscription` (`db::PushSubscription`), narrowed from
+// household-scoped to opsclaw's single-tenant per-operator-account shape.
+
+/// One subscribed device/browser (the standard `PushSubscription` JSON shape
+/// a browser's `pushManager.subscribe()` returns, flattened). `endpoint` is
+/// both the delivery target AND the natural unique identity — a browser
+/// re-subscribing the same device yields the same endpoint, so upsert-by-
+/// endpoint is the correct write, never a plain insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushSubscription {
+    pub endpoint: String,
+    pub account_id: Uuid,
+    pub p256dh: String,
+    pub auth: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[async_trait]
+pub trait PushSubscriptionRepo: Send + Sync {
+    /// Insert a new subscription, or overwrite an existing one at the same
+    /// endpoint (a browser re-subscribing the same device — e.g. after
+    /// clearing site data — must not accumulate duplicate rows).
+    async fn upsert_push_subscription(&self, sub: &PushSubscription) -> Result<()>;
+    /// Every stored subscription, across every operator — `PushChannel::send`
+    /// fans out to all of them (DESIGN §3: push is a team-wide alert path,
+    /// not per-operator addressed, matching `OutboundMessage.operator: None`
+    /// being the common case for incident/approval broadcasts).
+    async fn list_push_subscriptions(&self) -> Result<Vec<PushSubscription>>;
+    /// Prune a subscription the push service reports as dead (404/410).
+    /// `Ok(())` even if the endpoint was already gone (idempotent).
+    async fn delete_push_subscription(&self, endpoint: &str) -> Result<()>;
+}
+
+// ---- Additive (persistent Telegram roster + poll offset task,
+// `src/channels/telegram.rs`): replaces boot.rs's in-memory
+// InMemoryRoster/InMemoryOffsetStore (documented KNOWN LIMITATION — a
+// restart forgot chat bindings and the getUpdates cursor). No Wave 0 analog;
+// ported in spirit from gianna's durable Telegram link/offset persistence
+// (`migrations/0006_telegram_onboarding_state.sql` in gianna, generalized
+// here into one small repo covering both the roster and a generic
+// channel-scoped key/value cursor store).
+
+/// One allowlisted Telegram chat <-> operator binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramBinding {
+    pub chat_id: String,
+    pub operator_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+#[async_trait]
+pub trait ChannelStateRepo: Send + Sync {
+    /// Allowlist a chat id to an operator (idempotent — binding the same
+    /// chat id again overwrites the previous operator, matching
+    /// `InMemoryRoster::bind`'s upsert semantics).
+    async fn bind_telegram_chat(&self, chat_id: &str, operator_id: Uuid) -> Result<()>;
+    /// Remove a chat id from the allowlist. `Ok(())` even if it was never
+    /// bound (idempotent).
+    async fn unbind_telegram_chat(&self, chat_id: &str) -> Result<()>;
+    /// The operator bound to this chat id, if allowlisted — backs
+    /// `TelegramRoster::find_operator`.
+    async fn find_telegram_operator(&self, chat_id: &str) -> Result<Option<Uuid>>;
+    /// Chat ids receiving a message addressed to `operator` (`None` =
+    /// every allowlisted chat) — backs `TelegramRoster::chat_ids_for`.
+    async fn telegram_chat_ids_for(&self, operator: Option<Uuid>) -> Result<Vec<String>>;
+
+    /// Generic durable scalar store for a channel's small cross-restart
+    /// state (today: the Telegram getUpdates offset, keyed by
+    /// `channels::telegram::TELEGRAM_OFFSET_KEY`). `None` if never set.
+    async fn get_channel_state(&self, key: &str) -> Result<Option<String>>;
+    async fn set_channel_state(&self, key: &str, value: &str) -> Result<()>;
+}

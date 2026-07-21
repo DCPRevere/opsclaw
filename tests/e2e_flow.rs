@@ -654,3 +654,74 @@ hindsight_url = "http://localhost:1"
         .await;
     assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
 }
+
+// ---- web push ----
+
+#[tokio::test]
+async fn vapid_public_key_is_unauthenticated_and_404s_when_unconfigured() {
+    // No push config: the route must 404 (not error, not an empty 200) so
+    // the app shell can feature-detect and skip offering "enable
+    // notifications" — see routes::push's module doc.
+    let state = AppState::fake();
+    let base = spawn_server(state).await;
+    let resp = reqwest::get(format!("{base}/api/push/vapid-public-key")).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // With push configured, the SAME route is reachable with no cookie at
+    // all (deliberately unauthenticated — a VAPID public key is not a
+    // secret; see the route's doc comment for why).
+    let mut cfg = Config::default();
+    cfg.push.vapid_public_key = Some("test-vapid-public-key".into());
+    let state = AppState::fake_with_config(cfg);
+    let base = spawn_server(state).await;
+    let resp = reqwest::get(format!("{base}/api/push/vapid-public-key")).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["vapid_public_key"], "test-vapid-public-key");
+}
+
+#[tokio::test]
+async fn push_subscribe_requires_auth_then_roundtrips_to_unsubscribe() {
+    let mut cfg = Config::default();
+    cfg.push.vapid_public_key = Some("test-vapid-public-key".into());
+    let state = AppState::fake_with_config(cfg);
+    seed_account(&state, "push@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+
+    // No session: both routes reject with 401.
+    let anon = reqwest::Client::new();
+    let sub_body = serde_json::json!({
+        "endpoint": "https://push.example/ep-1",
+        "keys": { "p256dh": "p256dh-value", "auth": "auth-value" }
+    });
+    let resp =
+        anon.post(format!("{base}/api/push/subscribe")).json(&sub_body).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let resp = anon
+        .post(format!("{base}/api/push/unsubscribe"))
+        .json(&serde_json::json!({ "endpoint": "https://push.example/ep-1" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Signed in: subscribe succeeds, then unsubscribe succeeds.
+    let client = SessionClient::new();
+    client
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "push@example.com", "password": "some-password-123" }),
+        )
+        .await;
+
+    let subscribed = client.post_json(&format!("{base}/api/push/subscribe"), &sub_body).await;
+    assert_eq!(subscribed.status(), reqwest::StatusCode::OK);
+
+    let unsubscribed = client
+        .post_json(
+            &format!("{base}/api/push/unsubscribe"),
+            &serde_json::json!({ "endpoint": "https://push.example/ep-1" }),
+        )
+        .await;
+    assert_eq!(unsubscribed.status(), reqwest::StatusCode::OK);
+}

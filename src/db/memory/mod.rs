@@ -8,10 +8,12 @@
 mod accounts;
 mod approvals;
 mod audit;
+mod channel_state;
 mod control;
 mod incidents;
 mod invites;
 mod jobs;
+mod push;
 mod runbook_runs;
 mod tokens;
 
@@ -19,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-use crate::db::{Account, CliToken, Invite, JobFailure, RunbookRun};
+use crate::db::{Account, CliToken, Invite, JobFailure, PushSubscription, RunbookRun};
 use crate::domain::{ApprovalRequest, Incident, Job};
 
 #[derive(Default)]
@@ -40,6 +42,14 @@ struct Store {
     /// a consumed/expired code stays inspectable — mirrors the sqlite
     /// backend's `consumed_at` column rather than a hard delete).
     invites: HashMap<String, (Invite, bool)>,
+    /// Keyed by endpoint (the natural unique identity — see
+    /// `PushSubscriptionRepo`'s doc comment).
+    push_subscriptions: HashMap<String, PushSubscription>,
+    /// Telegram chat id -> operator id (the persistent roster).
+    telegram_roster: HashMap<String, Uuid>,
+    /// Generic small durable channel state (the Telegram getUpdates offset
+    /// today; kept general — see migration 0005's doc comment).
+    channel_state: HashMap<String, String>,
 }
 
 /// A single in-memory store shared across all repo trait impls.

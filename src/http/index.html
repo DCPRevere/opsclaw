@@ -173,6 +173,13 @@
       <h2>CLI sessions</h2>
       <div id="cli-tokens-list"></div>
     </div>
+    <div class="card" id="push-card" style="display:none">
+      <h2>Notifications</h2>
+      <p class="muted">Get incident alerts and approval requests as push notifications on this device.</p>
+      <button class="primary" id="push-enable-btn">Enable notifications</button>
+      <button class="ghost" id="push-disable-btn" style="display:none">Disable notifications</button>
+      <div id="push-status" class="muted"></div>
+    </div>
     <div class="card">
       <h2>Config</h2>
       <p class="muted">The daemon's <code>config.toml</code> — hand-editable on disk; this view reads and writes the same file.</p>

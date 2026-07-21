@@ -1,0 +1,8 @@
+{
+  "fault": "disk-fill",
+  "severity": "critical",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["disk_writable_pct", "mount_point", "largest_file"],
+  "must_notify": true,
+  "notes": "/data filled to ~90% capacity via fallocate. Distinct from mount-scepticism: here the writable mount really is nearly full and the daemon must alert; mount-scepticism arms a decoy mount and asserts silence."
+}

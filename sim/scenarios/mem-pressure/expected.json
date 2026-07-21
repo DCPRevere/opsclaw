@@ -1,0 +1,8 @@
+{
+  "fault": "mem-pressure",
+  "severity": "critical",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["mem_pct", "mem_available_mb", "top_proc", "oom_risk"],
+  "must_notify": true,
+  "notes": "stress-ng --vm 2 --vm-bytes 85% --vm-keep. Percentage-of-available sizing keeps this portable across hosts of different RAM."
+}

@@ -1,0 +1,8 @@
+{
+  "fault": "cpu-4way",
+  "severity": "critical",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["cpu_pct", "loadavg_1m", "loadavg_5m", "top_proc"],
+  "must_notify": true,
+  "notes": "REQUIREMENT (brief §9): the pre-rebuild agent missed this. 4 stress-ng workers at 95% load — a naive single-sample cpu_pct read can under-count if it samples between worker scheduling; the daemon must corroborate via loadavg trending, not one instantaneous reading."
+}

@@ -1,0 +1,8 @@
+{
+  "fault": "sigstop-deadlock",
+  "severity": "critical",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["proc_state", "proc_cpu_time_delta", "proc_up"],
+  "must_notify": true,
+  "notes": "fake-worker SIGSTOPped: process stays resident (naive liveness sees 'running') but makes zero forward progress. Requires the daemon to check /proc state (T) or CPU-time-delta-over-window, not just process presence."
+}

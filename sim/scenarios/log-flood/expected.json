@@ -1,0 +1,8 @@
+{
+  "fault": "log-flood",
+  "severity": "warning",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["log_lines_per_sec", "log_source"],
+  "must_notify": true,
+  "notes": "log-emitter rate raised to ~200 lines/sec, short lines. Distinct fault class from logfile-growth (large lines, moderate rate) — brief §9 lists log-file growth as a separately-missed case, kept as a separate scenario/knob."
+}

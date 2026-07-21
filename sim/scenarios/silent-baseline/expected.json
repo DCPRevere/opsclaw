@@ -1,0 +1,8 @@
+{
+  "fault": "silent-baseline",
+  "severity": "info",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["cpu_pct", "mem_pct", "disk_writable_pct", "proc_up"],
+  "must_notify": false,
+  "notes": "Healthy target, no fault injected. The daemon must produce zero notify calls across a full scan tick. This is the anti-spam/false-positive control (brief §9)."
+}

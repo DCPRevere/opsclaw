@@ -1,0 +1,17 @@
+# Keeps docker build contexts (sim/target.Dockerfile, deploy/Dockerfile —
+# both build from repo root) small and, more importantly, avoids racing a
+# concurrent `cargo build` writing into /target mid-build (a real failure
+# seen while validating sim/: another session's cargo run deleted a
+# still-being-copied file out from under `docker build`'s context tar).
+/target
+.git
+.claude
+/scratchpad
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.log
+.DS_Store
+.idea/
+.vscode/

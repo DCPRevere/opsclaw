@@ -1,0 +1,8 @@
+{
+  "fault": "service-stopped",
+  "severity": "critical",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["service_state", "service_name"],
+  "must_notify": true,
+  "notes": "fake-web (the TinyHealthCheck-style listener) stopped cleanly via supervisorctl. Held stopped, not crash-looping."
+}

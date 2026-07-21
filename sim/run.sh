@@ -103,18 +103,30 @@ run_one_scenario() {
     # answer truthful (the Dockerfile comment always claimed 200MB; this is
     # what actually enforces it). --tmpfs also means the fill never touches the
     # writable layer, so a surviving container can't hoard host disk.
+    # --memory/--cpus apply the same rule to RAM and CPU: stress-ng scenarios
+    # size themselves off /proc/meminfo ("--vm-bytes 85%"), and gVisor reports
+    # the cgroup limit as total — without the cap, "85%" means 85% of the
+    # HOST's RAM (~50GB on the dev machine, observed before this cap landed).
+    # --storage-opt (writable-layer cap, extra belt) needs overlay-on-xfs with
+    # pquota and fails outright elsewhere — hence the silenced first attempt
+    # and the no-storage-opt fallback; a real startup error still surfaces
+    # from the fallback run.
     docker run -d --name "$name" \
         --runtime="$SIM_RUNTIME" \
         --cap-add=SYS_ADMIN \
+        --memory "${SIM_MEM_LIMIT:-1g}" --memory-swap "${SIM_MEM_LIMIT:-1g}" \
+        --cpus "${SIM_CPU_LIMIT:-4}" \
         --tmpfs /run/opsclaw-sim:rw,size=16m \
         --tmpfs "/data:rw,size=${SIM_DATA_SIZE:-200m}" \
         --storage-opt "size=${SIM_LAYER_CAP:-2g}" \
         -v "${keydir}/authorized_keys:/run/opsclaw-sim/authorized_keys:ro" \
         -p 127.0.0.1:0:22 \
-        "$SIM_IMAGE" >/dev/null \
+        "$SIM_IMAGE" >/dev/null 2>&1 \
         || docker run -d --name "$name" \
             --runtime="$SIM_RUNTIME" \
             --cap-add=SYS_ADMIN \
+            --memory "${SIM_MEM_LIMIT:-1g}" --memory-swap "${SIM_MEM_LIMIT:-1g}" \
+            --cpus "${SIM_CPU_LIMIT:-4}" \
             --tmpfs /run/opsclaw-sim:rw,size=16m \
             --tmpfs "/data:rw,size=${SIM_DATA_SIZE:-200m}" \
             -v "${keydir}/authorized_keys:/run/opsclaw-sim/authorized_keys:ro" \

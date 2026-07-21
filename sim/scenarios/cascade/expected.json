@@ -1,0 +1,8 @@
+{
+  "fault": "cascade",
+  "severity": "critical",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["mem_pct", "proc_restart_count", "service_state"],
+  "must_notify": true,
+  "notes": "Composite: memory pressure + worker restart-flapping + stopped fake-web, armed together. Anti-spam assertion (brief §6): expect ONE structured notify correlating the cluster of signals, not one notify per symptom. The daemon-integration TODO in sim/run.sh must additionally assert notify call COUNT stays at 1 across the tick for this scenario."
+}

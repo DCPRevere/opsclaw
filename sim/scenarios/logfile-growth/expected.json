@@ -1,0 +1,8 @@
+{
+  "fault": "logfile-growth",
+  "severity": "warning",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["log_file_size_bytes", "log_file_growth_rate", "log_source"],
+  "must_notify": true,
+  "notes": "REQUIREMENT (brief §9): pre-rebuild agent missed this. 64KB lines at 5/sec growing app.log by >100KB/5s. Requires tracking file-size trajectory over time, not just line-rate/content."
+}

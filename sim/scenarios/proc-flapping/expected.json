@@ -1,0 +1,8 @@
+{
+  "fault": "proc-flapping",
+  "severity": "critical",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["proc_restart_count", "proc_restart_interval_s", "proc_uptime_s"],
+  "must_notify": true,
+  "notes": "REQUIREMENT (brief §9): pre-rebuild agent missed this. fake-worker crashes and is autorestarted by supervisord every ~5s. Each individual restart looks healthy in isolation — the fault is only visible in restart CADENCE across multiple scan ticks, requiring the daemon to track restart history, not just point-in-time process presence."
+}

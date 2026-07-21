@@ -1,0 +1,8 @@
+{
+  "fault": "cpu-single",
+  "severity": "warning",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["cpu_pct", "loadavg_1m", "top_proc"],
+  "must_notify": true,
+  "notes": "One CPU worker saturated via stress-ng --cpu 1 --cpu-load 95. On a multi-core host this may not saturate system-wide CPU, so the daemon must reason about per-core/loadavg pressure, not only aggregate cpu_pct."
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://opsclaw.io/schemas/sim-expected.schema.json",
+  "title": "OpsClaw Tier 2 sim scenario expectation",
+  "description": "Every sim/scenarios/*/expected.json must validate against this schema. A Tier 1 test (see tests/, once the daemon's sim-runner integration lands) walks sim/scenarios and asserts each one does.",
+  "type": "object",
+  "required": ["fault", "severity", "fq_target", "expected_signals", "must_notify"],
+  "additionalProperties": false,
+  "properties": {
+    "fault": {
+      "type": "string",
+      "description": "Stable fault-class identifier the daemon's notify payload must name (brief §6: 'name it correctly'). Matches the scenario directory name.",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "severity": {
+      "type": "string",
+      "description": "Expected severity in the notify payload when must_notify is true. Ignored (but still schema-valid) when must_notify is false.",
+      "enum": ["info", "warning", "critical"]
+    },
+    "fq_target": {
+      "type": "string",
+      "description": "Fully-qualified target path the fault is injected on, project::env::target form (brief §4). The sim harness's own project/env/target naming for its throwaway target.",
+      "pattern": "^[A-Za-z0-9_.-]+::[A-Za-z0-9_.-]+::[A-Za-z0-9_.-]+$"
+    },
+    "expected_signals": {
+      "type": "array",
+      "description": "Diagnostic signals the daemon is expected to have corroborated before alerting (DESIGN.md 'environment scepticism' — corroborate, never trust a single signal). Free-text identifiers naming what was checked, e.g. 'cpu_pct', 'disk_writable_pct', 'proc_restart_count'.",
+      "items": { "type": "string" },
+      "minItems": 0
+    },
+    "must_notify": {
+      "type": "boolean",
+      "description": "Whether the daemon is expected to call the structured notify tool exactly once for this scenario. false for healthy/expected-state cases (silent-baseline, mount-scepticism) where staying silent IS the assertion (brief §9)."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Optional free-text context for humans reading the scenario, e.g. why must_notify is false despite something looking wrong."
+    }
+  }
+}

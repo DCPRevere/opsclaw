@@ -1,0 +1,8 @@
+{
+  "fault": "mount-scepticism",
+  "severity": "info",
+  "fq_target": "sim::default::baseline-target",
+  "expected_signals": ["disk_writable_pct", "mount_writability", "mount_relevance"],
+  "must_notify": false,
+  "notes": "REQUIREMENT (brief §9 / DESIGN.md environment scepticism): a decoy read-only tmpfs at /mnt/decoy-full reports 100%% used via df, while /data (the actually writable mount) stays healthy. must_notify is false — the daemon must evaluate writable mounts, not every mount reported by df, and must not be fooled by a full-but-irrelevant/read-only filesystem."
+}

@@ -54,6 +54,16 @@ pub struct DispatchDeps {
     pub runbooks: Arc<RunbookStore>,
     pub endpoints: Arc<EndpointRegistry>,
     pub llm: Arc<dyn LlmProvider>,
+    /// The TEAM-WIDE turn gate (gianna's `turn_gate.rs`, generalized): at
+    /// most ONE agent turn runs at a time across every entry point — chat
+    /// (web/CLI/channel-inbound), scheduled scans, webhook alerts. Two
+    /// concurrent turns could each independently decide to act on the same
+    /// signal and double-execute a side-effecting tool; policy would gate
+    /// each correctly but has no cross-turn dedup. Serializing turns is the
+    /// simple, sufficient fix at this scale (one team, one daemon). Held as
+    /// an async `Mutex` guard across the whole `run_turn`, so waiters queue
+    /// rather than error.
+    pub turn_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl DispatchDeps {
@@ -93,6 +103,7 @@ impl DispatchDeps {
             runbooks,
             endpoints,
             llm,
+            turn_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 }
@@ -196,6 +207,7 @@ impl JobComposer for AgentJobComposer {
         prompt: &str,
         _now_utc: DateTime<Utc>,
     ) -> Result<Option<String>> {
+        let _turn = self.deps.turn_gate.lock().await; // see DispatchDeps.turn_gate
         let principal = Principal::Agent { job: Some(job.id) };
         let ctx = build_tool_ctx(&self.deps, principal);
         let registry = tools::registry(&ctx, /* heartbeat = */ true);
@@ -259,6 +271,7 @@ impl WebhookIngest {
 #[async_trait]
 impl IngestAlert for WebhookIngest {
     async fn ingest(&self, source: &str, payload: &Value) -> Result<()> {
+        let _turn = self.deps.turn_gate.lock().await; // see DispatchDeps.turn_gate
         let principal = Principal::Agent { job: None };
         let ctx = build_tool_ctx(&self.deps, principal);
         // Full registry, NOT heartbeat — an alert is interactive-priority.
@@ -357,12 +370,13 @@ impl ChatHandler for ChatTurn {
         // Attribution framing (DESIGN §3 memory: `"{operator} said: …"`) —
         // in the shared transcript, who spoke is part of the record.
         let attributed = format!("{speaker} said: {message}");
-        // Snapshot under the lock, run the turn OUTSIDE it (a turn can take
-        // many seconds; holding a std mutex across it would serialize every
-        // chat surface behind one slow tool chain — and panic-poison on a
-        // turn error). Two concurrent turns therefore both replay the
-        // pre-turn transcript and append in completion order: last-writer's
-        // ordering, the same benign race any group chat has.
+        // The team-wide turn gate serializes this whole turn against every
+        // other entry point (see DispatchDeps.turn_gate) — which also
+        // closes the old snapshot race: with at most one turn in flight,
+        // the transcript snapshotted here is always the one the reply
+        // appends after. The std mutex below is still only held for the
+        // clone, never across the turn (poison hygiene).
+        let _turn = self.deps.turn_gate.lock().await;
         let prior = self.transcript.lock().expect("chat transcript lock poisoned").clone();
 
         let reply = agent::run_turn_with_history(
@@ -780,6 +794,83 @@ mod tests {
             }
             other => panic!("expected user turns at 0 and 2, got {other:?}"),
         }
+    }
+
+    /// An LLM that asserts it is never entered concurrently — the direct
+    /// observable of the team-wide turn gate.
+    struct ConcurrencyProbeLlm {
+        active: std::sync::atomic::AtomicUsize,
+        max_seen: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ConcurrencyProbeLlm {
+        fn new() -> Self {
+            ConcurrencyProbeLlm {
+                active: std::sync::atomic::AtomicUsize::new(0),
+                max_seen: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ConcurrencyProbeLlm {
+        async fn chat_step(
+            &self,
+            _principal: &Principal,
+            _system: &str,
+            _history: &[Turn],
+            _tools: &[crate::llm::ToolSpec],
+        ) -> Result<crate::llm::ChatStep> {
+            use std::sync::atomic::Ordering;
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_seen.fetch_max(now, Ordering::SeqCst);
+            // Long enough that unserialized turns WOULD overlap.
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(crate::llm::ChatStep {
+                text: Some("ok".into()),
+                tool_calls: Vec::new(),
+                usage: Default::default(),
+            })
+        }
+        fn name(&self) -> &str {
+            "concurrency-probe"
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_gate_serializes_chat_scan_and_webhook_turns() {
+        let probe = Arc::new(ConcurrencyProbeLlm::new());
+        let llm: Arc<dyn LlmProvider> = probe.clone();
+        let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
+        let deps = test_deps(llm, policy);
+
+        let chat = Arc::new(ChatTurn::new(deps.clone()));
+        let composer = AgentJobComposer::new(deps.clone());
+        let ingest = WebhookIngest::new(deps, Arc::new(RecordingChannel::new()));
+        let job = Job::new(
+            "remundo::prod::web-1-scan",
+            crate::domain::Schedule::Interval { every_minutes: 5 },
+            Payload::Prompt { body: "scan".into() },
+        )
+        .system();
+
+        let op = Principal::Operator { account: uuid::Uuid::new_v4() };
+        let payload = json!({"alertname": "X"});
+        let (a, b, c) = tokio::join!(
+            chat.chat(op, "alice", "anything odd?"),
+            composer.compose(&job, "scan", Utc::now()),
+            ingest.ingest("alertmanager", &payload),
+        );
+        a.unwrap();
+        b.unwrap();
+        c.unwrap();
+
+        assert_eq!(
+            probe.max_seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "turns from different entry points overlapped — the turn gate is not serializing"
+        );
     }
 
     #[tokio::test]

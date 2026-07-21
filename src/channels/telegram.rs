@@ -8,9 +8,16 @@
 //! stored member channel handle (`db::HouseholdRepo`). OpsClaw has no
 //! household concept — a chat id instead maps to an operator handle via the
 //! local [`TelegramRoster`] trait (allowlist), and the getUpdates offset is
-//! persisted via the local [`OffsetStore`] trait. Both are in-memory here;
-//! DB-backed implementations wire in at integration (outside
-//! `src/channels/`) — this module does not touch `src/db/`.
+//! persisted via the local [`OffsetStore`] trait. In-memory implementations
+//! ([`InMemoryRoster`], [`InMemoryOffsetStore`]) live here for tests;
+//! [`DbTelegramRoster`] and [`DbOffsetStore`] below are the DB-backed
+//! production implementations (persistent roster + poll offset task),
+//! thin adapters over `db::ChannelStateRepo` — both traits here are already
+//! `#[async_trait]`, so the adapter is a direct async delegation with no
+//! `block_on`/runtime-blocking bridge needed. `boot::daemon_state` wires
+//! these instead of the in-memory pair (gianna lesson preserved: the offset
+//! is persisted only after genuine hand-off — see `listen`'s `advance_offset!`
+//! macro below, unchanged by this adapter).
 
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -111,6 +118,76 @@ impl OffsetStore for InMemoryOffsetStore {
     async fn store(&self, key: &str, offset: i64) -> Result<()> {
         self.offsets.lock().unwrap().insert(key.to_string(), offset);
         Ok(())
+    }
+}
+
+/// DB-backed [`TelegramRoster`]: a thin adapter over `db::ChannelStateRepo`
+/// (persistent roster + poll offset task). Production wiring — replaces
+/// [`InMemoryRoster`] in `boot::daemon_state`, so an operator's chat binding
+/// survives a restart/deploy instead of needing to be re-established.
+pub struct DbTelegramRoster {
+    repo: Arc<dyn crate::db::ChannelStateRepo>,
+}
+
+impl DbTelegramRoster {
+    pub fn new(repo: Arc<dyn crate::db::ChannelStateRepo>) -> Self {
+        Self { repo }
+    }
+}
+
+#[async_trait]
+impl TelegramRoster for DbTelegramRoster {
+    async fn find_operator(&self, chat_id: &str) -> Option<Uuid> {
+        match self.repo.find_telegram_operator(chat_id).await {
+            Ok(op) => op,
+            Err(e) => {
+                tracing::warn!("telegram roster lookup failed: {e}");
+                None
+            }
+        }
+    }
+
+    async fn chat_ids_for(&self, operator: Option<Uuid>) -> Vec<String> {
+        match self.repo.telegram_chat_ids_for(operator).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!("telegram roster chat_ids_for failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// DB-backed [`OffsetStore`]: a thin adapter over `db::ChannelStateRepo`'s
+/// generic key/value cursor store. Production wiring — replaces
+/// [`InMemoryOffsetStore`] in `boot::daemon_state`. The crash-window
+/// message-loss rule (persist only after genuine hand-off) is enforced by
+/// `TelegramChannel::listen`'s caller-side ordering, unchanged here — this
+/// type is just where the value lands durably.
+pub struct DbOffsetStore {
+    repo: Arc<dyn crate::db::ChannelStateRepo>,
+}
+
+impl DbOffsetStore {
+    pub fn new(repo: Arc<dyn crate::db::ChannelStateRepo>) -> Self {
+        Self { repo }
+    }
+}
+
+#[async_trait]
+impl OffsetStore for DbOffsetStore {
+    async fn load(&self, key: &str) -> Result<Option<i64>> {
+        match self.repo.get_channel_state(key).await? {
+            Some(raw) => raw
+                .parse::<i64>()
+                .map(Some)
+                .map_err(|e| Error::other(format!("telegram offset {raw:?} not an i64: {e}"))),
+            None => Ok(None),
+        }
+    }
+
+    async fn store(&self, key: &str, offset: i64) -> Result<()> {
+        self.repo.set_channel_state(key, &offset.to_string()).await
     }
 }
 
@@ -930,6 +1007,51 @@ mod tests {
         assert_eq!(all, vec!["111", "222"]);
 
         assert_eq!(roster.chat_ids_for(Some(tom)).await, vec!["222"]);
+    }
+}
+
+#[cfg(test)]
+mod db_adapter_tests {
+    use super::*;
+    use crate::db::ChannelStateRepo;
+    use crate::db::memory::InMemoryDb;
+
+    fn repo() -> Arc<dyn ChannelStateRepo> {
+        Arc::new(InMemoryDb::new())
+    }
+
+    #[tokio::test]
+    async fn db_roster_reflects_repo_bindings_and_survives_a_fresh_handle() {
+        let repo = repo();
+        let anna = Uuid::new_v4();
+        repo.bind_telegram_chat("111", anna).await.unwrap();
+
+        // A FRESH DbTelegramRoster over the SAME repo sees the binding —
+        // this is the whole point (a restart constructs a new roster
+        // instance, but the underlying store is durable).
+        let roster = DbTelegramRoster::new(repo.clone());
+        assert_eq!(roster.find_operator("111").await, Some(anna));
+        assert_eq!(roster.chat_ids_for(None).await, vec!["111"]);
+        assert_eq!(roster.chat_ids_for(Some(anna)).await, vec!["111"]);
+        assert!(roster.find_operator("unknown").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn db_offset_store_roundtrips_and_survives_a_fresh_handle() {
+        let repo = repo();
+        let store = DbOffsetStore::new(repo.clone());
+        assert_eq!(store.load(TELEGRAM_OFFSET_KEY).await.unwrap(), None);
+
+        store.store(TELEGRAM_OFFSET_KEY, 101).await.unwrap();
+
+        // A fresh handle over the same repo reads back the persisted value —
+        // the exact property InMemoryOffsetStore could never offer (its
+        // module doc: "process-lifetime only — a restart starts from 0").
+        let reloaded = DbOffsetStore::new(repo.clone());
+        assert_eq!(reloaded.load(TELEGRAM_OFFSET_KEY).await.unwrap(), Some(101));
+
+        reloaded.store(TELEGRAM_OFFSET_KEY, 202).await.unwrap();
+        assert_eq!(store.load(TELEGRAM_OFFSET_KEY).await.unwrap(), Some(202));
     }
 }
 

@@ -341,7 +341,20 @@ mod tests {
     }
 
     fn ctx() -> ToolCtx {
-        ToolCtx { principal: principal(), policy: Arc::new(NoopPolicy) }
+        // ToolCtx grew known_targets/incidents/approvals/runbook_runs/memory/
+        // config fields (tools:: Wave, additive per that module's contract
+        // note) after this test helper was written — mechanically updated to
+        // match; this loop's tests don't exercise any of the new fields.
+        ToolCtx {
+            principal: principal(),
+            policy: Arc::new(NoopPolicy),
+            known_targets: Vec::new(),
+            incidents: None,
+            approvals: None,
+            runbook_runs: None,
+            memory: None,
+            config: None,
+        }
     }
 
     fn deps(llm: Arc<dyn LlmProvider>) -> AgentDeps {

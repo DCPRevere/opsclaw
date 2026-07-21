@@ -31,6 +31,22 @@ impl WebEvent {
     pub fn message(text: &str) -> Self {
         WebEvent { kind: "message", body: serde_json::json!({ "text": text }) }
     }
+
+    /// A chat-turn event (`http::routes::chat`'s broadcast after a turn
+    /// completes) — kind `"chat"`, distinct from the generic `"message"`
+    /// kind so the client can render it in the shared chat log specifically
+    /// rather than lumping it in with any other proactive push notice.
+    /// `role` is `"user"` or `"assistant"` (matches `ChatHandler::
+    /// transcript`'s pairs, so a client's render function is the same
+    /// whether the text came from history or from this live event);
+    /// `speaker` is the attribution label (`"assistant"` for the reply, the
+    /// operator's display name for their own message).
+    pub fn chat(role: &str, speaker: &str, text: &str) -> Self {
+        WebEvent {
+            kind: "chat",
+            body: serde_json::json!({ "role": role, "speaker": speaker, "text": text }),
+        }
+    }
 }
 
 /// Bounded broadcast hub. `capacity` is generous (a slow/disconnected

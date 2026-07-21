@@ -8,6 +8,7 @@
 
 pub mod approvals;
 pub mod audit;
+pub mod chat;
 pub mod cli;
 pub mod config_ui;
 pub mod estop;
@@ -53,6 +54,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me", get(handlers::me))
         .route("/api/stream", get(sse::stream))
         .route("/api/stream-ticket", get(sse::stream_ticket))
+        .merge(chat::router())
         .merge(incidents::router())
         .merge(approvals::router())
         .merge(status::router())

@@ -391,6 +391,29 @@ impl ChatHandler for ChatTurn {
 
         Ok(reply.reply)
     }
+
+    /// `ChatHandler::transcript`'s real implementation: this struct's own
+    /// `transcript()` (`Vec<Turn>`) flattened to (role, content) pairs for
+    /// a render-on-load caller (`http::routes::chat::history`). `Turn::
+    /// User`/`Turn::Assistant` are the only variants `chat` ever pushes
+    /// (see above — `ToolResult` never lands in the shared transcript, tool
+    /// exchanges are collapsed by construction before a turn returns), but
+    /// this maps defensively rather than assuming: an unexpected
+    /// `ToolResult` is surfaced as role `"tool"` rather than silently
+    /// dropped, so a future push site's mistake shows up in the UI instead
+    /// of vanishing.
+    async fn transcript(&self) -> Vec<(String, String)> {
+        self.transcript()
+            .into_iter()
+            .map(|t| match t {
+                Turn::User { content } => ("user".to_string(), content),
+                Turn::Assistant { content, .. } => ("assistant".to_string(), content),
+                Turn::ToolResult { name, output, .. } => {
+                    ("tool".to_string(), format!("{name}: {output}"))
+                }
+            })
+            .collect()
+    }
 }
 
 /// Render a webhook JSON payload as plain text for the observation frame.

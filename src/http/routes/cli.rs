@@ -1,8 +1,11 @@
 //! The remote-CLI surface (DESIGN §1/§7: token-auth against the daemon's
 //! gateway). Ported from gianna's `src/http/cli_api.rs` — the PKCE hand-off
 //! (`authorize`/`exchange`) is near-verbatim; the `/cli/v1/*` product
-//! routes are opsclaw's own set (`me`, `status`, `incidents`, `approvals`)
-//! rather than gianna's (`tasks`/`routines`/`reminders`/`memory`).
+//! routes are opsclaw's own set (`me`, `status`, `chat`) rather than
+//! gianna's (`tasks`/`routines`/`reminders`/`memory`). `chat` is a thin
+//! twin over `routes::chat`'s turn logic (`run_chat_turn`) — see that
+//! handler's own doc for the contract; `incidents`/`approvals` bearer twins
+//! are not yet built here.
 //!
 //! Auth is an `ops_` bearer token (see `http::cli_auth`); the web session
 //! cookie is deliberately NOT accepted here, so the two session kinds stay
@@ -32,6 +35,7 @@ pub fn router() -> Router<AppState> {
         .route("/cli/v1/auth/token", post(exchange))
         .route("/cli/v1/me", get(me))
         .route("/cli/v1/status", get(status))
+        .route("/cli/v1/chat", post(chat))
         .route("/cli/v1/token", delete(revoke))
         // In-app "manage my CLI sessions" (web-session authed).
         .route("/api/cli-tokens", get(list_tokens))
@@ -173,6 +177,31 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> Result<Jso
         "heartbeat": heartbeat.as_str(),
         "estop_engaged": estop_engaged,
     })))
+}
+
+/// POST /cli/v1/chat — bearer-authed twin of `POST /api/chat`, for
+/// `opsclaw-cli chat --remote` (DESIGN §7 decision 14). Same body/response
+/// contract (`{"message": "..."}` -> `{"reply": "..."}`) and the same
+/// underlying turn (`routes::chat::run_chat_turn` — one shared team
+/// transcript regardless of which auth form drove the turn, matching
+/// `agent::dispatch::ChatTurn`'s "every chat surface is a window onto the
+/// SAME conversation" doc), just resolved to an account via the `ops_`
+/// bearer token instead of the session cookie. `speaker` is the account's
+/// `display_name`, same attribution the web route uses.
+async fn chat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<super::chat::ChatReq>,
+) -> Result<Json<Value>> {
+    let (account_id, _token_id) = authenticate_cli(&state, &headers).await?;
+    let account = state
+        .repos
+        .by_id(account_id)
+        .await?
+        .ok_or_else(|| Error::unauthorized("unknown account"))?;
+    let reply =
+        super::chat::run_chat_turn(&state, account_id, &account.display_name, &req.message).await?;
+    Ok(Json(json!({ "reply": reply })))
 }
 
 /// DELETE /cli/v1/token — revoke the presented token (logout).

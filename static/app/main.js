@@ -4,7 +4,7 @@
 // in shape from gianna's static/app/main.js.
 import { checkSession, initAuth } from './auth.js';
 import { switchView } from './state.js';
-import { initChat, openStream, closeStream } from './chat.js';
+import { initChat, openStream, closeStream, loadHistory } from './chat.js';
 import { initIncidents } from './incidents.js';
 import { initApprovals } from './approvals.js';
 import { initStatus } from './status.js';
@@ -17,7 +17,7 @@ function initNav() {
 }
 
 document.addEventListener('opsclaw:view', (e) => {
-  if (e.detail.name === 'chat') { openStream(); } else { /* stream stays open across views */ }
+  if (e.detail.name === 'chat') { openStream(); loadHistory(); } else { /* stream stays open across views */ }
 });
 
 async function boot() {

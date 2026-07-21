@@ -13,8 +13,10 @@
 //! Each test binds its OWN server on an ephemeral port (`127.0.0.1:0`) so
 //! the suite can run fully parallel with no shared state between tests.
 
+use opsclaw::channels::ChatHandler;
 use opsclaw::config::Config;
 use opsclaw::db::{Account, AccountRepo};
+use opsclaw::domain::Principal;
 use opsclaw::http::AppState;
 use uuid::Uuid;
 
@@ -724,4 +726,150 @@ async fn push_subscribe_requires_auth_then_roundtrips_to_unsubscribe() {
         )
         .await;
     assert_eq!(unsubscribed.status(), reqwest::StatusCode::OK);
+}
+
+// ---- web chat ----
+
+/// A canned [`ChatHandler`] for the success-path test: echoes back a fixed
+/// reply and records the last `(principal, speaker, message)` it was
+/// called with, so the test can assert what the route actually handed the
+/// chat seam — never trusting an inner `Ok(())`/200 alone to prove the
+/// right thing happened.
+struct FakeChat {
+    reply: String,
+    calls: std::sync::Mutex<Vec<(Principal, String, String)>>,
+}
+
+impl FakeChat {
+    fn new(reply: &str) -> Self {
+        FakeChat { reply: reply.to_string(), calls: std::sync::Mutex::new(Vec::new()) }
+    }
+}
+
+#[async_trait::async_trait]
+impl ChatHandler for FakeChat {
+    async fn chat(
+        &self,
+        principal: Principal,
+        speaker: &str,
+        message: &str,
+    ) -> opsclaw::Result<String> {
+        self.calls.lock().unwrap().push((principal, speaker.to_string(), message.to_string()));
+        Ok(self.reply.clone())
+    }
+}
+
+#[tokio::test]
+async fn chat_without_a_session_is_rejected_with_401() {
+    let state = AppState::fake();
+    let base = spawn_server(state).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/chat"))
+        .json(&serde_json::json!({ "message": "hello" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let resp = reqwest::get(format!("{base}/api/chat/history")).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn chat_on_the_fakes_spine_503s_with_a_clear_body_not_a_500() {
+    // AppState::fake()'s `chat` field is the boot-safe NoopChat default
+    // (never a real agent loop in fakes mode) — the route must surface
+    // that as 503 with an explanatory body, not a masked 500.
+    let state = AppState::fake();
+    seed_account(&state, "chat-noop@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = SessionClient::new();
+    client
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "chat-noop@example.com", "password": "some-password-123" }),
+        )
+        .await;
+
+    let resp = client
+        .post_json(&format!("{base}/api/chat"), &serde_json::json!({ "message": "hi" }))
+        .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("chat is not wired"),
+        "expected a clear 'not wired' message, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn chat_history_on_the_fakes_spine_is_empty_not_an_error() {
+    let state = AppState::fake();
+    seed_account(&state, "chat-hist-noop@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = SessionClient::new();
+    client
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "chat-hist-noop@example.com", "password": "some-password-123" }),
+        )
+        .await;
+
+    let resp = client.get(&format!("{base}/api/chat/history")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["history"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_successful_chat_turn_returns_the_reply_and_lands_on_the_sse_hub() {
+    let mut state = AppState::fake();
+    let fake = std::sync::Arc::new(FakeChat::new("42 is the answer"));
+    state.chat = fake.clone();
+    let account_id = seed_account(&state, "chatter@example.com", "some-password-123").await;
+
+    // Subscribe to the SSE hub BEFORE the turn, so both broadcast events
+    // are guaranteed to be waiting in the receiver's queue afterward.
+    let mut sub = state.web.subscribe();
+
+    let base = spawn_server(state).await;
+    let client = SessionClient::new();
+    client
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "chatter@example.com", "password": "some-password-123" }),
+        )
+        .await;
+
+    let resp = client
+        .post_json(&format!("{base}/api/chat"), &serde_json::json!({ "message": "what is 6*7?" }))
+        .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["reply"], "42 is the answer");
+
+    // The chat seam saw the authed operator's principal, display name, and
+    // exact message — not some placeholder.
+    {
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (principal, speaker, message) = &calls[0];
+        assert!(matches!(principal, Principal::Operator { account } if *account == account_id));
+        assert_eq!(speaker, "Test Operator"); // seed_account's display_name
+        assert_eq!(message, "what is 6*7?");
+    }
+
+    // Both the operator's own message and the reply were broadcast to the
+    // web SSE hub, in order, as "chat"-kind events (module doc:
+    // http::routes::chat — "web chat is a team surface").
+    let ev1 = sub.recv().await.unwrap();
+    assert_eq!(ev1.kind, "chat");
+    assert_eq!(ev1.body["role"], "user");
+    assert_eq!(ev1.body["speaker"], "Test Operator");
+    assert_eq!(ev1.body["text"], "what is 6*7?");
+
+    let ev2 = sub.recv().await.unwrap();
+    assert_eq!(ev2.kind, "chat");
+    assert_eq!(ev2.body["role"], "assistant");
+    assert_eq!(ev2.body["text"], "42 is the answer");
 }

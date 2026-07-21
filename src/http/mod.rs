@@ -39,6 +39,9 @@ use crate::Error;
 /// 500 — none of them should ever reach a handler in ordinary operation
 /// (a `Config`/`Policy` error reaching HTTP is itself a bug worth the loud
 /// 500, not a 400 that would suggest the CLIENT did something wrong).
+/// `Unavailable` is the one deliberate exception to that "500 = bug"
+/// stance: it maps to 503, and (unlike the generic 500 branch below) its
+/// message is shown to the caller verbatim — see the variant's own doc.
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match &self {
@@ -47,6 +50,7 @@ impl IntoResponse for Error {
             Error::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+            Error::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let retry_after = match &self {
@@ -81,6 +85,7 @@ fn user_message(err: &Error) -> String {
         Error::NotFound(m) => format!("{m} not found"),
         Error::Validation(m) | Error::Unauthorized(m) | Error::Conflict(m) => m.clone(),
         Error::RateLimited { message, .. } => message.clone(),
+        Error::Unavailable(m) => m.clone(),
         other => other.to_string(),
     }
 }
@@ -115,6 +120,14 @@ mod tests {
         let resp = Error::rate_limited("slow down", 42).into_response();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(resp.headers().get(axum::http::header::RETRY_AFTER).unwrap(), "42");
+    }
+
+    #[tokio::test]
+    async fn unavailable_maps_to_503_and_shows_its_message() {
+        let resp = Error::unavailable("chat is not wired on this state").into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_string(resp).await;
+        assert!(body.contains("chat is not wired on this state"), "{body}");
     }
 
     async fn body_string(resp: Response) -> String {

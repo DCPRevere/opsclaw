@@ -48,6 +48,15 @@ use crate::{Error, Result};
 /// (three or four diagnostics plus a notify/approval call).
 pub const MAX_STEPS: usize = 16;
 
+/// Step cap for UNATTENDED (heartbeat) turns. A real-cluster sweep is
+/// step-hungry — first sandbox scan hit the 16-step cap while several
+/// namespaces still had genuine faults unexamined — and a heartbeat turn
+/// has no impatient human and no wall-clock deadline, so it gets the
+/// deeper budget (gianna's split: 10 interactive / 20 enrichment, scaled
+/// for cluster-sweep workloads). Interactive turns keep [`MAX_STEPS`]:
+/// they're already bounded by [`TURN_DEADLINE`] and a human is waiting.
+pub const MAX_STEPS_HEARTBEAT: usize = 32;
+
 /// Wall-clock budget for one turn. Steps are bounded at [`MAX_STEPS`], but
 /// each step can sit behind a slow provider call or a slow remote command,
 /// so a degraded backend could otherwise run for many minutes — this is the
@@ -137,10 +146,12 @@ pub async fn run_turn_with_history(
     // The unattended heartbeat path has no impatient human, so it runs on
     // the step cap alone (DESIGN.md's scheduler already tightens/relaxes
     // the OUTER tick cadence around incidents; a single turn's wall clock
-    // isn't this module's place to second-guess for that path).
+    // isn't this module's place to second-guess for that path) — and gets
+    // the deeper cap for the same reason (see MAX_STEPS_HEARTBEAT).
     let deadline = (!deps.heartbeat).then(|| Instant::now() + TURN_DEADLINE);
+    let max_steps = if deps.heartbeat { MAX_STEPS_HEARTBEAT } else { MAX_STEPS };
 
-    for step_num in 0..MAX_STEPS {
+    for step_num in 0..max_steps {
         if let Some(deadline) = deadline
             && Instant::now() >= deadline
         {
@@ -245,7 +256,7 @@ pub async fn run_turn_with_history(
         }
     }
 
-    tracing::warn!(steps = MAX_STEPS, acted, "tool loop did not converge (hit the step cap)");
+    tracing::warn!(steps = max_steps, acted, "tool loop did not converge (hit the step cap)");
     if acted {
         return Ok(finish(acted, best_effort_acted_reply()));
     }

@@ -718,7 +718,8 @@ mod tests {
         // into fire_one_job's failure-budget path, is scheduler::jobs's own
         // test surface, not this module's).
         let mut scripted = ScriptedLlm::new();
-        for _ in 0..agent::MAX_STEPS {
+        // Heartbeat turns run on the deeper unattended cap.
+        for _ in 0..agent::MAX_STEPS_HEARTBEAT {
             scripted.push_text("   ");
         }
         let llm: Arc<dyn LlmProvider> = Arc::new(scripted);

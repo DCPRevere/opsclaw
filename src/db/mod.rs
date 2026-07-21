@@ -13,7 +13,7 @@ pub mod sqlite;
 
 pub use repo::{
     Account, AccountRepo, ApprovalRepo, AuditRepo, ControlRepo, IncidentRepo, JobFailure, JobRepo,
-    RunbookRun, RunbookRunRepo, RunbookStepResult, RunbookSuccessRate, StepOutcome,
+    RunbookRun, RunbookRunRepo, RunbookSuccessRate, StepOutcome, StepStatus,
 };
 
 use std::sync::Arc;

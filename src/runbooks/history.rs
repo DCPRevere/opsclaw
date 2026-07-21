@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::FqTarget;
+use crate::domain::{FqTarget, Principal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,7 +27,9 @@ pub struct StepOutcome {
     pub output: String,
 }
 
-/// One execution of a runbook against a target.
+/// One execution of a runbook against a target. This is the single canonical
+/// type — the persistence layer (`db::RunbookRunRepo`) stores and returns
+/// exactly this, rather than a parallel row struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunbookRun {
     pub id: Uuid,
@@ -35,7 +37,12 @@ pub struct RunbookRun {
     /// file path can move, the title is what an operator recognizes).
     pub runbook: String,
     pub target: FqTarget,
+    /// Who ran it (audit/attribution). `None` on a run constructed purely for
+    /// in-memory success-rate math before persistence assigns one.
+    pub principal: Option<Principal>,
     pub started_at: DateTime<Utc>,
+    /// Set once the run completes; `None` while in flight.
+    pub finished_at: Option<DateTime<Utc>>,
     pub steps: Vec<StepOutcome>,
 }
 
@@ -82,7 +89,9 @@ mod tests {
             id: Uuid::new_v4(),
             runbook: "DLQ backlog triage".into(),
             target: FqTarget::new("remundo", "prod", "web-1"),
+            principal: None,
             started_at: Utc::now(),
+            finished_at: None,
             steps: statuses
                 .iter()
                 .enumerate()

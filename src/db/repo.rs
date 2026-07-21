@@ -6,7 +6,6 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::Result;
@@ -148,40 +147,11 @@ pub trait JobRepo: Send + Sync {
     async fn clear_job_failure(&self, job_id: Uuid, occurrence_key: &str) -> Result<()>;
 }
 
-/// Outcome of one runbook step execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StepOutcome {
-    Success,
-    Failure,
-    /// Step declared `on_failure = continue` and failed, but execution moved on.
-    SkippedAfterFailure,
-}
-
-/// One executed step within a runbook run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunbookStepResult {
-    pub step_index: i32,
-    pub description: String,
-    pub outcome: StepOutcome,
-    pub output: String,
-}
-
-/// One execution of a runbook against a target (brief §7: full execution
-/// history + per-runbook success-rate tracking).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunbookRun {
-    pub id: Uuid,
-    pub runbook_name: String,
-    /// Fully-qualified target the runbook ran against.
-    pub fq_target: String,
-    pub principal: crate::domain::Principal,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
-    /// True only when every step succeeded (or was a declared-ok skip).
-    pub success: bool,
-    pub steps: Vec<RunbookStepResult>,
-}
+// Runbook run history uses the canonical domain types from `runbooks::history`
+// (single source of truth — no parallel row struct). The repo stores and
+// returns exactly `RunbookRun`/`StepOutcome`/`StepStatus`; only the aggregate
+// query result below is a persistence-layer concern with no domain analog.
+pub use crate::runbooks::history::{RunbookRun, StepOutcome, StepStatus};
 
 /// Per-runbook success rate over its recorded run history.
 #[derive(Debug, Clone, Copy, PartialEq)]

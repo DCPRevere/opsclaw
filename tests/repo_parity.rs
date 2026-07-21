@@ -30,7 +30,7 @@ use opsclaw::db::memory::InMemoryDb;
 use opsclaw::db::sqlite::SqliteDb;
 use opsclaw::db::{
     Account, AccountRepo, ApprovalRepo, AuditRepo, ControlRepo, IncidentRepo, JobRepo, RunbookRun,
-    RunbookRunRepo, RunbookStepResult, StepOutcome,
+    RunbookRunRepo, StepOutcome, StepStatus,
 };
 use opsclaw::domain::{
     ApprovalRequest, ApprovalState, FqTarget, Incident, IncidentState, Job, Payload, Principal,
@@ -170,16 +170,14 @@ fn job(name: &str) -> Job {
 fn runbook_run(id: Uuid, runbook_name: &str, success: bool) -> RunbookRun {
     RunbookRun {
         id,
-        runbook_name: runbook_name.into(),
-        fq_target: "remundo::prod::web-1".into(),
-        principal: Principal::System,
+        runbook: runbook_name.into(),
+        target: opsclaw::domain::FqTarget::new("remundo", "prod", "web-1"),
+        principal: Some(Principal::System),
         started_at: Utc::now(),
         finished_at: Some(Utc::now()),
-        success,
-        steps: vec![RunbookStepResult {
+        steps: vec![StepOutcome {
             step_index: 0,
-            description: "check disk".into(),
-            outcome: if success { StepOutcome::Success } else { StepOutcome::Failure },
+            status: if success { StepStatus::Ok } else { StepStatus::Failed },
             output: "ok".into(),
         }],
     }
@@ -560,8 +558,8 @@ runbook_run_record_and_list => |db| {
     db.record_run(&runbook_run(id, "restart-service", true)).await.unwrap();
 
     let got = RunbookRunRepo::get(db, id).await.unwrap().unwrap();
-    assert_eq!(got.runbook_name, "restart-service");
-    assert!(got.success);
+    assert_eq!(got.runbook, "restart-service");
+    assert!(got.succeeded());
     assert_eq!(got.steps.len(), 1);
 
     assert!(RunbookRunRepo::get(db, Uuid::new_v4()).await.unwrap().is_none());

@@ -13,6 +13,7 @@
 pub mod agent;
 pub mod audit;
 pub mod channels;
+pub mod cli;
 pub mod config;
 pub mod db;
 pub mod domain;

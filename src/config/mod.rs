@@ -32,6 +32,7 @@ pub fn default_dir() -> PathBuf {
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub daemon: DaemonCfg,
+    pub http: HttpCfg,
     pub llm: LlmCfg,
     pub memory: MemoryCfg,
     pub telegram: TelegramCfg,
@@ -65,6 +66,49 @@ impl Default for DaemonCfg {
         }
     }
 }
+
+/// HTTP gateway config (Wave 4, `src/http/`, DESIGN.md §3 "HTTP gateway"):
+/// the operator-auth signing secret and the inbound webhook (Alertmanager/
+/// PagerDuty) verification secret. Gianna pattern ported: a placeholder or
+/// too-short `jwt_secret` refuses to boot in live mode (`validate()`), never
+/// silently signs sessions with a guessable key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HttpCfg {
+    /// HS256 JWT signing secret for operator sessions (cookie) and scoped
+    /// tokens (SSE stream tickets, CLI PKCE exchange). `None` resolves to
+    /// [`DEV_JWT_SECRET`] at connect time — fine in fakes mode, refused by
+    /// `validate()` outside it — never generated randomly per-boot, which
+    /// would invalidate every session on every restart.
+    pub jwt_secret: Option<SecretRef>,
+    /// Shared secret for verifying inbound webhook signatures
+    /// (Alertmanager/PagerDuty, DESIGN.md §3: "HMAC/token verification with
+    /// constant-time compare"). `None` refuses every webhook in live mode;
+    /// in fakes mode an unconfigured secret is accepted (there is no real
+    /// sender to spoof in a fully-faked daemon).
+    pub webhook_secret: Option<SecretRef>,
+    /// Whether the session cookie carries the `Secure` attribute. Gianna
+    /// derives this from the app origin being `https://`; opsclaw has no
+    /// configured public origin (DESIGN §3: reached via VPN/tunnel, TLS is
+    /// the norm but not detectable from config alone), so it is an explicit
+    /// flag defaulting to `true` (fail toward MORE secure) — an operator
+    /// running plain http in dev sets this false so the browser will still
+    /// send the cookie.
+    pub cookies_secure: bool,
+}
+
+impl Default for HttpCfg {
+    fn default() -> Self {
+        HttpCfg { jwt_secret: None, webhook_secret: None, cookies_secure: true }
+    }
+}
+
+/// The insecure placeholder JWT secret used only when fully faked (no real
+/// session could matter). `validate()` refuses to boot with this secret
+/// outside fakes mode — mirrors gianna's `dev-insecure-secret-change-me`
+/// (`config.rs`), same string convention so an operator recognizes the
+/// pattern if they've seen gianna's before.
+pub const DEV_JWT_SECRET: &str = "dev-insecure-secret-change-me";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
@@ -259,6 +303,37 @@ impl Config {
             && self.telegram.bot_token.is_none()
     }
 
+    /// Resolve `http.jwt_secret`, falling back to [`DEV_JWT_SECRET`] when
+    /// unset. Callers in live mode must not reach an unset secret at all —
+    /// `validate()` refuses to boot before this is ever called — so the
+    /// fallback only fires in fakes mode, where no real session matters.
+    /// Additionally refuses (even past `validate()`, defence in depth) a
+    /// resolved value that is the placeholder or under 32 bytes outside
+    /// fakes mode, since a `Store`-backed secret isn't checkable until now.
+    pub fn resolve_jwt_secret(&self, store: &SecretStore) -> Result<String> {
+        let secret = match &self.http.jwt_secret {
+            Some(r) => r.resolve(store)?,
+            None => DEV_JWT_SECRET.to_string(),
+        };
+        if !self.fully_faked() {
+            if secret == DEV_JWT_SECRET {
+                return Err(Error::Config(
+                    "http.jwt_secret resolved to the insecure default — set a strong secret \
+                     before deploying"
+                        .into(),
+                ));
+            }
+            if secret.len() < 32 {
+                return Err(Error::Config(
+                    "http.jwt_secret is too short — use at least 32 characters, e.g. \
+                     `openssl rand -base64 48`"
+                        .into(),
+                ));
+            }
+        }
+        Ok(secret)
+    }
+
     /// Effective autonomy for a target, resolved down the tree
     /// (target > env > project); absent everywhere ⇒ `Suggest` (the default
     /// for new targets, brief §5).
@@ -291,6 +366,38 @@ impl Config {
                  the standard docker-compose install provides it)"
                     .into(),
             );
+        }
+        // The web UI/gateway is reachable whenever the daemon is not fully
+        // faked (an operator can always reach a live daemon's HTTP port,
+        // regardless of which external providers are wired) — an unset
+        // jwt_secret would fall back to DEV_JWT_SECRET, letting anyone forge
+        // an operator session. Length/placeholder checks against a Store-
+        // backed secret happen at connect time (validate() has no
+        // SecretStore to resolve one); an Env-backed secret is checkable
+        // here since env vars need no store.
+        if !self.fully_faked() {
+            match &self.http.jwt_secret {
+                None => errs.push(
+                    "live mode requires http.jwt_secret — an unset secret would fall back to \
+                     the insecure dev default, letting anyone forge an operator session"
+                        .into(),
+                ),
+                Some(SecretRef::Env(name)) => match std::env::var(name) {
+                    Ok(v) if v == DEV_JWT_SECRET => errs.push(format!(
+                        "http.jwt_secret (env:{name}) is the insecure default — set a strong \
+                         secret before deploying"
+                    )),
+                    Ok(v) if v.len() < 32 => errs.push(format!(
+                        "http.jwt_secret (env:{name}) is too short — use at least 32 characters, \
+                         e.g. `openssl rand -base64 48`"
+                    )),
+                    Ok(_) => {}
+                    Err(_) => errs.push(format!(
+                        "http.jwt_secret references env:{name}, which is not set"
+                    )),
+                },
+                Some(SecretRef::Store(_)) => {} // resolved + checked at connect time
+            }
         }
         match (&self.push.vapid_private_key, &self.push.vapid_public_key) {
             (Some(_), None) | (None, Some(_)) => {
@@ -449,5 +556,114 @@ mod tests {
         let dbg = format!("{cfg:?}");
         assert!(!dbg.contains("s3cr3t-value-xyzzy"));
         assert!(dbg.contains("OPSCLAW_TEST_SECRET_XYZZY")); // the NAME is fine
+    }
+
+    #[test]
+    fn live_mode_requires_jwt_secret() {
+        let cfg = parse(
+            r#"
+            [llm]
+            api_key = "env:OPENROUTER_API_KEY"
+            models = ["some/model"]
+            [memory]
+            hindsight_url = "http://localhost:8888"
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("http.jwt_secret"), "{err}");
+    }
+
+    #[test]
+    fn live_mode_env_jwt_secret_dev_placeholder_refuses() {
+        unsafe { std::env::set_var("OPSCLAW_TEST_JWT_DEV", super::DEV_JWT_SECRET) };
+        let cfg = parse(
+            r#"
+            [llm]
+            api_key = "env:OPENROUTER_API_KEY"
+            models = ["some/model"]
+            [memory]
+            hindsight_url = "http://localhost:8888"
+            [http]
+            jwt_secret = "env:OPSCLAW_TEST_JWT_DEV"
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("insecure default"), "{err}");
+    }
+
+    #[test]
+    fn live_mode_env_jwt_secret_too_short_refuses() {
+        unsafe { std::env::set_var("OPSCLAW_TEST_JWT_SHORT", "too-short") };
+        let cfg = parse(
+            r#"
+            [llm]
+            api_key = "env:OPENROUTER_API_KEY"
+            models = ["some/model"]
+            [memory]
+            hindsight_url = "http://localhost:8888"
+            [http]
+            jwt_secret = "env:OPSCLAW_TEST_JWT_SHORT"
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("too short"), "{err}");
+    }
+
+    #[test]
+    fn live_mode_env_jwt_secret_strong_enough_passes() {
+        unsafe {
+            std::env::set_var("OPSCLAW_TEST_JWT_OK", "a-sufficiently-long-and-random-secret-value")
+        };
+        let cfg = parse(
+            r#"
+            [llm]
+            api_key = "env:OPENROUTER_API_KEY"
+            models = ["some/model"]
+            [memory]
+            hindsight_url = "http://localhost:8888"
+            [http]
+            jwt_secret = "env:OPSCLAW_TEST_JWT_OK"
+            "#,
+        );
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn fully_faked_mode_needs_no_jwt_secret() {
+        let cfg = Config::default();
+        assert!(cfg.fully_faked());
+        cfg.validate().unwrap(); // no http.jwt_secret set at all
+    }
+
+    #[test]
+    fn resolve_jwt_secret_falls_back_to_dev_default_when_fully_faked() {
+        let cfg = Config::default();
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(dir.path()).unwrap();
+        assert_eq!(cfg.resolve_jwt_secret(&store).unwrap(), super::DEV_JWT_SECRET);
+    }
+
+    #[test]
+    fn resolve_jwt_secret_rejects_dev_default_and_short_secrets_when_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(dir.path()).unwrap();
+        store.set("jwt", super::DEV_JWT_SECRET).unwrap();
+        let mut cfg = parse(
+            r#"
+            [llm]
+            api_key = "env:OPENROUTER_API_KEY"
+            models = ["some/model"]
+            [memory]
+            hindsight_url = "http://localhost:8888"
+            "#,
+        );
+        cfg.http.jwt_secret = Some(SecretRef::store("jwt"));
+        assert!(cfg.resolve_jwt_secret(&store).unwrap_err().to_string().contains("insecure default"));
+
+        store.set("jwt", "short").unwrap();
+        assert!(cfg.resolve_jwt_secret(&store).unwrap_err().to_string().contains("too short"));
+
+        store.set("jwt", "a-sufficiently-long-and-random-secret-value").unwrap();
+        cfg.resolve_jwt_secret(&store).unwrap();
     }
 }

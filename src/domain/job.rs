@@ -1,16 +1,16 @@
 //! Scheduled jobs — the generic recurring-prompt engine.
 //!
 //! A `Job` is a system-defined recurring action: a schedule plus a payload.
-//! The payload is usually a natural-language PROMPT that is re-interpreted
-//! fresh each run (so "send me an activity summary every day at 8" is a row,
-//! not code). The built-in morning note / examen / weekly review are just
-//! seeded jobs of this same machinery.
+//! The payload is usually a natural-language PROMPT that the agent
+//! re-interprets fresh each run (so "scan remundo prod every 5 minutes" is a
+//! row, not code). The built-in per-project scan jobs are just seeded jobs
+//! of this same machinery.
 //!
-//! Design follows the validated prior art (Hermes / OpenClaw): schedules reduce
-//! to {once, interval, cron}; cron is the normal form (the LLM translates "every
-//! day at 8" into a cron expr at creation); the dispatcher is a polling tick that
-//! fires due jobs and advances `next_run_at`; missed runs after downtime are
-//! fast-forwarded, not replayed in a burst.
+//! Design follows the validated prior art (Hermes / OpenClaw / gianna):
+//! schedules reduce to {once, interval, cron}; cron is the normal form; the
+//! dispatcher is a polling tick that fires due jobs and advances
+//! `next_run_at`; missed runs after downtime are fast-forwarded, not
+//! replayed in a burst.
 
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
@@ -27,18 +27,18 @@ pub enum Schedule {
     Interval { every_minutes: i64 },
     /// A standard 5-field cron expression, evaluated in `timezone` (so "0 8 * * *"
     /// means 8am local wall-clock, DST-aware). `timezone` is a typed
-    /// `chrono_tz::Tz` (matching `Household.timezone`) rather than a raw String:
-    /// serde round-trips it as the IANA name (e.g. "Europe/London"), so stored
-    /// JSON rows are byte-identical and deserialize unchanged — but a malformed
-    /// zone now fails loudly at parse time instead of silently collapsing to UTC.
+    /// `chrono_tz::Tz` rather than a raw String: serde round-trips it as the
+    /// IANA name (e.g. "Europe/London"), so stored JSON rows are byte-identical
+    /// and deserialize unchanged — but a malformed zone now fails loudly at
+    /// parse time instead of silently collapsing to UTC.
     Cron { expr: String, timezone: Tz },
 }
 
 impl Schedule {
     /// True for a repeating schedule (Interval/Cron), false for a one-shot
-    /// (Once). A one-shot that fails to send must NOT be advanced past its
+    /// (Once). A one-shot that fails to fire must NOT be advanced past its
     /// occurrence — `advance` would return None and disable it, losing the
-    /// message — so the scheduler uses this to leave it due for a retry.
+    /// action — so the scheduler uses this to leave it due for a retry.
     pub fn is_recurring(&self) -> bool {
         !matches!(self, Schedule::Once { .. })
     }
@@ -60,7 +60,7 @@ impl Schedule {
                 use std::str::FromStr;
                 // `timezone` is already a typed `Tz` (validated at construction /
                 // deserialization) — no fallible string parse, so a stored cron
-                // routine can never silently mis-fire in UTC.
+                // job can never silently mis-fire in UTC.
                 let tz: Tz = *timezone;
                 let cron = Cron::from_str(expr).ok()?;
                 let local_after = after.with_timezone(&tz);
@@ -70,7 +70,7 @@ impl Schedule {
     }
 
     /// True if EVERY adjacent occurrence over the next dozen fires is at least
-    /// `min_minutes` apart — the routine cadence floor. Walking several
+    /// `min_minutes` apart — the job cadence floor. Walking several
     /// occurrences (not just the first gap) catches crafted multi-value crons
     /// like "0,30,35 * * * *" whose tight gap isn't the leading one. Returns
     /// false for a schedule that yields no upcoming occurrence at all.
@@ -88,127 +88,68 @@ impl Schedule {
     }
 }
 
-/// A routine must not run more often than this — a cost/abuse floor shared by the
-/// HTTP (`/api/routines`) and chat (`schedule_job`) creation paths.
-pub const ROUTINE_GAP_MINUTES_MIN: i64 = 15;
-/// Per-household ceiling on the number of routines, shared by both paths.
-pub const ROUTINES_PER_HOUSEHOLD_MAX: usize = 50;
-/// Upper bound on an interval routine (~1 year in minutes). Anything larger is
+/// A job must not run more often than this — a cost/abuse floor for job
+/// creation paths (HTTP + chat + config seeding).
+pub const JOB_GAP_MINUTES_MIN: i64 = 1;
+/// Ceiling on the number of jobs (single-tenant daemon, so this is a global
+/// cap rather than per-household as in gianna).
+pub const JOBS_MAX: usize = 500;
+/// Upper bound on an interval job (~1 year in minutes). Anything larger is
 /// never a real cadence; capping keeps the value well clear of the arithmetic
 /// overflow that would otherwise occur when computing the next run.
-pub const ROUTINE_INTERVAL_MINUTES_MAX: i64 = 366 * 24 * 60;
-
-/// Which built-in system routine a `Payload::SystemPrompt` row resolves to. The
-/// prompt TEXT lives in code (the `*_ROUTINE_PROMPT` consts in
-/// `src/scheduler/jobs.rs`) and is resolved at FIRE time from this kind — so a
-/// seeded system routine no longer snapshots the default prompt into its row.
-/// Editing a const then reaches every UNEDITED seeded routine with no migration.
-///
-/// The serde wire form is the bare `snake_case` name (`"morning"`,
-/// `"weekly_review"`, …) — that exact string is what the seeding migration
-/// writes, so keep these names stable; renaming a variant is a stored-row break.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SystemRoutine {
-    /// The morning summary.
-    Morning,
-    /// The weekly review.
-    WeeklyReview,
-    /// The evening Ignatian examen.
-    Examen,
-    /// Lauds (Morning Prayer) — Office, opt-in.
-    Lauds,
-    /// Vespers (Evening Prayer) — Office, opt-in.
-    Vespers,
-    /// Compline (Night Prayer) — Office, opt-in.
-    Compline,
-}
-
-impl SystemRoutine {
-    /// A short operator-facing label for a built-in routine kind — the name the
-    /// scheduler-health view shows instead of the bare `system_prompt` payload
-    /// tag. Distinct from the serde wire form (which stays snake_case for stored
-    /// rows); this is display only.
-    pub fn display_name(self) -> &'static str {
-        match self {
-            SystemRoutine::Morning => "Morning summary",
-            SystemRoutine::WeeklyReview => "Weekly review",
-            SystemRoutine::Examen => "Examen",
-            SystemRoutine::Lauds => "Lauds",
-            SystemRoutine::Vespers => "Vespers",
-            SystemRoutine::Compline => "Compline",
-        }
-    }
-}
+pub const JOB_INTERVAL_MINUTES_MAX: i64 = 366 * 24 * 60;
 
 impl Payload {
     /// A one-word operator-facing kind for the scheduler-health job listing:
-    /// `text` | `prompt` | a resolved system-routine name. Never dumps the
-    /// payload BODY (a user prompt can be long / private) — just the shape, and
-    /// for system routines the friendly routine name.
-    pub fn kind_label(&self) -> String {
+    /// `text` | `prompt` | `scan_routine`. Never dumps the payload BODY (a
+    /// prompt can be long) — just the shape.
+    pub fn kind_label(&self) -> &'static str {
         match self {
-            Payload::Text(_) => "text".to_string(),
-            Payload::Prompt(_) => "prompt".to_string(),
-            Payload::SystemPrompt { routine } => routine.display_name().to_string(),
+            Payload::Text(_) => "text",
+            Payload::Prompt { .. } => "prompt",
+            Payload::ScanRoutine { .. } => "scan_routine",
         }
     }
 }
 
 /// What a job does when it fires.
+///
+/// Deliberately does NOT snapshot a scan routine's prompt into the row (see
+/// `AGENTS.md` — "Seeded scan-job prompts resolve from code constants at
+/// fire time"): `ScanRoutine` resolves its prompt text from a code constant
+/// keyed by `routine` at fire time, so editing the constant reaches every
+/// unedited seeded job on its very next tick, no migration required. This is
+/// a deliberate DIVERGENCE from gianna's `SystemPrompt`, whose seeded prompt
+/// a household could hand-edit back into a free-text row — opsclaw has no
+/// per-project override path for a scan routine's prompt, so there is no
+/// "hand-edited" variant to fall back to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "body")]
 pub enum Payload {
     /// A fixed message sent verbatim (e.g. a simple reminder).
     Text(String),
-    /// A natural-language instruction re-interpreted fresh each run and the
-    /// resulting reply is delivered (e.g. "summarise today and what's coming up").
-    /// A USER routine — and any HAND-EDITED system routine — carries its text here.
-    Prompt(String),
-    /// A built-in system routine whose prompt text lives in code, resolved from
-    /// the `routine` kind at fire time (never snapshotted into the row). This is
-    /// what fresh seeding writes for the morning/weekly/examen/Office routines; a
-    /// user who edits the prompt converts the row back to a free-text `Prompt`.
-    /// Serializes as `{"kind":"system_prompt","body":{"routine":"morning"}}`.
-    SystemPrompt { routine: SystemRoutine },
-}
-
-/// An optional cheap, deterministic gate evaluated BEFORE any LLM work (the
-/// "wakeAgent" pattern). When a job carries a trigger, the tick runs the check
-/// and only composes/sends if it passes — so a system "morning brief" job can
-/// stay silent on an empty day. User prompt-jobs usually have no trigger (they
-/// always run at their schedule).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Trigger {
-    /// Always proceed (the default — no gate).
-    #[default]
-    Always,
-    /// Only if the household has open/actionable tasks.
-    HasOpenTasks,
-    /// Only if there are calendar events today (needs a connected calendar).
-    HasEventsToday,
-    /// Only if a novena is in progress.
-    HasActiveNovena,
+    /// A natural-language instruction the agent interprets fresh each run.
+    /// An operator-authored job carries its text here.
+    Prompt { body: String },
+    /// A built-in per-project/environment scan routine whose prompt text
+    /// lives in code (a `*_ROUTINE_PROMPT` const in the scheduler), resolved
+    /// from `routine` at fire time — never snapshotted into the row.
+    /// Serializes as `{"kind":"scan_routine","body":{"routine":"..."}}`; the
+    /// wire string is what the seeding path writes, so keep routine keys
+    /// stable — renaming one is a stored-row break.
+    ScanRoutine { routine: String },
 }
 
 /// A scheduled recurring job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub id: Uuid,
-    pub household_id: Uuid,
-    /// Target member: a personal job ("send ME a morning note") delivers only
-    /// to them; None = household-addressed (the seeded digests).
-    #[serde(default)]
-    pub member_id: Option<Uuid>,
-    /// Human name, used for "pause the morning summary" (never an id to the user).
+    /// Human name, used for "pause the remundo scan" (never an id to the operator).
     pub name: String,
     pub schedule: Schedule,
     pub payload: Payload,
-    #[serde(default)]
-    pub trigger: Trigger,
     pub enabled: bool,
-    /// True for the seeded morning/examen/weekly jobs (so we don't duplicate them).
+    /// True for a seeded per-project scan job (so re-seeding doesn't duplicate it).
     #[serde(default)]
     pub system: bool,
     pub next_run_at: Option<DateTime<Utc>>,
@@ -216,48 +157,29 @@ pub struct Job {
     pub created_at: DateTime<Utc>,
     /// Optimistic-concurrency token. Every persisted write bumps it; a writer
     /// updates `WHERE version = <the value it read>` so the scheduler's advance
-    /// and a concurrent user edit can't silently clobber each other (the loser
-    /// of the race sees 0 rows affected and re-reads instead of overwriting).
+    /// and a concurrent operator edit can't silently clobber each other (the
+    /// loser of the race sees 0 rows affected and re-reads instead of
+    /// overwriting).
     #[serde(default)]
     pub version: i64,
 }
 
 impl Job {
-    pub fn new(
-        household_id: Uuid,
-        name: impl Into<String>,
-        schedule: Schedule,
-        payload: Payload,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, schedule: Schedule, payload: Payload) -> Self {
         let now = Utc::now();
         let next_run_at = schedule.next_after(now);
         Self {
             id: Uuid::new_v4(),
-            household_id,
-            member_id: None,
             name: name.into(),
             schedule,
             payload,
-            trigger: Trigger::Always,
             enabled: true,
             system: false,
             next_run_at,
-            last_run_at: now.into(),
+            last_run_at: None,
             created_at: now,
             version: 0,
         }
-    }
-
-    /// Target this job at one member (builder-style): their personal recurring
-    /// message, delivered only to them.
-    pub fn personal_to(mut self, member: Option<Uuid>) -> Self {
-        self.member_id = member;
-        self
-    }
-
-    pub fn with_trigger(mut self, trigger: Trigger) -> Self {
-        self.trigger = trigger;
-        self
     }
 
     pub fn system(mut self) -> Self {
@@ -341,10 +263,9 @@ mod tests {
         // A daily 8am-London job that hasn't run for days: advancing from "now"
         // should land on the NEXT future 8am, not replay the backlog.
         let mut job = Job::new(
-            Uuid::new_v4(),
-            "morning",
+            "remundo-prod-morning-scan",
             Schedule::Cron { expr: "0 8 * * *".into(), timezone: chrono_tz::Europe::London },
-            Payload::Prompt("summarise the day".into()),
+            Payload::Prompt { body: "scan remundo prod".into() },
         );
         let now = t(10, 0); // mid-morning, today's 8am already passed
         let next = job.advance(now).unwrap();
@@ -359,10 +280,9 @@ mod tests {
         // leaving the guard's stale value in the PAST would keep is_due() true
         // forever (a hot loop / burst). One advance must settle on a FUTURE time.
         let mut job = Job::new(
-            Uuid::new_v4(),
             "ping",
             Schedule::Interval { every_minutes: 5 },
-            Payload::Prompt("status".into()),
+            Payload::Prompt { body: "status".into() },
         );
         // Backdate so the first next_after(last_run) is ~5 years before `now`:
         // 5 years / 5 min ≈ 525k steps, well past the 100k guard.
@@ -378,10 +298,9 @@ mod tests {
     #[test]
     fn one_shot_disables_after_firing() {
         let mut job = Job::new(
-            Uuid::new_v4(),
             "reminder",
             Schedule::Once { at: t(9, 0) },
-            Payload::Text("bins out".into()),
+            Payload::Text("disk usage check".into()),
         );
         assert!(job.is_due(t(9, 1)));
         assert!(job.advance(t(9, 1)).is_none());
@@ -421,5 +340,26 @@ mod tests {
             "timezone": "Not/AZone"
         }));
         assert!(bad.is_err(), "a bad IANA name must fail deserialization, not default to UTC");
+    }
+
+    #[test]
+    fn scan_routine_payload_does_not_snapshot_prompt() {
+        // ScanRoutine carries only the routine key, never prompt text — the
+        // resolve-from-code-constant-at-fire-time invariant (AGENTS.md).
+        let p = Payload::ScanRoutine { routine: "remundo_default_scan".into() };
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "scan_routine", "body": { "routine": "remundo_default_scan" } })
+        );
+        assert_eq!(p.kind_label(), "scan_routine");
+    }
+
+    #[test]
+    fn payload_kind_label_never_leaks_prompt_body() {
+        let p = Payload::Prompt { body: "a very long and possibly sensitive instruction".into() };
+        assert_eq!(p.kind_label(), "prompt");
+        let t = Payload::Text("also sensitive".into());
+        assert_eq!(t.kind_label(), "text");
     }
 }

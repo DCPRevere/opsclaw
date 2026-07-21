@@ -121,6 +121,23 @@ pub trait Channel: Send + Sync {
 #[async_trait]
 pub trait ChatHandler: Send + Sync {
     async fn chat(&self, principal: Principal, speaker: &str, message: &str) -> Result<String>;
+
+    /// A snapshot of the shared team transcript as (role, content) pairs —
+    /// `role` is `"user"` or `"assistant"` (a stable, low-cardinality tag a
+    /// render-on-load caller can switch on without depending on
+    /// `llm::Turn`'s shape directly). DEFAULTED, empty: most callers of
+    /// this trait (the channel inbound loop, the CLI REPL) have no history
+    /// surface to render and don't need it; `http::routes::chat`'s
+    /// `GET /api/chat/history` is the one caller that does, and
+    /// `agent::dispatch::ChatTurn` is the one impl that overrides it (its
+    /// own `transcript()` already holds exactly this — see that method's
+    /// doc). Kept minimal on purpose: no pagination, no timestamps, no
+    /// per-operator filtering — the shared transcript is small (bounded by
+    /// `ChatTurn::TRANSCRIPT_KEEP_ENTRIES`) and the same conversation every
+    /// surface sees, so a flat `Vec` is the whole contract.
+    async fn transcript(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// Boot-safe default: chat is not wired (fakes-mode state before
@@ -132,9 +149,9 @@ pub struct NoopChat;
 #[async_trait]
 impl ChatHandler for NoopChat {
     async fn chat(&self, _principal: Principal, _speaker: &str, _message: &str) -> Result<String> {
-        Err(crate::Error::Config(
+        Err(crate::Error::unavailable(
             "chat is not wired on this state (boot-safe NoopChat — daemon_state installs the real handler)"
-                .into(),
+                .to_string(),
         ))
     }
 }

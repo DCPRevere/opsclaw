@@ -36,6 +36,15 @@ pub enum Error {
     #[error("rate limited: {message}")]
     RateLimited { message: String, retry_after_secs: u64 },
 
+    /// Additive (web chat): a request hit a seam that is intentionally
+    /// unwired on this state — `channels::NoopChat` in fakes mode, chiefly.
+    /// Distinct from `Config` (a genuine boot-time misconfiguration that
+    /// SHOULD be a loud 500): this is the expected shape of "you're running
+    /// without the real agent loop wired up", so `http::IntoResponse` maps
+    /// it to 503 with the message shown verbatim, never masked like a 500.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
@@ -86,6 +95,12 @@ impl Error {
     /// response's `Retry-After` header.
     pub fn rate_limited(msg: impl Into<String>, retry_after_secs: u64) -> Self {
         Error::RateLimited { message: msg.into(), retry_after_secs }
+    }
+
+    /// Additive (web chat): a seam that is intentionally unwired on this
+    /// state (see [`Error::Unavailable`]'s own doc).
+    pub fn unavailable(msg: impl Into<String>) -> Self {
+        Error::Unavailable(msg.into())
     }
 
     /// A transient LLM failure worth retrying / falling through.

@@ -189,6 +189,11 @@ systemd unit · docs. *Exit: brief §13 definition of done, item by item.*
   command-shaped audit records a human can replay — over SDK crates.
 - **web UI stack**: gianna-style no-build vanilla JS embedded via
   `include_str!`; revisit only if the four surfaces genuinely hurt.
+- **drop the transitive `rsa` dep** (RUSTSEC-2023-0071, currently ignored in
+  deny.toml): it arrives via jsonwebtoken and web-push-native→jwt-simple; we
+  use no RSA path (HS256 JWT + ES256 VAPID). Revisit lighter JWT/web-push
+  crates when the auth and push channels are built (Wave 4), then remove the
+  ignore.
 - **legacy config**: machines that ran the zeroclaw-fork opsclaw have an
   old-schema `~/.opsclaw/config.toml` (`schema_version = 2`) — discovered on
   this very machine at Wave 0 boot. `onboard`/`doctor` (Wave 4) must detect

@@ -28,6 +28,26 @@ pub struct Classification {
     pub rule: &'static str,
 }
 
+/// The line the classifier should see for a given TOOL's command. The
+/// kubernetes tool/executor contract strips the leading binary (`get pods
+/// -n x`; `KubernetesExecutor` prepends `kubectl` itself), but every
+/// kubectl rule below matches `^kubectl\s+…` — so classify what will
+/// actually run, not the tool-internal spelling. Without this, every k8s
+/// READ fail-closed to Medium (observe mode blocked the entire kubernetes
+/// tool, seen live), and — worse, the other direction — a bare
+/// `delete namespaces --all` line dodged the kubectl hard-block patterns,
+/// leaving only the tool's self-declared risk between it and execution.
+/// Every other tool (docker, systemd, argocd, ssh, shell) composes the
+/// full binary-prefixed line already and passes through untouched.
+pub fn line_for_classification<'c>(tool: &str, command: &'c str) -> std::borrow::Cow<'c, str> {
+    let trimmed = command.trim_start();
+    if tool == "kubernetes" && !trimmed.starts_with("kubectl") {
+        std::borrow::Cow::Owned(format!("kubectl {trimmed}"))
+    } else {
+        std::borrow::Cow::Borrowed(command)
+    }
+}
+
 /// Classify a full command line (the max over its segments).
 pub fn classify_command(line: &str) -> Classification {
     // Hard-block patterns that SPAN shell operators (the fork bomb is `:|:&`)

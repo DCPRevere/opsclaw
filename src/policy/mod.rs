@@ -207,7 +207,8 @@ impl Policy {
     }
 
     pub async fn execute(&self, req: CommandRequest) -> Result<PolicyOutcome> {
-        let classification = classify::classify_command(&req.command);
+        let classification =
+            classify::classify_command(&classify::line_for_classification(&req.tool, &req.command));
         // The classifier may raise, never lower, the tool's declared class.
         let risk = classification.risk.max(req.declared_risk);
         let fq = req.target.to_string();
@@ -422,7 +423,10 @@ impl ExecuteApproved for Policy {
     ) -> Result<PolicyOutcome> {
         // Re-derive risk defensively; the human approved THIS command, but
         // the always-on protections still apply.
-        let classification = classify::classify_command(&approval.command);
+        let classification = classify::classify_command(&classify::line_for_classification(
+            &approval.tool,
+            &approval.command,
+        ));
         let risk = classification.risk.max(approval.risk);
         let scrubbed = self.scrubber.scrub(&approval.command);
         // Audit records carry the ORIGINAL requester (who composed the
@@ -630,6 +634,37 @@ mod tests {
         }
         assert!(rig.executor.ran.lock().unwrap().is_empty());
         assert_eq!(outcomes(&rig.db).await, vec![AuditOutcome::Blocked]);
+    }
+
+    #[tokio::test]
+    async fn observe_executes_a_bare_kubernetes_read_line() {
+        // The kubernetes tool composes `get pods -n x` (no leading kubectl —
+        // the executor supplies the binary). The classifier must see the
+        // line as it will run, or every k8s read fail-closes to Medium and
+        // observe mode blocks the whole tool (happened live).
+        let rig = rig_with(config_at(Autonomy::Observe), FakeExecutor::ok(""));
+        let mut req = request("get pods -n monitoring", RiskClass::Read);
+        req.tool = "kubernetes".into();
+        let out = rig.policy.execute(req).await.unwrap();
+        assert!(matches!(out, PolicyOutcome::Executed(_)), "got {out:?}");
+    }
+
+    #[tokio::test]
+    async fn bare_kubernetes_delete_all_still_hits_the_hard_block() {
+        // The same normalization must work in the DANGEROUS direction: a
+        // bare `delete namespaces --all` line previously dodged the
+        // kubectl hard-block patterns entirely.
+        let rig = rig_with(config_at(Autonomy::Auto), FakeExecutor::ok(""));
+        let mut req = request("delete namespaces --all", RiskClass::Destructive);
+        req.tool = "kubernetes".into();
+        let out = rig.policy.execute(req).await.unwrap();
+        match out {
+            PolicyOutcome::Blocked { reason, .. } => {
+                assert!(reason.contains("hard-blocked"), "{reason}")
+            }
+            other => panic!("expected hard block, got {other:?}"),
+        }
+        assert!(rig.executor.ran.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

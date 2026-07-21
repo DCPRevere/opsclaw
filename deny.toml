@@ -1,0 +1,60 @@
+# cargo-deny configuration — supply-chain, licence, and advisory checks.
+# Run with: cargo deny check   (or: just deny)
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+ignore = [
+    # Revisit if this stops applying: OpsClaw's jsonwebtoken dependency is
+    # pinned to the rust_crypto backend (Cargo.toml — default-features =
+    # false, features = ["rust_crypto"]), so no RSA-backed JWT algorithm is
+    # reachable and there is no RSA key anywhere in the system. Kept as a
+    # placeholder pattern from gianna (RUSTSEC-2023-0071, the Marvin Attack
+    # timing oracle in `rsa`, pulled transitively by jsonwebtoken's RS*
+    # support) — remove this ignore once `cargo deny check` confirms `rsa`
+    # isn't actually in the dependency graph.
+]
+
+[licenses]
+version = 2
+# Licences we allow for third-party dependencies. OpsClaw itself is
+# proprietary for now (DESIGN.md §7.15 — no LICENSE file until a deliberate
+# decision) and is exempted below via `private`.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",                  # BSD Zero Clause (OSI; public-domain-equivalent)
+    "CDLA-Permissive-2.0",   # Mozilla CA-bundle data crates (webpki-roots) via reqwest/rustls
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+
+# Don't fail on our own unpublished, proprietary crate.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+# Crates we never want pulled in.
+deny = [
+    { name = "openssl" },        # we use rustls everywhere (reqwest: rustls feature)
+    { name = "openssl-sys" },
+]
+allow = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

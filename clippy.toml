@@ -1,0 +1,10 @@
+# Clippy lint configuration.
+# Lint levels themselves are set on the crate (or via `just clippy`, which denies
+# all warnings); this file tunes individual lints.
+
+# Flag overly large error/enum/future types early.
+too-many-arguments-threshold = 8
+type-complexity-threshold = 250
+
+# Avoid accidental disclosure of secrets in logs/messages.
+disallowed-methods = []

@@ -1,0 +1,67 @@
+name: CI
+
+# Test + clippy on every push and PR. No release workflow yet — this is the
+# only workflow in the repo for now (gianna's release.yml calls its CI via
+# workflow_call before building/publishing an image; add that here once
+# OpsClaw has something to release).
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_call:
+
+# A push superseding an in-flight run cancels it (saves minutes, last push wins).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only reads the repo.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Some actions (e.g. Swatinem/rust-cache@v2) still default to the deprecated
+  # Node 20 runtime; opt into Node 24 ahead of the 2026-06-16 forced cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # No service containers: OpsClaw's store is SQLite (DESIGN.md §7.2), so
+    # the repo parity suite runs in-process under plain `cargo test` — unlike
+    # gianna, there's no Postgres server to stand up for it.
+    steps:
+      # fetch-depth: 0 pulls full history + tags so the migration-immutability
+      # check can resolve its base ref (the newest release tag).
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Applied migrations are immutable (AGENTS.md — a checksum mismatch
+      # crash-loops the daemon on boot). Assert no migration file that existed
+      # at the last release tag has drifted BEFORE spending time on build/test.
+      - name: Migration immutability
+        run: ./scripts/check-migration-immutability.sh
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      # Purpose-built rust cache: prunes stale artifacts, splits registry/target,
+      # and actually updates on hits (actions/cache never re-saved on exact key).
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Full suite, including the repo parity suite, runs against SQLite —
+      # no external DB needed (mirrors `just ci`).
+      - name: Test
+        run: cargo test
+
+      # Licence/advisory gate (mirrors `just ci`).
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2

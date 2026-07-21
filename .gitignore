@@ -1,0 +1,34 @@
+# Build artifacts
+/target
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# SQLite store (dev/local — the daemon's own db, not source)
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Logs
+*.log
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+.claude/
+.playwright-mcp/
+
+# Coverage / profiling
+*.profraw
+/coverage
+tarpaulin-report.*
+
+# Scratch workspace
+/scratchpad

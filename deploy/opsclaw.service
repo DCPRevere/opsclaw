@@ -1,0 +1,44 @@
+# Example systemd unit for a bare-binary OpsClaw install (DESIGN.md §5 —
+# the standard install is docker-compose; this is the supported alternative
+# for teams running the binary directly on a bastion/ops host).
+#
+# Install:
+#   sudo cp opsclaw.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now opsclaw
+#
+# Assumes a dedicated `opsclaw` user whose home holds ~/.opsclaw (config,
+# secret store, SQLite, e-stop sentinel). Adjust paths to taste.
+
+[Unit]
+Description=OpsClaw — autonomous SRE agent daemon
+# The daemon needs outbound network at boot (LLM provider, targets, and —
+# when web push is configured — the browser vendors' push services).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opsclaw
+Group=opsclaw
+ExecStart=/usr/local/bin/opsclaw
+Restart=on-failure
+RestartSec=5
+
+# LOAD-BEARING (DESIGN.md §5): on stop, the daemon drains HTTP first, then
+# gives background work (an in-flight scheduler tick, detached memory
+# retains) a bounded ~20s window to settle (http::server::run's
+# DRAIN_BUDGET). TimeoutStopSec MUST exceed that budget, or systemd
+# SIGKILLs mid-drain and a claimed-but-not-sent job is abandoned. 20s drain
+# + margin = 35s.
+TimeoutStopSec=35
+
+# Hardening — the daemon needs its home (state) and network, nothing else
+# host-wide. Loosen ProtectHome if ~/.opsclaw lives under /home.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opsclaw
+Environment=HOME=/var/lib/opsclaw
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

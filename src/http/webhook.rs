@@ -118,6 +118,19 @@ pub fn verify_signature(
     Ok(())
 }
 
+/// Produce a `t=<unix_ts>,v1=<hmac_hex>` signature header value over `body`
+/// — the exact counterpart of [`verify_signature`], used by the OUTBOUND
+/// webhook channel (`channels::webhook_out`) so any receiver (including
+/// another opsclaw, or a relay implementing this documented convention)
+/// can verify deliveries with the shared secret. One signing scheme in one
+/// module, both directions.
+pub fn sign_payload(secret: &[u8], body: &[u8], now: chrono::DateTime<chrono::Utc>) -> String {
+    let t = now.timestamp().to_string();
+    let signed_payload = [t.as_bytes(), b".", body].concat();
+    let v1 = hmac_sha256_hex(secret, &signed_payload);
+    format!("t={t},v1={v1}")
+}
+
 fn parse_sig(sig: &str) -> Option<(String, String)> {
     let (mut t, mut v1) = (None, None);
     for part in sig.split(',') {

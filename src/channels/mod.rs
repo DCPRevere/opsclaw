@@ -18,6 +18,7 @@ pub mod push;
 pub mod recording;
 pub mod telegram;
 pub mod web;
+pub mod webhook_out;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;

@@ -143,6 +143,23 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         let sender = Arc::new(WebPushSender::new(&private_key)?);
         channels.push(Arc::new(PushChannel::new(state.repos.clone(), sender)));
     }
+    // Outbound escalation webhook (decision 5's second guaranteed path).
+    // The signing secret is a resolved credential like any other:
+    // scrubber-registered before the channel ever holds it.
+    if let Some(url) = &state.config.webhook_out.url {
+        let secret = match &state.config.webhook_out.secret {
+            Some(r) => {
+                let s = r.resolve(&secret_store)?;
+                scrubber.register("WEBHOOK_OUT_SECRET", &s);
+                Some(s)
+            }
+            None => None,
+        };
+        channels.push(Arc::new(crate::channels::webhook_out::WebhookOutChannel::new(
+            url.clone(),
+            secret,
+        )));
+    }
     state.channel = Arc::new(MultiChannel::new(channels));
 
     // The real webhook ingest (verified alert → framed observation → full

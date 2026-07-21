@@ -44,6 +44,7 @@ pub struct Config {
     pub memory: MemoryCfg,
     pub telegram: TelegramCfg,
     pub push: PushCfg,
+    pub webhook_out: WebhookOutCfg,
     pub limits: LimitsCfg,
     #[serde(rename = "project")]
     pub projects: Vec<ProjectCfg>,
@@ -169,6 +170,18 @@ pub struct TelegramCfg {
 pub struct PushCfg {
     pub vapid_private_key: Option<SecretRef>,
     pub vapid_public_key: Option<String>,
+}
+
+/// Outbound escalation webhook (DESIGN §7 decision 5: with Telegram, one of
+/// the two GUARANTEED escalation paths — push is best-effort). Every
+/// outbound team message is POSTed to `url`; `secret` optionally signs
+/// deliveries with the same `t=<ts>,v1=<hex>` scheme the inbound webhook
+/// verifies (`channels::webhook_out`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct WebhookOutCfg {
+    pub url: Option<String>,
+    pub secret: Option<SecretRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -6,11 +6,12 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::Result;
 use crate::audit::AuditRecord;
-use crate::domain::{ApprovalRequest, ApprovalState, Incident, IncidentState};
+use crate::domain::{ApprovalRequest, ApprovalState, Incident, IncidentState, Job};
 
 #[async_trait]
 pub trait IncidentRepo: Send + Sync {
@@ -84,4 +85,122 @@ pub trait ControlRepo: Send + Sync {
 
     /// Time-windowed cleanup of expired claims and similar bookkeeping.
     async fn prune_housekeeping(&self, now: DateTime<Utc>) -> Result<()>;
+}
+
+/// A job occurrence's accumulated failure state — the retry budget for a job
+/// whose fire keeps failing (gianna's per-household `JobFailure`, generalized
+/// to opsclaw's single-tenant `(job_id, occurrence_key)` keying). Durable so
+/// the budget survives restarts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobFailure {
+    pub job_id: Uuid,
+    pub occurrence_key: String,
+    /// How many times this occurrence has failed (>= 1 once a row exists).
+    pub attempts: i64,
+    /// When it first failed — the clock a give-up policy measures against.
+    pub first_failed_at: DateTime<Utc>,
+    /// When it most recently failed — the clock a backoff window is measured
+    /// against.
+    pub last_failed_at: DateTime<Utc>,
+    pub last_error: String,
+}
+
+/// Scheduled recurring jobs (the proactive/scan engine). See `domain::job`
+/// for `Job`/`Schedule`/`Payload`.
+#[async_trait]
+pub trait JobRepo: Send + Sync {
+    async fn insert(&self, job: &Job) -> Result<()>;
+    async fn get(&self, id: Uuid) -> Result<Option<Job>>;
+    /// Update a job, enforcing optimistic concurrency: the write applies only
+    /// `WHERE version = job.version` (the value the caller read), then
+    /// returns the row with `version` bumped. `Error::Conflict` if the row's
+    /// stored version had already moved on (a concurrent writer won) — the
+    /// caller re-reads via `get` and retries rather than clobbering.
+    async fn update(&self, job: &Job) -> Result<Job>;
+    /// Enabled jobs whose `next_run_at` has passed — the dispatcher drains
+    /// these each tick.
+    async fn due_jobs(&self, now: DateTime<Utc>) -> Result<Vec<Job>>;
+    /// All jobs (management/listing; single-tenant daemon, so this is
+    /// unscoped unlike gianna's per-household `list_for_household`).
+    async fn list(&self) -> Result<Vec<Job>>;
+
+    /// Record one failure of a job occurrence (keyed by `(job_id,
+    /// occurrence_key)`). Inserts on first failure (attempts = 1) or
+    /// increments attempts and updates `last_failed_at`/`last_error`
+    /// thereafter. Returns the resulting state so the caller can decide
+    /// backoff/give-up in one round-trip.
+    async fn record_job_failure(
+        &self,
+        job_id: Uuid,
+        occurrence_key: &str,
+        error: &str,
+        at: DateTime<Utc>,
+    ) -> Result<JobFailure>;
+    /// The current failure state for a job occurrence, or `None` if it has
+    /// never failed (or was cleared on a prior success).
+    async fn job_failure_state(
+        &self,
+        job_id: Uuid,
+        occurrence_key: &str,
+    ) -> Result<Option<JobFailure>>;
+    /// Clear a job occurrence's failure record (called on successful fire,
+    /// or when the occurrence is given up on).
+    async fn clear_job_failure(&self, job_id: Uuid, occurrence_key: &str) -> Result<()>;
+}
+
+/// Outcome of one runbook step execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepOutcome {
+    Success,
+    Failure,
+    /// Step declared `on_failure = continue` and failed, but execution moved on.
+    SkippedAfterFailure,
+}
+
+/// One executed step within a runbook run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunbookStepResult {
+    pub step_index: i32,
+    pub description: String,
+    pub outcome: StepOutcome,
+    pub output: String,
+}
+
+/// One execution of a runbook against a target (brief §7: full execution
+/// history + per-runbook success-rate tracking).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunbookRun {
+    pub id: Uuid,
+    pub runbook_name: String,
+    /// Fully-qualified target the runbook ran against.
+    pub fq_target: String,
+    pub principal: crate::domain::Principal,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    /// True only when every step succeeded (or was a declared-ok skip).
+    pub success: bool,
+    pub steps: Vec<RunbookStepResult>,
+}
+
+/// Per-runbook success rate over its recorded run history.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunbookSuccessRate {
+    pub total_runs: i64,
+    pub successful_runs: i64,
+    /// `successful_runs as f64 / total_runs as f64`; 0.0 when `total_runs == 0`.
+    pub rate: f64,
+}
+
+#[async_trait]
+pub trait RunbookRunRepo: Send + Sync {
+    /// Record a completed run (including its per-step outcomes) in one call
+    /// — a run is written once, atomically, not built up step-by-step.
+    async fn record_run(&self, run: &RunbookRun) -> Result<()>;
+    async fn get(&self, id: Uuid) -> Result<Option<RunbookRun>>;
+    /// A runbook's run history, most recent first, capped at `limit`.
+    async fn list_for_runbook(&self, runbook_name: &str, limit: i64) -> Result<Vec<RunbookRun>>;
+    /// Success rate for one runbook across its recorded history (brief §7:
+    /// low-success runbooks get surfaced for review).
+    async fn success_rate(&self, runbook_name: &str) -> Result<RunbookSuccessRate>;
 }

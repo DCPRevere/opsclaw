@@ -37,6 +37,12 @@ pub enum Error {
     #[error("llm context overflow: {0}")]
     LlmContextOverflow(String),
 
+    /// A database-layer failure (sqlx). Kept as its own variant (rather than
+    /// folded into `Other`) so callers can match on it distinctly from a
+    /// generic internal error if they ever need to.
+    #[error("database: {0}")]
+    Database(#[from] sqlx::Error),
+
     #[error("{0}")]
     Other(String),
 }

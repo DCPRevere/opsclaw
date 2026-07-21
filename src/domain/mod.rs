@@ -5,6 +5,10 @@
 //! Environment is policy, Target is connection; policy attributes inherit
 //! down the tree, credentials never do.
 
+pub mod job;
+
+pub use job::{JOB_GAP_MINUTES_MIN, JOB_INTERVAL_MINUTES_MAX, JOBS_MAX, Job, Payload, Schedule};
+
 use std::fmt;
 use std::str::FromStr;
 

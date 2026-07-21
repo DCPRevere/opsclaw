@@ -13,6 +13,7 @@ pub mod config_ui;
 pub mod estop;
 pub mod incidents;
 pub mod invites;
+pub mod push;
 pub mod status;
 pub mod webhooks;
 
@@ -58,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .merge(estop::router())
         .merge(audit::router())
         .merge(invites::router())
+        .merge(push::router())
         .merge(cli::router())
         .merge(webhooks::router())
         .merge(config_ui::router())

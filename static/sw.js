@@ -82,17 +82,48 @@ self.addEventListener('message', (event) => {
   if (event.data === 'skipWaiting') self.skipWaiting();
 });
 
-// ---- Web push (TODO: opsclaw#push-task) ----
+// ---- Web push ----
 //
-// A SEPARATE later task ports gianna's VAPID subscribe flow and push.rs
-// (DESIGN §3: "web push is how incident alerts and approval requests reach
-// operators' iOS/Android lock screens"). This handler is deliberately a
-// stub — installed and push-capability-ready (the manifest + this
-// listener are what iOS requires to treat the installed PWA as
-// push-eligible at all), but showing nothing until that task wires
-// /api/push/subscribe and the VAPID keypair. See gianna's static/sw.js for
-// the reference shape (title/body/icon from the push payload,
-// showNotification, notificationclick focuses/opens the app).
+// DESIGN §3/§4: "web push is how incident alerts and approval requests
+// reach operators' iOS/Android lock screens". The payload is the small JSON
+// object `channels::push::PushChannel::send` builds server-side:
+// { title, body, url } — url is where notificationclick below deep-links
+// (e.g. "/app#approvals"). Ported in shape from gianna's static/sw.js.
 self.addEventListener('push', (event) => {
-  // TODO(opsclaw#push-task): parse event.data, self.registration.showNotification(...).
+  let data = { title: 'OpsClaw', body: 'You have a new notification.', url: '/app' };
+  if (event.data) {
+    try { data = { ...data, ...event.data.json() }; } catch (_) { data.body = event.data.text(); }
+  }
+  event.waitUntil(
+    self.registration.showNotification(data.title, {
+      body: data.body,
+      icon: '/static/img/icon-192.svg',
+      badge: '/static/img/icon-192.svg',
+      data: { url: data.url || '/app' },
+    })
+  );
+});
+
+// Tapping a notification focuses an already-open client on the target URL if
+// one exists, else opens a new one — never stacks a duplicate tab per push.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = event.notification.data && event.notification.data.url ? event.notification.data.url : '/app';
+  event.waitUntil((async () => {
+    const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of clientsList) {
+      if (c.url.includes(new URL(url, self.location.origin).pathname) && 'focus' in c) {
+        return c.focus();
+      }
+    }
+    // No matching client yet: focus any open OpsClaw tab and navigate it,
+    // or fall back to opening a fresh one.
+    for (const c of clientsList) {
+      if ('navigate' in c && 'focus' in c) {
+        await c.focus();
+        return c.navigate(url);
+      }
+    }
+    return self.clients.openWindow(url);
+  })());
 });

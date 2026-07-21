@@ -220,12 +220,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_worker_declares_a_push_handler_stub() {
+    async fn service_worker_declares_push_and_notificationclick_handlers() {
+        // Push task landed: the worker actually shows notifications and
+        // deep-links on tap now, not the earlier TODO stub.
         let resp = service_worker().await;
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("addEventListener('push'"), "{text}");
-        assert!(text.contains("TODO"), "push handler must be flagged as a stub, {text}");
+        assert!(text.contains("showNotification"), "{text}");
+        assert!(text.contains("addEventListener('notificationclick'"), "{text}");
+        assert!(!text.contains("TODO"), "push handler should no longer be a stub, {text}");
     }
 
     #[tokio::test]

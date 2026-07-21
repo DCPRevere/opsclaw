@@ -3,7 +3,8 @@
 //! small diff. Wave 1 ports Telegram (long-polling; offset persisted only
 //! after genuine hand-off), the CLI capture channel, and `RecordingChannel`.
 //! [`web::WebHub`] (Wave 4) is the SSE-backed channel; its ticket-based auth
-//! lives in `http::sse`. Web push is a later addition, not yet landed.
+//! lives in `http::sse`. [`push::PushChannel`] is the send-only web-push
+//! channel (gianna's `push.rs` ported — see that module's doc comment).
 //!
 //! Trait-surface additions over the frozen shape (all DEFAULTED, no existing
 //! signature touched): `send_typing`, `self_handle`, `drop_self_messages`.
@@ -12,6 +13,7 @@
 //! no-op default.
 
 pub mod cli;
+pub mod push;
 pub mod recording;
 pub mod telegram;
 pub mod web;

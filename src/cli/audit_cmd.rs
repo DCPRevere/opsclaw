@@ -92,6 +92,57 @@ pub async fn verify(db: &Db, from_seq: i64) -> Result<VerifyOutcome> {
     Ok(VerifyOutcome { ok: true, records_verified: total_verified, failure: None })
 }
 
+/// One dry-run-log entry: a mutation the agent WOULD have run, refused by
+/// the autonomy gate (observe mode) and recorded in the audit chain
+/// (`policy::mod`: "the audit record IS the dry-run log").
+#[derive(Debug, Serialize)]
+pub struct DryRunEntry {
+    pub ts: chrono::DateTime<chrono::Utc>,
+    pub principal: String,
+    pub target: String,
+    pub tool: String,
+    pub command: String,
+    pub risk: String,
+}
+
+/// `opsclaw-cli dry-run-log` — the most recent `limit` autonomy-blocked
+/// commands, oldest first (so reading top-to-bottom follows time). This is
+/// the promotion-review surface: before raising a target from `observe` to
+/// `suggest`, read what it WOULD have done. Walks the chain forward keeping
+/// a bounded tail — the chain is append-only and unbounded, the answer
+/// isn't.
+pub async fn dry_run_log(db: &Db, limit: usize) -> Result<Vec<DryRunEntry>> {
+    let mut cursor = 1i64;
+    let mut tail: std::collections::VecDeque<DryRunEntry> = Default::default();
+    loop {
+        let page = db.repos().range(cursor, PAGE_SIZE).await?;
+        if page.is_empty() {
+            break;
+        }
+        let page_len = page.len() as i64;
+        cursor = page.last().map(|r| r.seq + 1).unwrap_or(cursor);
+        for r in page {
+            if matches!(r.outcome, crate::audit::AuditOutcome::Blocked) {
+                if tail.len() == limit {
+                    tail.pop_front();
+                }
+                tail.push_back(DryRunEntry {
+                    ts: r.ts,
+                    principal: r.principal.to_string(),
+                    target: r.fq_target,
+                    tool: r.tool,
+                    command: r.command,
+                    risk: r.risk.to_string(),
+                });
+            }
+        }
+        if page_len < PAGE_SIZE {
+            break;
+        }
+    }
+    Ok(tail.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +192,34 @@ mod tests {
         let outcome = verify(&db, 1).await.unwrap();
         assert!(outcome.ok, "{outcome:?}");
         assert_eq!(outcome.records_verified, 10);
+    }
+
+    #[tokio::test]
+    async fn dry_run_log_returns_only_blocked_records_bounded_by_limit() {
+        let db = Db::fake();
+        let mut tail: Option<AuditRecord> = None;
+        for seq in 1..=8 {
+            let mut r = unsealed_record(seq);
+            // Odd seqs are autonomy-blocked mutations; even ran fine.
+            if seq % 2 == 1 {
+                r.outcome = AuditOutcome::Blocked;
+                r.command = format!("kubectl delete pod x-{seq}");
+                r.risk = RiskClass::Destructive;
+            }
+            let sealed = chain::seal(r, tail.as_ref()).unwrap();
+            db.repos().append(&sealed).await.unwrap();
+            tail = Some(sealed);
+        }
+
+        let all = dry_run_log(&db, 10).await.unwrap();
+        assert_eq!(all.len(), 4);
+        assert!(all.iter().all(|e| e.command.starts_with("kubectl delete")));
+
+        // Bounded: only the MOST RECENT `limit` entries survive, in time order.
+        let last_two = dry_run_log(&db, 2).await.unwrap();
+        assert_eq!(last_two.len(), 2);
+        assert_eq!(last_two[0].command, "kubectl delete pod x-5");
+        assert_eq!(last_two[1].command, "kubectl delete pod x-7");
     }
 
     #[tokio::test]

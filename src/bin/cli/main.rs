@@ -165,6 +165,30 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Encrypted secret store management. Values NEVER pass through argv
+    /// (visible in ps/shell history) — `set` reads from a hidden prompt,
+    /// piped stdin, --from-env, or --from-file.
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommand,
+    },
+    /// Run one diagnose cycle against a configured target NOW and print
+    /// the agent's report (same code path as a scheduled scan).
+    Scan {
+        /// `project::env::target` path.
+        target: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What the agent WOULD have run: mutations refused by observe-mode
+    /// autonomy, from the audit chain. Read this before promoting a
+    /// target's autonomy.
+    DryRunLog {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
     /// Open the web UI in a browser ($BROWSER or the platform default);
     /// with --tunnel, first stand up an SSH port-forward to a remote
     /// daemon and open the local end.
@@ -174,6 +198,29 @@ enum Command {
         #[arg(long)]
         tunnel: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum SecretCommand {
+    /// Store a secret under NAME. Value source (in order): --from-env,
+    /// --from-file, piped stdin, else a hidden interactive prompt.
+    Set {
+        name: String,
+        /// Read the value from this environment variable.
+        #[arg(long)]
+        from_env: Option<String>,
+        /// Read the value from this file (e.g. a kubeconfig path lives in
+        /// config, but a CA bundle's CONTENTS could be stored this way).
+        #[arg(long)]
+        from_file: Option<PathBuf>,
+    },
+    /// List stored secret NAMES (never values).
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove one stored secret.
+    Rm { name: String },
 }
 
 #[derive(Subcommand)]
@@ -702,12 +749,118 @@ async fn dispatch(
             opsclaw::cli::remote::status::whoami(&session, json).await?;
         }
 
+        Command::Secret { command } => match command {
+            SecretCommand::Set { name, from_env, from_file } => {
+                let value = read_secret_value(&name, from_env.as_deref(), from_file.as_deref())?;
+                let outcome = opsclaw::cli::secret_cmd::set(home, &name, &value)?;
+                println!(
+                    "{} store:{} — reference it from config as \"store:{}\"{}",
+                    if outcome.replaced { "replaced" } else { "stored" },
+                    outcome.name,
+                    outcome.name,
+                    " (restart the daemon to pick up the change)",
+                );
+            }
+            SecretCommand::List { json } => {
+                let names = opsclaw::cli::secret_cmd::list(home)?;
+                if json {
+                    opsclaw::cli::output::print_json(&names);
+                } else if names.is_empty() {
+                    println!("(no stored secrets)");
+                } else {
+                    for n in names {
+                        println!("store:{n}");
+                    }
+                }
+            }
+            SecretCommand::Rm { name } => {
+                if opsclaw::cli::secret_cmd::rm(home, &name)? {
+                    println!("removed store:{name}");
+                } else {
+                    eprintln!("no stored secret named {name:?}");
+                    std::process::exit(1);
+                }
+            }
+        },
+
+        Command::Scan { target, json } => {
+            let config = Config::load(Some(cfg_path))?;
+            config.validate()?;
+            // Full daemon wiring (no HTTP bind) — a scan drives the same
+            // composer/policy path the scheduler does (see `Chat`'s local
+            // arm for the same reasoning).
+            let state = opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
+            let outcome = opsclaw::cli::scan_cmd::run(&state, &target).await?;
+            if json {
+                opsclaw::cli::output::print_json(&outcome);
+            } else {
+                match &outcome.report {
+                    Some(report) => println!("{report}"),
+                    None => println!("(scan completed; the agent had nothing to report)"),
+                }
+            }
+            state.chat.drain(std::time::Duration::from_secs(20)).await;
+        }
+
+        Command::DryRunLog { limit, json } => {
+            let db = open_db(cfg_path).await?;
+            let entries = opsclaw::cli::audit_cmd::dry_run_log(&db, limit).await?;
+            if json {
+                opsclaw::cli::output::print_json(&entries);
+            } else if entries.is_empty() {
+                println!("(dry-run log is empty — no autonomy-blocked commands recorded)");
+            } else {
+                for e in &entries {
+                    println!(
+                        "{}  {}  {}  [{}] {}: {}",
+                        e.ts.format("%Y-%m-%d %H:%M:%S"),
+                        e.principal,
+                        e.target,
+                        e.risk,
+                        e.tool,
+                        e.command
+                    );
+                }
+            }
+        }
+
         Command::Ui { tunnel } => {
             let outcome = opsclaw::cli::ui_cmd::run(cfg_path, tunnel.as_deref()).await?;
             println!("opened {}", outcome.url);
         }
     }
     Ok(())
+}
+
+/// Acquire a secret VALUE without it ever appearing in argv: an env var, a
+/// file, piped stdin, or (interactive) a hidden prompt — in that order of
+/// explicitness. Trailing newlines are trimmed (every source here appends
+/// one mechanically; a real credential ending in '\n' is vanishingly rare
+/// next to the certainty of `echo`/heredoc/file trailing newlines).
+fn read_secret_value(
+    name: &str,
+    from_env: Option<&str>,
+    from_file: Option<&std::path::Path>,
+) -> opsclaw::Result<String> {
+    use std::io::IsTerminal;
+    if let Some(var) = from_env {
+        return std::env::var(var).map_err(|_| {
+            opsclaw::Error::Config(format!("environment variable {var} is not set"))
+        });
+    }
+    if let Some(path) = from_file {
+        let raw = std::fs::read_to_string(path)?;
+        return Ok(raw.trim_end_matches(['\n', '\r']).to_string());
+    }
+    if std::io::stdin().is_terminal() {
+        let value = rpassword::prompt_password(format!("value for store:{name} (hidden): "))
+            .map_err(|e| opsclaw::Error::other(format!("could not read hidden input: {e}")))?;
+        Ok(value)
+    } else {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+        Ok(buf.trim_end_matches(['\n', '\r']).to_string())
+    }
 }
 
 /// Load the saved remote session or fail with the standard "please log in"
@@ -800,6 +953,15 @@ mod tests {
             &["opsclaw-cli", "whoami"],
             &["opsclaw-cli", "ui"],
             &["opsclaw-cli", "ui", "--tunnel", "op@bastion.example.com"],
+            &["opsclaw-cli", "secret", "set", "es-password"],
+            &["opsclaw-cli", "secret", "set", "es-password", "--from-env", "ES_PASSWORD"],
+            &["opsclaw-cli", "secret", "set", "ca-bundle", "--from-file", "/tmp/ca.crt"],
+            &["opsclaw-cli", "secret", "list", "--json"],
+            &["opsclaw-cli", "secret", "rm", "es-password"],
+            &["opsclaw-cli", "scan", "remundo::sandbox::cluster"],
+            &["opsclaw-cli", "scan", "remundo::sandbox::cluster", "--json"],
+            &["opsclaw-cli", "dry-run-log"],
+            &["opsclaw-cli", "dry-run-log", "--limit", "10", "--json"],
             &["opsclaw-cli", "estop", "--remote"],
             &["opsclaw-cli", "estop", "--resume", "--remote"],
         ];

@@ -58,6 +58,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Auth & crypto (operator accounts, tokens, secret store, audit hash chain)
 argon2 = "0.5"
+rpassword = "7"
 sha2 = "0.11"
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 aes-gcm = "0.11"

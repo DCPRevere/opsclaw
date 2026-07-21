@@ -39,5 +39,7 @@ pub mod postmortem_cmd;
 pub mod prompt;
 pub mod remote;
 pub mod runbook_cmd;
+pub mod scan_cmd;
+pub mod secret_cmd;
 pub mod ui_cmd;
 pub mod vapid;

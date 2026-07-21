@@ -2,23 +2,37 @@
 # k3d/run.sh — Tier 2 kubernetes fault-injection harness orchestrator
 # (DESIGN.md §6 "Tier 2, kubernetes").
 #
-# Creates a throwaway k3d cluster (opsclaw on the host would point its
-# `kubernetes` target at this cluster's kubeconfig — the bastion-adjacent
-# production shape in miniature), runs each scenario's arm → verify → disarm
-# → verify-clean cycle against it, and deletes the cluster on every exit path.
+# Creates a throwaway k3d cluster, runs each scenario's arm → verify → point
+# a REAL opsclaw daemon at the cluster's kubeconfig as its `kubernetes`
+# target and assert detection (sim/daemon-harness.sh — shared with sim/run.sh;
+# see that file's header for exactly what's checked deterministically vs.
+# gated behind the live-eval tier) → disarm → verify-clean, and deletes the
+# cluster on every exit path.
 #
-# What this script does NOT do yet: point a live opsclaw daemon at the
-# cluster and assert it detected the fault via a structured notify call
-# matching expected.json. That's the actual acceptance test (mirrors the
-# sim/run.sh TODO) and needs the daemon's kubernetes-target + sim-runner
-# integration, a later wave. Everything up to and including "the fault is
-# really present in the cluster" is built and verified here today.
+# The daemon runs with a SCRUBBED, NON-INHERITED environment
+# (daemon-harness.sh's harness_daemon_env — DESIGN.md §6, gianna's
+# web-tests lesson) against a throwaway OPSCLAW_HOME + generated config.toml
+# declaring this cluster as a `kubernetes` target (credential = the k3d
+# kubeconfig path k3d_kubeconfig already writes per-slot, never merged into
+# ~/.kube/config — same rule this harness already applies to every other
+# kubectl/helm call here). Without OPSCLAW_LIVE_EVALS=1 + OPENROUTER_API_KEY
+# (same two-var gate as tests/evals.rs/docs/EVALS.md), the daemon boots with
+# the clearly-logged FakeLlm (src/llm/fakes.rs), so full "was the fault
+# detected" assertions are impossible and are explicitly printed as SKIPPED
+# rather than silently passed; what deterministic mode still proves: the
+# daemon boots on the generated config, doctor's probe reaches the cluster
+# through the same executor construction path the daemon boots with
+# (kubectl version against the throwaway kubeconfig), a scan tick actually
+# fires against the target, the daemon survives the armed fault, and (for
+# must_notify=false scenarios) silence holds even under a tool-less fake.
 #
 # Usage:
 #   k3d/run.sh                     # every scenario, one cluster, sequentially
 #   k3d/run.sh crashloop            # one scenario
 #   k3d/run.sh crashloop cluster-death   # a subset
 #   k3d/run.sh --keep               # leave the cluster up after a pass (debugging)
+#
+# OPSCLAW_LIVE_EVALS=1 OPENROUTER_API_KEY=sk-or-... k3d/run.sh   # full acceptance incl. live detection
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,11 +61,20 @@ if [ "${#SCENARIOS[@]}" -eq 0 ]; then
 fi
 
 k3d_require_tools
+for bin in jq cargo; do
+    command -v "$bin" >/dev/null 2>&1 || k3d_die "required tool '${bin}' not found on PATH"
+done
 
 # Private temp dir for kubeconfigs — never merged into ~/.kube/config (see
 # k3d_kubeconfig in lib.sh). Reaped alongside the cluster on every exit path.
 K3D_RUN_TMPDIR="$(mktemp -d)"
 export K3D_RUN_TMPDIR
+
+# Build the daemon binaries ONCE, up front (not per-scenario): every
+# scenario boots a fresh daemon against its own throwaway OPSCLAW_HOME, but
+# they all run the SAME opsclaw/opsclaw-cli build, and all point at the ONE
+# cluster this run.sh invocation owns.
+harness_build_daemon_binaries "${SCRIPT_DIR}/.."
 
 SLOT="run${SLOT_SUFFIX}"
 CLUSTER_NAME="$(k3d_cluster_name "$SLOT")"
@@ -83,6 +106,26 @@ run_one_scenario() {
     local scenario="$1"
     local sdir="${SCRIPT_DIR}/scenarios/${scenario}"
     local rc=0
+    local opsclaw_home; opsclaw_home="$(mktemp -d)"
+    local daemon_log="${opsclaw_home}/daemon.log"
+    local daemon_pid=""
+
+    # Per-scenario daemon teardown — mirrors sim/run.sh's per-scenario
+    # _reap_this. One daemon per scenario (not one shared across the whole
+    # run) even though all scenarios share ONE cluster: a shared daemon
+    # would carry incidents opened by a PREVIOUS scenario into the next
+    # one's assertions, which would make "exactly one incident" and "zero
+    # incidents" both meaningless — an incident count is only evidence about
+    # THIS scenario's fault if nothing else could have put a row there.
+    _reap_this_daemon() {
+        [ -n "$daemon_pid" ] && harness_stop_daemon "$daemon_pid"
+        if [ "${KEEP:-0}" -eq 0 ]; then
+            rm -rf "$opsclaw_home" 2>/dev/null || true
+        else
+            k3d_log "[${scenario}] --keep set, leaving daemon home at ${opsclaw_home} (log: ${daemon_log})"
+        fi
+    }
+    trap _reap_this_daemon RETURN
 
     [ -d "$sdir" ] || k3d_die "no such scenario: ${scenario} (looked in ${sdir})"
     [ -x "${sdir}/arm.sh" ] || k3d_die "${scenario}: arm.sh missing or not executable"
@@ -97,16 +140,54 @@ run_one_scenario() {
     fi
 
     if [ "$rc" -eq 0 ]; then
-        k3d_log "[${scenario}] fault armed — TODO(daemon-integration): point a live opsclaw"
-        k3d_log "  daemon at this cluster (kubeconfig $(k3d_kubeconfig "$SLOT")) as its"
-        k3d_log "  kubernetes target using the scenario's fq_target from expected.json, wait"
-        k3d_log "  for a detection tick, and assert:"
-        k3d_log "    - opsclaw_notify called exactly once (or zero times if must_notify=false)"
-        k3d_log "    - the notify payload's fault/severity match expected.json"
-        k3d_log "    - no further notify calls fire while the fault stays armed (anti-spam)"
-        k3d_log "  This is the actual DESIGN.md §6 acceptance assertion; everything above and"
-        k3d_log "  below it (cluster boot, fault is verifiably real, clean disarm) is wired"
-        k3d_log "  and passing today without a daemon."
+        k3d_log "[${scenario}] fault armed — booting a real opsclaw daemon against it (DESIGN.md §6)"
+
+        local fq_target project_name env_name target_toml must_notify severity
+        fq_target="$(jq -r '.fq_target' "${sdir}/expected.json")"
+        project_name="$(printf '%s' "$fq_target" | cut -d: -f1)"
+        env_name="$(printf '%s' "$fq_target" | cut -d: -f3)"
+
+        # Exported BEFORE calling harness_kubernetes_target_toml: that
+        # function runs in a command-substitution subshell, so an export
+        # made INSIDE it never reaches this shell — see its doc comment.
+        # Declared and assigned separately (not `export FOO="$(...)"`) so a
+        # failing k3d_kubeconfig subshell's exit code isn't masked by
+        # export's own (SC2155).
+        local kubeconfig_path
+        kubeconfig_path="$(k3d_kubeconfig "$SLOT")"
+        export OPSCLAW_HARNESS_KUBECONFIG="$kubeconfig_path"
+        target_toml="$(harness_kubernetes_target_toml "${fq_target##*::}")"
+        harness_write_config "$opsclaw_home" 5 "$project_name" "$env_name" "$target_toml"
+
+        if harness_live_gated; then
+            daemon_pid="$(harness_run_daemon_live "$opsclaw_home" "$daemon_log")"
+        else
+            daemon_pid="$(harness_run_daemon "$opsclaw_home" "$daemon_log")"
+        fi
+
+        if ! harness_wait_daemon_ready "$opsclaw_home" "$daemon_pid" 30; then
+            k3d_log "[${scenario}] FAIL: daemon did not become ready — see ${daemon_log}"
+            rc=1
+        else
+            k3d_log "[${scenario}] daemon up (pid ${daemon_pid}, home ${opsclaw_home}, log ${daemon_log})"
+
+            must_notify="$(jq -r '.must_notify' "${sdir}/expected.json")"
+            severity="$(jq -r '.severity' "${sdir}/expected.json")"
+
+            # cluster-death's fault IS "the target is unreachable" (DESIGN.md
+            # §6: "untestable if the agent lived inside it") — a green doctor
+            # probe there would mean the fault isn't armed, not that
+            # detection works, so this is the one scenario that expects
+            # doctor to report UNREACHABLE rather than reachable.
+            local expect_reachable="true"
+            [ "$scenario" = "cluster-death" ] && expect_reachable="false"
+
+            if ! harness_assert_detection "$opsclaw_home" "$daemon_log" "$fq_target" \
+                    "${fq_target}-scan" "$must_notify" "$severity" "$expect_reachable"; then
+                k3d_log "[${scenario}] FAIL: daemon-detection assertion failed"
+                rc=1
+            fi
+        fi
     fi
 
     k3d_log "[${scenario}] disarming"
@@ -130,7 +211,11 @@ for scenario in "${SCENARIOS[@]}"; do
 done
 
 if [ "$overall_rc" -eq 0 ]; then
-    k3d_log "all scenarios passed (fault-injection layer only — see TODO above for daemon assertion)"
+    if harness_live_gated; then
+        k3d_log "all scenarios passed — including live-tier detection (OPSCLAW_LIVE_EVALS=1)"
+    else
+        k3d_log "all scenarios passed (deterministic tier only — see 'SKIPPED live-tier' lines above; set OPSCLAW_LIVE_EVALS=1 + OPENROUTER_API_KEY for full DESIGN.md §6 detection assertions)"
+    fi
 else
     k3d_log "one or more scenarios FAILED"
 fi

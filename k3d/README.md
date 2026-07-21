@@ -11,9 +11,10 @@ substrate.
 
 `k3d/run.sh` creates one throwaway k3d cluster (single node, no agents),
 then per scenario: arm → **verify the fault is real** (kubectl status
-fields, not just that `apply` exited 0) → (today: stop here and report; see
-TODO below) → disarm → verify clean. The cluster is deleted on every exit
-path.
+fields, not just that `apply` exited 0) → boot a real `opsclaw` daemon
+against the cluster and assert detection (`sim/daemon-harness.sh`, shared
+with `sim/run.sh` — see "What's wired today" below) → disarm → verify
+clean. The cluster is deleted on every exit path.
 
 Each scenario in `k3d/scenarios/<name>/` is three files:
 
@@ -65,31 +66,42 @@ Resource use is capped per scenario the same way `sim/` caps its containers —
 percentage of host RAM, so the fault is bounded regardless of how much memory
 the dev host actually has.
 
-## What's wired today vs. TODO
+## What's wired today
 
-**Working today:** cluster create/delete, all five scenarios' arm/disarm
-round-trip with real verification (a genuine `CrashLoopBackOff` waiting
-reason, a genuine `OOMKilled` lastState from a real cgroup limit, a genuine
-`ProgressDeadlineExceeded` + `ImagePullBackOff` pair, a genuinely unreachable
-API server after `k3d cluster stop` corroborated against the docker
-container state, a genuinely `Ready` healthy Deployment for the silent
-control).
+**Fault injection layer:** cluster create/delete, all five scenarios'
+arm/disarm round-trip with real verification (a genuine `CrashLoopBackOff`
+waiting reason, a genuine `OOMKilled` lastState from a real cgroup limit, a
+genuine `ProgressDeadlineExceeded` + `ImagePullBackOff` pair, a genuinely
+unreachable API server after `k3d cluster stop` corroborated against the
+docker container state, a genuinely `Ready` healthy Deployment for the
+silent control).
 
-**TODO (later wave — daemon sim-runner integration):** `k3d/run.sh` does not
-yet point a live `opsclaw` daemon at the cluster and assert detection. The
-wiring point is marked inline in `k3d/run.sh` with
-`TODO(daemon-integration)`, immediately after arm and before disarm — the
-same shape as the equivalent TODO in `sim/run.sh`. Once the daemon has a way
-to load a `kubernetes` target pointed at the scenario's kubeconfig, that TODO
-block becomes:
+**Daemon-detection assertion (DESIGN.md §6, `sim/daemon-harness.sh` — shared
+with `sim/run.sh`, see `sim/README.md`'s "What's wired today" for the full
+breakdown):**
+`k3d/run.sh` boots a REAL `opsclaw` daemon per scenario, under a scrubbed,
+non-inherited environment, against a throwaway `OPSCLAW_HOME` + generated
+`config.toml` declaring the cluster as a `kubernetes` target (credential =
+the throwaway kubeconfig path `k3d_kubeconfig` already writes — never
+`~/.kube/config`). One daemon PER scenario, not one shared across the whole
+run, even though every scenario shares the one cluster: a shared daemon
+would carry incidents opened by a previous scenario into the next one's
+assertions.
 
-1. Configure/point the daemon at the scenario's `fq_target`.
-2. Wait for (or force) a scan tick.
-3. Assert `opsclaw_notify` was called exactly once when
-   `expected.json.must_notify` is true (payload's `fault`/`severity`
-   matching), or zero times when false.
-4. Assert no further notify calls fire while the fault stays armed
-   (anti-spam).
+Deterministic tier (always runs): doctor's probe reaches the target through
+the same executor construction path the daemon boots with, a scan tick
+fires, the daemon survives the armed fault, and (for `must_notify=false`)
+the incidents table stays empty. Live tier
+(`OPSCLAW_LIVE_EVALS=1`+`OPENROUTER_API_KEY`, same gate as
+`tests/evals.rs`): exactly one incident (or zero) across two observed ticks,
+severity matching `expected.json`. Everything the deterministic tier can't
+prove is printed as an explicit `SKIPPED` line.
+
+**cluster-death is the one exception to "doctor must reach the target":**
+its entire premise is the target being unreachable (DESIGN.md §6:
+"untestable if the agent lived inside it"), so `run_one_scenario` passes
+`expect_reachable=false` for it — the harness asserts doctor reports
+UNREACHABLE, which is the correct positive check for that one fault class.
 
 ## Scenarios
 

@@ -133,7 +133,32 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
 
 /// Seed the per-project scan jobs (first boot; idempotent — existing jobs
 /// are left alone). Called by both binaries right before `server::run`.
+///
+/// The interval is normally the fixed operational default (30 minutes) but
+/// is overridable via `OPSCLAW_SCAN_INTERVAL_MINUTES` — a real operational
+/// knob (some fleets want a tighter or looser default cadence than 30
+/// minutes for every seeded job) that also happens to be exactly what the
+/// Tier 2 sim/k3d harnesses need: `Job::new` computes `next_run_at` as
+/// `now + every_minutes`, so a 30-minute default would make the harness wait
+/// up to half an hour for the very first scan tick. Clamped to
+/// `JOB_GAP_MINUTES_MIN` (never 0/negative — that would mean "always due",
+/// a hot loop) and loudly logged when it diverges from the default, exactly
+/// like `llm::build_chain`'s fake-LLM warning: an operator (or harness
+/// author) staring at unexpected scan cadence needs this in the log, not
+/// buried in a debug flag.
 pub async fn seed_scan_jobs(state: &AppState) -> Result<()> {
+    const DEFAULT_SCAN_INTERVAL_MINUTES: i64 = 30;
+    let every_minutes = std::env::var("OPSCLAW_SCAN_INTERVAL_MINUTES")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v.max(crate::domain::JOB_GAP_MINUTES_MIN))
+        .unwrap_or(DEFAULT_SCAN_INTERVAL_MINUTES);
+    if every_minutes != DEFAULT_SCAN_INTERVAL_MINUTES {
+        tracing::warn!(
+            every_minutes,
+            "OPSCLAW_SCAN_INTERVAL_MINUTES override active — seeded scan jobs will fire every {every_minutes} minute(s) instead of the {DEFAULT_SCAN_INTERVAL_MINUTES}-minute default"
+        );
+    }
     let deps = crate::http::server::scheduler_deps(state);
-    crate::scheduler::seed_default_scan_jobs(&deps, 30).await
+    crate::scheduler::seed_default_scan_jobs(&deps, every_minutes).await
 }

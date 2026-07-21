@@ -50,12 +50,12 @@ pub fn executor_for_target(
             })?;
             Ok(Arc::new(SshExecutor::new(SshParams {
                 host,
-                port: None,
-                user: None,
+                port: target.ssh_port,
+                user: target.ssh_user.clone(),
                 identity_file,
                 jump_host: None,
-                known_hosts_path: None,
-                strict_host_key_checking: None,
+                known_hosts_path: target.ssh_known_hosts_path.clone(),
+                strict_host_key_checking: target.ssh_strict_host_key_checking.clone(),
             })))
         }
         TargetKindName::Kubernetes => {

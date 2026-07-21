@@ -1,0 +1,441 @@
+//! Configuration: TOML at `~/.opsclaw/config.toml` + env overlay, and the
+//! encrypted secret store.
+//!
+//! Gianna patterns kept: real-when-credential-set (else clearly-logged fake),
+//! `validate()` fails hard before bind on dangerous misconfig, and nothing
+//! that fails open. Structural improvement over gianna: `Config` holds
+//! [`SecretRef`]s (names), never values — a `{:?}` of Config cannot leak a
+//! credential because the value was never there. Values are resolved at
+//! connect time and registered with the output scrubber (policy layer).
+
+mod secrets;
+
+pub use secrets::{SecretRef, SecretStore};
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::domain::{Autonomy, ExpectedState, ResourceType, TargetKind};
+use crate::{Error, Result};
+
+/// Default config directory: `~/.opsclaw`.
+pub fn default_dir() -> PathBuf {
+    std::env::var_os("OPSCLAW_HOME").map(PathBuf::from).unwrap_or_else(|| {
+        let home =
+            std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        home.join(".opsclaw")
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct Config {
+    pub daemon: DaemonCfg,
+    pub llm: LlmCfg,
+    pub memory: MemoryCfg,
+    pub telegram: TelegramCfg,
+    pub push: PushCfg,
+    pub limits: LimitsCfg,
+    #[serde(rename = "project")]
+    pub projects: Vec<ProjectCfg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DaemonCfg {
+    pub listen: String,
+    /// SQLite database path; `:memory:`-style ephemeral DBs are test-only.
+    pub db_path: Option<PathBuf>,
+    /// Base heartbeat tick in seconds; the scheduler tightens it adaptively
+    /// while incidents are active.
+    pub tick_seconds: u64,
+    /// External dead-man receiver pinged every tick (DESIGN §4). Optional in
+    /// adjacent placements, mandatory in-cluster.
+    pub deadman_url: Option<String>,
+}
+
+impl Default for DaemonCfg {
+    fn default() -> Self {
+        DaemonCfg {
+            listen: "127.0.0.1:8484".into(),
+            db_path: None,
+            tick_seconds: 300,
+            deadman_url: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct LlmCfg {
+    /// API key reference. Shipped default resolves from `env:OPENROUTER_API_KEY`
+    /// when that variable is set (see [`Config::load`]). Absent ⇒ FakeLlm.
+    pub api_key: Option<SecretRef>,
+    /// Ordered model list for OpenRouter's server-side fallback. Required when
+    /// `api_key` is set — gianna's lesson: a key with no models silently 400s
+    /// every call, so validate() refuses it.
+    pub models: Vec<String>,
+    /// Base URL override (OpenRouter default; any OpenAI-compatible endpoint).
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct MemoryCfg {
+    /// Hindsight base URL. Live mode refuses to boot without it (memory is a
+    /// core promise); absent in fakes mode ⇒ honest no-op.
+    pub hindsight_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct TelegramCfg {
+    pub bot_token: Option<SecretRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct PushCfg {
+    pub vapid_private_key: Option<SecretRef>,
+    pub vapid_public_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LimitsCfg {
+    pub max_actions_per_hour: u32,
+    pub max_cost_per_day_cents: u32,
+}
+
+impl Default for LimitsCfg {
+    fn default() -> Self {
+        // Conservative defaults; 0 is NOT "unlimited" anywhere in opsclaw —
+        // 0 means "no actions"/"no spend" (failing closed, not open).
+        LimitsCfg { max_actions_per_hour: 30, max_cost_per_day_cents: 500 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCfg {
+    pub name: String,
+    pub autonomy: Option<Autonomy>,
+    #[serde(rename = "env", default)]
+    pub envs: Vec<EnvCfg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvCfg {
+    pub name: String,
+    pub autonomy: Option<Autonomy>,
+    pub expected_state: Option<ExpectedState>,
+    #[serde(rename = "target", default)]
+    pub targets: Vec<TargetCfg>,
+}
+
+/// Config-file spelling of the target kind: a plain `kind` string with
+/// optional `provider`/`region` fields, kept flat because serde's `flatten`
+/// is incompatible with `deny_unknown_fields` — and typo protection on
+/// target tables matters more than a nested enum in TOML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetKindName {
+    Ssh,
+    Local,
+    Kubernetes,
+    Cloud,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetCfg {
+    pub name: String,
+    pub kind: TargetKindName,
+    /// Required when `kind = "cloud"`.
+    pub provider: Option<crate::domain::CloudProvider>,
+    pub region: Option<String>,
+    pub autonomy: Option<Autonomy>,
+    pub expected_state: Option<ExpectedState>,
+    /// Connection credential (ssh key, kubeconfig, cloud credential) by
+    /// reference. Required for every kind except `local`. Never inherited.
+    pub credential: Option<SecretRef>,
+    /// Connection address: host for ssh, context hint for kubernetes, etc.
+    pub address: Option<String>,
+    #[serde(rename = "resource", default)]
+    pub resources: Vec<ResourceCfg>,
+}
+
+impl TargetCfg {
+    /// Assemble the domain [`TargetKind`], failing on a cloud target with no
+    /// provider (validated at boot, not at first use).
+    pub fn target_kind(&self) -> Result<TargetKind> {
+        match self.kind {
+            TargetKindName::Ssh => Ok(TargetKind::Ssh),
+            TargetKindName::Local => Ok(TargetKind::Local),
+            TargetKindName::Kubernetes => Ok(TargetKind::Kubernetes),
+            TargetKindName::Cloud => match self.provider {
+                Some(provider) => Ok(TargetKind::Cloud { provider, region: self.region.clone() }),
+                None => Err(Error::Config(format!(
+                    "target {:?} is kind=cloud but has no provider",
+                    self.name
+                ))),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceCfg {
+    #[serde(rename = "type")]
+    pub rtype: ResourceType,
+    pub name: String,
+    pub url: Option<String>,
+    pub credential: Option<SecretRef>,
+}
+
+impl Config {
+    /// Load from a TOML file (if present) then apply the env overlay. With no
+    /// file and no env, the result is the fully-faked configuration that
+    /// boots the self-validating daemon (gianna's fakes mode).
+    pub fn load(path: Option<&Path>) -> Result<Config> {
+        let default_path = default_dir().join("config.toml");
+        let path = path.unwrap_or(&default_path);
+        let mut cfg: Config = if path.exists() {
+            let raw = std::fs::read_to_string(path)?;
+            toml::from_str(&raw).map_err(|e| Error::Config(format!("{}: {e}", path.display())))?
+        } else {
+            Config::default()
+        };
+        cfg.apply_env_overlay();
+        Ok(cfg)
+    }
+
+    /// Env vars override/fill file config. Only *references* are recorded —
+    /// the values stay in the environment until connect-time resolution.
+    fn apply_env_overlay(&mut self) {
+        if std::env::var_os("OPENROUTER_API_KEY").is_some() && self.llm.api_key.is_none() {
+            self.llm.api_key = Some(SecretRef::env("OPENROUTER_API_KEY"));
+        }
+        if let Ok(models) = std::env::var("OPSCLAW_MODELS") {
+            if !models.trim().is_empty() {
+                self.llm.models = models.split(',').map(|m| m.trim().to_string()).collect();
+            }
+        }
+        if let Ok(url) = std::env::var("HINDSIGHT_URL") {
+            if !url.trim().is_empty() {
+                self.memory.hindsight_url = Some(url);
+            }
+        }
+        if std::env::var_os("TELEGRAM_BOT_TOKEN").is_some() && self.telegram.bot_token.is_none() {
+            self.telegram.bot_token = Some(SecretRef::env("TELEGRAM_BOT_TOKEN"));
+        }
+        if let Ok(listen) = std::env::var("OPSCLAW_LISTEN") {
+            if !listen.trim().is_empty() {
+                self.daemon.listen = listen;
+            }
+        }
+    }
+
+    /// True when every external dependency would be a fake (no credentials at
+    /// all). Gates the live-mode validations.
+    pub fn fully_faked(&self) -> bool {
+        self.llm.api_key.is_none()
+            && self.memory.hindsight_url.is_none()
+            && self.telegram.bot_token.is_none()
+    }
+
+    /// Effective autonomy for a target, resolved down the tree
+    /// (target > env > project); absent everywhere ⇒ `Suggest` (the default
+    /// for new targets, brief §5).
+    pub fn autonomy_for(&self, project: &str, env: &str, target: &str) -> Autonomy {
+        let p = self.projects.iter().find(|p| p.name == project);
+        let e = p.and_then(|p| p.envs.iter().find(|e| e.name == env));
+        let t = e.and_then(|e| e.targets.iter().find(|t| t.name == target));
+        t.and_then(|t| t.autonomy)
+            .or(e.and_then(|e| e.autonomy))
+            .or(p.and_then(|p| p.autonomy))
+            .unwrap_or(Autonomy::Suggest)
+    }
+
+    /// Loud refusal to boot on dangerous misconfig. Everything here fails
+    /// CLOSED: nothing silently degrades toward more autonomy, more spend, or
+    /// less security.
+    pub fn validate(&self) -> Result<()> {
+        let mut errs: Vec<String> = Vec::new();
+
+        if self.llm.api_key.is_some() && self.llm.models.is_empty() {
+            errs.push(
+                "llm.api_key is set but llm.models is empty — there is no sensible \
+                 cross-vendor default and every call would fail (set llm.models or OPSCLAW_MODELS)"
+                    .into(),
+            );
+        }
+        if !self.fully_faked() && self.memory.hindsight_url.is_none() {
+            errs.push(
+                "live mode requires memory.hindsight_url (memory is a core promise; \
+                 the standard docker-compose install provides it)"
+                    .into(),
+            );
+        }
+        match (&self.push.vapid_private_key, &self.push.vapid_public_key) {
+            (Some(_), None) | (None, Some(_)) => {
+                errs.push("push: half-set VAPID keypair — set both vapid_private_key and vapid_public_key or neither".into())
+            }
+            _ => {}
+        }
+        for p in &self.projects {
+            for e in &p.envs {
+                for t in &e.targets {
+                    if let Err(err) = t.target_kind() {
+                        errs.push(err.to_string());
+                    }
+                    let needs_cred = t.kind != TargetKindName::Local;
+                    if needs_cred && t.credential.is_none() {
+                        errs.push(format!(
+                            "target {}::{}::{} ({:?}) has no credential reference — \
+                             credentials are per-target and never inherit",
+                            p.name, e.name, t.name, t.kind
+                        ));
+                    }
+                }
+            }
+        }
+
+        if errs.is_empty() { Ok(()) } else { Err(Error::Config(errs.join("\n"))) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(s: &str) -> Config {
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn empty_config_is_fully_faked_and_valid() {
+        let cfg = Config::default();
+        assert!(cfg.fully_faked());
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn key_without_models_refuses() {
+        let cfg = parse(
+            r#"
+            [llm]
+            api_key = "env:OPENROUTER_API_KEY"
+            [memory]
+            hindsight_url = "http://localhost:8888"
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("llm.models is empty"), "{err}");
+    }
+
+    #[test]
+    fn live_mode_requires_hindsight() {
+        let cfg = parse(
+            r#"
+            [llm]
+            api_key = "env:OPENROUTER_API_KEY"
+            models = ["some/model"]
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("hindsight_url"), "{err}");
+    }
+
+    #[test]
+    fn half_set_vapid_refuses() {
+        let cfg = parse(
+            r#"
+            [push]
+            vapid_public_key = "BAbc"
+            "#,
+        );
+        assert!(cfg.validate().unwrap_err().to_string().contains("VAPID"));
+    }
+
+    #[test]
+    fn unknown_autonomy_fails_at_parse() {
+        let r: std::result::Result<Config, _> = toml::from_str(
+            r#"
+            [[project]]
+            name = "p"
+            autonomy = "full"
+            "#,
+        );
+        assert!(r.is_err(), "old vocabulary must not deserialize");
+    }
+
+    #[test]
+    fn autonomy_inheritance_resolves_down_the_tree() {
+        let cfg = parse(
+            r#"
+            [[project]]
+            name = "remundo"
+            autonomy = "observe"
+            [[project.env]]
+            name = "prod"
+            [[project.env.target]]
+            name = "cluster"
+            kind = "kubernetes"
+            credential = "store:remundo-prod-kubeconfig"
+            [[project.env]]
+            name = "dev"
+            autonomy = "auto"
+            [[project.env.target]]
+            name = "cluster"
+            kind = "kubernetes"
+            credential = "store:remundo-dev-kubeconfig"
+            autonomy = "act_on_known"
+            "#,
+        );
+        cfg.validate().unwrap();
+        assert_eq!(cfg.autonomy_for("remundo", "prod", "cluster"), Autonomy::Observe);
+        assert_eq!(cfg.autonomy_for("remundo", "dev", "cluster"), Autonomy::ActOnKnown);
+        assert_eq!(cfg.autonomy_for("unknown", "x", "y"), Autonomy::Suggest);
+    }
+
+    #[test]
+    fn missing_credential_refuses() {
+        let cfg = parse(
+            r#"
+            [[project]]
+            name = "p"
+            [[project.env]]
+            name = "prod"
+            [[project.env.target]]
+            name = "web-1"
+            kind = "ssh"
+            address = "10.0.0.5"
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("no credential reference"), "{err}");
+    }
+
+    #[test]
+    fn debug_output_contains_no_secret_values() {
+        // Config holds SecretRefs (names) by construction; this pins the
+        // property so a future field can't regress it silently.
+        unsafe { std::env::set_var("OPSCLAW_TEST_SECRET_XYZZY", "s3cr3t-value-xyzzy") };
+        let cfg = parse(
+            r#"
+            [llm]
+            api_key = "env:OPSCLAW_TEST_SECRET_XYZZY"
+            models = ["m"]
+            [memory]
+            hindsight_url = "http://localhost:8888"
+            "#,
+        );
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("s3cr3t-value-xyzzy"));
+        assert!(dbg.contains("OPSCLAW_TEST_SECRET_XYZZY")); // the NAME is fine
+    }
+}

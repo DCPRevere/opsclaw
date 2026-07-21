@@ -21,8 +21,10 @@
 //! - Daemon-local, no remote side effect: [`notify`] (the one structured
 //!   escalation tool), [`config_tool`] (read-only, secret-free inventory),
 //!   [`memory_tools`] (store/recall/forget), [`incidents_tool`] (incident
-//!   queries), [`runbooks_tool`] (runbook RUN HISTORY queries — see that
-//!   module's doc for the gap: there is no runbook-definition store yet).
+//!   queries), [`runbooks_tool`] (`runbook_list` over
+//!   `crate::runbooks::RunbookStore` — the definition store — and
+//!   `runbook_history` over `db::RunbookRunRepo` — execution history;
+//!   discover-then-inspect).
 //! - [`endpoint`] — shared plumbing for endpoint-backed tools: an already-
 //!   RESOLVED [`endpoint::EndpointAuth`] (base URL + optional bearer token)
 //!   per resource, and [`endpoint::get_json`]/[`endpoint::post_json`]
@@ -109,9 +111,47 @@ pub struct ToolCtx {
     /// `endpoint`'s module doc for the wiring gap: this is `None` until a
     /// later wave resolves `ResourceCfg.credential` and populates it).
     pub endpoints: Option<Arc<EndpointRegistry>>,
+    /// The runbook DEFINITION store (title -> parsed `Runbook`, loaded from
+    /// `config.daemon.runbooks_dir`) — distinct from `runbook_runs`, which
+    /// is EXECUTION history. Wired by the daemon boot path once
+    /// `RunbookStore::load` has run; `None` in a context that hasn't been
+    /// given one (e.g. today's tests, or a caller that only needs history).
+    pub runbooks: Option<Arc<crate::runbooks::RunbookStore>>,
 }
 
 impl ToolCtx {
+    /// A minimal, all-fakes `ToolCtx` for tests: `principal` and `policy`
+    /// are the only two fields that can't have a sensible universal default
+    /// (there is no meaningful "default" `Principal`, and every `policy`
+    /// fake makes a different behavioural choice a test cares about), so
+    /// callers supply those two and get every optional field defaulted to
+    /// its honest off state (`None`/empty) — the same "everything is a fake
+    /// by default" posture as `db::Db::fake()`. NOT `cfg(test)`-gated
+    /// (mirrors `Db::fake`) so it's usable from doctests, other crates'
+    /// integration tests, and this crate's binaries without a feature dance.
+    ///
+    /// Existing per-file `ToolCtx { ... }` test fixtures across `tools::`
+    /// predate this constructor and weren't retrofitted (churn with no
+    /// behavioural upside) — new test code should prefer this over a bare
+    /// struct literal, since a struct literal breaks at every future
+    /// additive `ToolCtx` field (this constructor is the fix for exactly
+    /// the repeated `agent/mod.rs` fixture breakage from the last two
+    /// waves).
+    pub fn for_tests(principal: Principal, policy: Arc<dyn PolicyExecute>) -> Self {
+        ToolCtx {
+            principal,
+            policy,
+            known_targets: Vec::new(),
+            incidents: None,
+            approvals: None,
+            runbook_runs: None,
+            memory: None,
+            config: None,
+            endpoints: None,
+            runbooks: None,
+        }
+    }
+
     /// Resolve a model-supplied target STRING (`project::env::target`, the
     /// `FqTarget::Display` form) against the trusted allow-list — never
     /// parses/constructs a fresh `FqTarget` from it. Returns a user-facing
@@ -213,6 +253,9 @@ pub fn registry(ctx: &ToolCtx, heartbeat: bool) -> Vec<Box<dyn Tool>> {
     }
     if ctx.incidents.is_some() {
         tools.push(Box::new(incidents_tool::ListIncidentsTool));
+    }
+    if ctx.runbooks.is_some() {
+        tools.push(Box::new(runbooks_tool::RunbookListTool));
     }
     if ctx.runbook_runs.is_some() {
         tools.push(Box::new(runbooks_tool::RunbookHistoryTool));

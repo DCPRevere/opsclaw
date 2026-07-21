@@ -54,6 +54,12 @@ pub struct DaemonCfg {
     /// External dead-man receiver pinged every tick (DESIGN §4). Optional in
     /// adjacent placements, mandatory in-cluster.
     pub deadman_url: Option<String>,
+    /// Where `runbook init/list/show` and `runbooks::RunbookStore` look for
+    /// runbook markdown files. Defaults to `<opsclaw_home>/runbooks` (the
+    /// convention `cli::runbook_cmd` already used before this field
+    /// existed) — additive field, no migration needed for an existing
+    /// config file (absent = the same default it always resolved to).
+    pub runbooks_dir: PathBuf,
 }
 
 impl Default for DaemonCfg {
@@ -63,6 +69,7 @@ impl Default for DaemonCfg {
             db_path: None,
             tick_seconds: 300,
             deadman_url: None,
+            runbooks_dir: default_dir().join("runbooks"),
         }
     }
 }

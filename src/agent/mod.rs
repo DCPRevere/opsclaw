@@ -341,22 +341,12 @@ mod tests {
     }
 
     fn ctx() -> ToolCtx {
-        // ToolCtx grew known_targets/incidents/approvals/runbook_runs/memory/
-        // config/endpoints fields (tools:: waves, additive per that
-        // module's contract notes) after this test helper was written —
-        // mechanically updated to match each time; this loop's tests don't
-        // exercise any of the new fields.
-        ToolCtx {
-            principal: principal(),
-            policy: Arc::new(NoopPolicy),
-            known_targets: Vec::new(),
-            incidents: None,
-            approvals: None,
-            runbook_runs: None,
-            memory: None,
-            config: None,
-            endpoints: None,
-        }
+        // ToolCtx::for_tests() defaults every optional field to its honest
+        // off state, so this helper no longer breaks on each additive
+        // ToolCtx field (it broke twice across the tools:: waves before
+        // this constructor existed) — this loop's tests don't exercise any
+        // of the optional fields.
+        ToolCtx::for_tests(principal(), Arc::new(NoopPolicy))
     }
 
     fn deps(llm: Arc<dyn LlmProvider>) -> AgentDeps {

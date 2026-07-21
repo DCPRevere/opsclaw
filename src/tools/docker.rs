@@ -125,6 +125,7 @@ mod tests {
             memory: None,
             config: None,
             endpoints: None,
+            runbooks: None,
         }
     }
 

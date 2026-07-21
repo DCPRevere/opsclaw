@@ -28,12 +28,18 @@
 //! - [`history`] — [`history::RunbookRun`] / [`history::StepOutcome`] and the
 //!   `success_rate` / `low_success` helpers.
 //! - [`template`] — the `runbook init` starter markdown.
+//! - [`store`] — [`store::RunbookStore`], the one piece of IO this module
+//!   was missing: loads every runbook from a directory, title-keyed,
+//!   per-file load errors surfaced rather than failing the whole store.
+//!   Everything above stays pure parsing/matching/templating; only `store`
+//!   touches a filesystem.
 
 pub mod frontmatter;
 pub mod history;
 pub mod matching;
 pub mod render;
 pub mod steps;
+pub mod store;
 pub mod template;
 
 use std::collections::BTreeMap;
@@ -45,6 +51,7 @@ pub use frontmatter::{FrontMatter, Trigger};
 pub use history::{RunbookRun, StepOutcome, StepStatus, low_success, success_rate};
 pub use matching::{MatchContext, best_match, glob_matches};
 pub use steps::{OnFail, Step};
+pub use store::{LoadError, LoadedRunbook, RunbookStore};
 pub use template::INIT_TEMPLATE;
 
 /// A fully-parsed runbook: front matter plus its steps.

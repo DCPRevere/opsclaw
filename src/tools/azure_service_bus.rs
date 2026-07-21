@@ -179,6 +179,7 @@ mod tests {
             memory: None,
             config: None,
             endpoints: Some(Arc::new(reg)),
+            runbooks: None,
         }
     }
 

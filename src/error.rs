@@ -19,6 +19,24 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    /// An LLM provider call failed. `retryable` distinguishes transient
+    /// (429/5xx/timeout) from hard (401/400/model-not-found) failures — the
+    /// fallback chain (`llm::FallbackLlm`) retries the former on the same
+    /// provider and falls through to the next provider on the latter.
+    /// `retry_after_secs` carries a provider's `Retry-After` header when
+    /// present, so backoff honours it instead of guessing.
+    #[error("llm error ({}): {message}", if *.retryable { "transient" } else { "hard" })]
+    Llm { message: String, retryable: bool, retry_after_secs: Option<u64> },
+
+    /// The assembled prompt exceeded the model's context window. NEITHER
+    /// transient (retrying the same oversized prompt always fails the same
+    /// way) NOR ordinary-hard (a smaller prompt CAN succeed) — callers should
+    /// shrink context and retry once; `FallbackLlm` fails fast on it (no
+    /// retry, no fallthrough — every provider in the chain would 400 on the
+    /// same prompt).
+    #[error("llm context overflow: {0}")]
+    LlmContextOverflow(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -27,6 +45,97 @@ impl Error {
     pub fn other(msg: impl Into<String>) -> Self {
         Error::Other(msg.into())
     }
+
+    /// A transient LLM failure worth retrying / falling through.
+    pub fn llm_transient(msg: impl Into<String>) -> Self {
+        Error::Llm { message: msg.into(), retryable: true, retry_after_secs: None }
+    }
+
+    /// A hard LLM failure (don't retry the same provider).
+    pub fn llm_hard(msg: impl Into<String>) -> Self {
+        Error::Llm { message: msg.into(), retryable: false, retry_after_secs: None }
+    }
+
+    /// A context-window overflow: the prompt was too big for the model.
+    pub fn llm_context_overflow(msg: impl Into<String>) -> Self {
+        Error::LlmContextOverflow(msg.into())
+    }
+
+    /// Whether this error is worth retrying or falling through to another
+    /// provider.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Error::Llm { retryable: true, .. })
+    }
+
+    /// True when this is a context-window overflow — `FallbackLlm` fails fast
+    /// on it rather than retrying or falling through.
+    pub fn is_context_overflow(&self) -> bool {
+        matches!(self, Error::LlmContextOverflow(_))
+    }
+
+    /// The provider-supplied `Retry-After` (seconds) on a transient LLM
+    /// failure, if any.
+    pub fn llm_retry_after_secs(&self) -> Option<u64> {
+        match self {
+            Error::Llm { retry_after_secs, .. } => *retry_after_secs,
+            _ => None,
+        }
+    }
+
+    /// Classify an HTTP status into a retryable/hard LLM error, honouring a
+    /// parsed `Retry-After` (seconds) when present.
+    pub fn from_llm_status(
+        status: u16,
+        message: impl Into<String>,
+        retry_after_secs: Option<u64>,
+    ) -> Self {
+        let message = message.into();
+        // A context-window overflow arrives as a 400 (OpenAI-compat/
+        // OpenRouter and Anthropic invalid_request naming the token/context
+        // limit) or, rarely, a 413 payload-too-large. Restricted to 400/413
+        // so a 429/408/5xx whose body happens to mention "context" stays
+        // retryable (a transient blip must not be silently downgraded to a
+        // non-retryable overflow).
+        if (status == 400 || status == 413) && is_context_overflow_body(&message) {
+            return Error::LlmContextOverflow(message);
+        }
+        let retryable = status == 429 || status == 408 || (500..=599).contains(&status);
+        Error::Llm {
+            message,
+            retryable,
+            // A Retry-After is only meaningful for a retryable status; drop it
+            // on a hard failure so it can't stall a fallthrough.
+            retry_after_secs: if retryable { retry_after_secs } else { None },
+        }
+    }
+}
+
+/// True when an LLM provider's error body names a context/token-limit
+/// overflow, as opposed to any other 4xx (auth, bad model, malformed
+/// request). Case-insensitive substring match on the provider's own message —
+/// deliberately broad, because the caller's response (shrink + retry once) is
+/// safe even on a false positive, whereas a MISS strands a turn with a
+/// permanent generic failure.
+fn is_context_overflow_body(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "context_length_exceeded",
+        "context length exceeded",
+        "maximum context length",
+        "maximum context",
+        "context window",
+        "context_window_exceeded",
+        "too many tokens",
+        "too many input tokens",
+        "reduce the length",
+        "prompt is too long",
+        "input is too long",
+        "exceeds the maximum",
+        "exceeds the context",
+        "exceed context limit", // some OpenRouter upstreams
+        "string too long",
+    ];
+    MARKERS.iter().any(|m| b.contains(m))
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

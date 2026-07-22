@@ -179,11 +179,24 @@ This is the heartbeat, and gianna's scheduler is almost exactly the brief's
   reach the store.
 - Backend: **Hindsight**, as in gianna — port the client wholesale: one bank
   per team, `ensure_configured` with a domain-tuned retain/reflect mission
-  and high literalism, raw text handed to the extractor (never
-  pre-summarised), context + timestamp always supplied. Live mode refuses to
-  boot without `HINDSIGHT_URL` (memory is a core promise — gianna's stance);
-  fakes mode is the honest no-op. The standard install bundles a pinned
-  Hindsight image via docker-compose (§5).
+  and high literalism (applied once at boot; non-fatal but loudly logged on
+  failure), raw text handed to the extractor (never pre-summarised), context
+  + timestamp always supplied. Live mode refuses to boot without
+  `HINDSIGHT_URL` (memory is a core promise — gianna's stance); fakes mode
+  is the honest no-op. The standard install bundles a pinned Hindsight image
+  via docker-compose (§5).
+- Recall is hybrid keyword + semantic (brief §8) by Hindsight's own design:
+  every recall runs semantic, BM25 keyword, graph, and temporal retrieval in
+  parallel and rank-fuses them — no mode parameter exists or is needed.
+- Retention/archival (brief §8): `memory.retention_days` declares the team's
+  horizon (unset = keep forever). Hindsight exposes **no delete-by-age API**
+  (its surface: retain / recall / list / reflect, per-fact invalidate,
+  whole-bank delete), so the daemon does NOT silently prune — it warns at
+  boot when the field is set, and enforcement is operator-driven:
+  `opsclaw-cli memory export` (the human-readable archival dump — markdown
+  with timestamp/context per fact, `--json` for the machine form, via the
+  backend's complete `list` enumeration) plus per-fact `memory forget`.
+  Deliberately honest: no fake deletion.
 
 ### Channels (`src/channels/`)
 

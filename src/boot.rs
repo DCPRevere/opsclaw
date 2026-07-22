@@ -97,6 +97,39 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         }
         None => Arc::new(Memory::disabled()),
     };
+    // Steer the team's bank for the SRE domain ONCE, at boot (DESIGN §3:
+    // "ensure_configured with a domain-tuned retain/reflect mission and high
+    // literalism") — without this the bank runs on Hindsight's stock
+    // defaults and every extraction is mistuned. Non-fatal but LOUD on
+    // failure: memory keeps working (retain/recall don't depend on the
+    // mission), so refusing to boot would trade a whole daemon for a tuning
+    // knob — but silence would hide that every fact until the next boot got
+    // stock extraction. A not-yet-created bank 404-skips inside
+    // `ensure_configured` (the first retain creates it; the next boot's call
+    // then lands), and the client caps the PATCH at its short read timeout
+    // so a hung Hindsight can't stall daemon start.
+    if let Err(e) = memory.configure().await {
+        tracing::warn!(
+            "memory bank configure FAILED — bank runs on stock Hindsight defaults until the next \
+             boot: {e}"
+        );
+    }
+    // brief §8 requires a retention/archival policy; Hindsight has no
+    // delete-by-age API (its surface: retain/recall/list/reflect, per-fact
+    // invalidate, whole-bank delete — verified against its API reference),
+    // so `retention_days` is a DECLARED policy the daemon cannot silently
+    // enforce. Say so loudly at boot rather than let an operator believe
+    // old facts are being pruned — the honest archival path is
+    // `opsclaw-cli memory export` plus per-fact `memory forget` (see
+    // `MemoryCfg::retention_days`'s doc and DESIGN §3 Memory).
+    if let Some(days) = config.memory.retention_days {
+        tracing::warn!(
+            retention_days = days,
+            "memory.retention_days is DECLARED but not auto-enforced (Hindsight has no \
+             delete-by-age API) — archive with `opsclaw-cli memory export` and prune with \
+             `opsclaw-cli memory forget`"
+        );
+    }
 
     // The agent dispatch deps (runbook store + endpoint registry loaded from
     // config here; scrubber registration already done above).
@@ -235,4 +268,66 @@ pub async fn seed_scan_jobs(state: &AppState) -> Result<()> {
     }
     let deps = crate::http::server::scheduler_deps(state);
     crate::scheduler::seed_default_scan_jobs(&deps, every_minutes).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal bootable config pointed at `hindsight` for memory and at
+    /// tempdir paths for everything filesystem (db, runbooks — the latter
+    /// deliberately absent; `RunbookStore::load` tolerates a missing dir).
+    /// Setting `hindsight_url` makes the config non-fully-faked, so
+    /// `AppState::new` insists on a real jwt secret — seeded into the
+    /// tempdir's store here (the same store `daemon_state` opens at `home`).
+    fn boot_config(tmp: &tempfile::TempDir, hindsight: &str) -> Config {
+        let store = SecretStore::open(tmp.path()).unwrap();
+        store.set("jwt", "a-sufficiently-long-and-random-secret-value").unwrap();
+        let mut config = Config::default();
+        config.http.jwt_secret = Some(crate::config::SecretRef::store("jwt"));
+        config.memory.hindsight_url = Some(hindsight.to_string());
+        config.daemon.db_path = Some(tmp.path().join("boot-test.sqlite3"));
+        config.daemon.runbooks_dir = tmp.path().join("no-runbooks");
+        config
+    }
+
+    // Boot calls `Memory::configure` exactly once against the configured
+    // Hindsight — closing the gap where `ensure_configured` (the SRE
+    // retain/reflect mission, DESIGN §3 Memory) existed but had no caller,
+    // leaving every live bank on stock extraction defaults.
+    #[tokio::test]
+    async fn daemon_state_configures_the_memory_bank_at_boot() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path("/v1/default/banks/opsclaw-default/config"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1) // verified on drop: the PATCH fired exactly once
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = boot_config(&tmp, &server.uri());
+        let state = daemon_state(config, tmp.path().join("config.toml"), tmp.path())
+            .await
+            .expect("boot succeeds");
+        drop(state);
+    }
+
+    // A Hindsight that refuses the config PATCH must not fail boot: the
+    // mission is a tuning knob, not a dependency (non-fatal-but-loud —
+    // `daemon_state` warns and continues).
+    #[tokio::test]
+    async fn daemon_state_boots_even_when_bank_configure_fails() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .respond_with(wiremock::ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = boot_config(&tmp, &server.uri());
+        daemon_state(config, tmp.path().join("config.toml"), tmp.path())
+            .await
+            .expect("a failed bank configure must never block boot");
+    }
 }

@@ -18,11 +18,20 @@ use crate::Result;
 
 /// A recalled fact, as surfaced to callers (storage lives in Hindsight). `id`
 /// is the backend handle a single fact is addressed by (for `forget`); it may be
-/// empty when the backend response omitted it.
+/// empty when the backend response omitted it. `kind`/`context`/`mentioned_at`
+/// carry the backend's per-fact annotations when it reported them — the
+/// human-readable export (brief §8) renders them; recall-driven callers (the
+/// tool loop) ignore them.
 #[derive(Debug, Clone)]
 pub struct MemoryRecord {
     pub id: String,
     pub fact: String,
+    /// Epistemic type (`world` / `experience` / `observation`), when reported.
+    pub kind: Option<String>,
+    /// The situational note supplied at retain time, when reported.
+    pub context: Option<String>,
+    /// Retention timestamp (RFC3339), when reported.
+    pub mentioned_at: Option<String>,
 }
 
 /// Whether a message should be considered for fact extraction. Adapted from
@@ -361,15 +370,34 @@ impl Memory {
     /// later step depends on the retain having completed (e.g. `configure`,
     /// which 404-skips on a not-yet-created bank): keep those synchronous.
     pub fn retain_detached(self: &Arc<Self>, speaker: String, message: String) {
-        self.retain_detached_with_backoff(speaker, message, std::time::Duration::from_millis(500));
+        self.detach_with_backoff(
+            DetachedRetain::Said { speaker, message },
+            std::time::Duration::from_millis(500),
+        );
+    }
+
+    /// As [`retain_detached`], but for a passive scan finding — the detached
+    /// sibling of [`retain_observation`], carrying the `"scan of {fq_target}
+    /// observed: …"` framing (DESIGN §3 memory) through the same tracked,
+    /// retried background path, so a scan tick is never blocked by a slow
+    /// Hindsight write and its finding still survives a SIGTERM (drain).
+    ///
+    /// [`retain_detached`]: Memory::retain_detached
+    /// [`retain_observation`]: Memory::retain_observation
+    pub fn retain_observation_detached(self: &Arc<Self>, fq_target: String, finding: String) {
+        self.detach_with_backoff(
+            DetachedRetain::Observed { fq_target, finding },
+            std::time::Duration::from_millis(500),
+        );
     }
 
     /// Backoff base extracted so tests can drive the retry path with a tiny delay
     /// (no real 2.5s wait) while production keeps the 500ms→2s→8s schedule.
-    fn retain_detached_with_backoff(
+    /// One spawn body for both framings so the tracked-spawn/retry/give-up
+    /// discipline can never diverge between chat retains and scan retains.
+    fn detach_with_backoff(
         self: &Arc<Self>,
-        speaker: String,
-        message: String,
+        kind: DetachedRetain,
         initial_delay: std::time::Duration,
     ) {
         let me = Arc::clone(self);
@@ -380,10 +408,20 @@ impl Memory {
         self.detached.spawn(async move {
             let mut delay = initial_delay;
             for attempt in 1..=3u32 {
-                match me.retain(&speaker, &message).await {
+                let r = match &kind {
+                    DetachedRetain::Said { speaker, message } => me.retain(speaker, message).await,
+                    DetachedRetain::Observed { fq_target, finding } => {
+                        me.retain_observation(fq_target, finding).await
+                    }
+                };
+                match r {
                     Ok(_) => return,
                     Err(e) => {
-                        tracing::warn!(speaker, attempt, "background retain failed: {e}");
+                        tracing::warn!(
+                            origin = kind.origin(),
+                            attempt,
+                            "background retain failed: {e}"
+                        );
                         if attempt < 3 {
                             tokio::time::sleep(delay).await;
                             delay *= 4;
@@ -391,7 +429,7 @@ impl Memory {
                     }
                 }
             }
-            tracing::warn!(speaker, "background retain gave up after 3 attempts");
+            tracing::warn!(origin = kind.origin(), "background retain gave up after 3 attempts");
         });
     }
 
@@ -461,6 +499,25 @@ impl Memory {
         }
     }
 
+    /// EVERY stored fact, every layer — the archival dump behind
+    /// `opsclaw-cli memory export` (brief §8: human-readable export as the
+    /// team's archival mechanism, since Hindsight has no delete-by-age API —
+    /// see `MemoryCfg::retention_days`). Unlike `all`, which prefers the
+    /// consolidated observation layer for readability, this enumerates with
+    /// NO type filter: an archive that silently dropped the raw
+    /// world/experience facts would not be an archive. Returns the records
+    /// plus the backend's total so the caller can mark truncation when
+    /// `cap` cut the dump short.
+    pub async fn export(&self, cap: usize) -> Result<(Vec<MemoryRecord>, usize)> {
+        match &self.hindsight {
+            Some(h) => {
+                let (items, total) = h.list_with_total(None, cap).await?;
+                Ok((items.into_iter().map(record).collect(), total))
+            }
+            None => Ok((Vec::new(), 0)),
+        }
+    }
+
     /// Forget ONE stored fact — soft-retire it by id (Hindsight `invalidate`:
     /// excluded from recall/consolidation/graph, derived observations recomputed
     /// without it, kept in the archive for audit, reversible). This is NOT a hard
@@ -494,6 +551,29 @@ impl Memory {
     }
 }
 
+/// The two attribution framings a detached background retain can carry —
+/// DESIGN §3 memory: `"{speaker} said: …"` for something said in chat and
+/// `"scan of {fq_target} observed: …"` for a passive scan finding. An enum
+/// (not two spawn bodies) so `detach_with_backoff` stays the single place
+/// the tracked-spawn/retry discipline lives.
+enum DetachedRetain {
+    Said { speaker: String, message: String },
+    Observed { fq_target: String, finding: String },
+}
+
+impl DetachedRetain {
+    /// The attribution anchor, for retry/give-up log lines: who said it, or
+    /// which target the finding was observed on. Never the content itself
+    /// (it may carry operational detail — same stance as `Memory::retain`'s
+    /// skip log).
+    fn origin(&self) -> &str {
+        match self {
+            DetachedRetain::Said { speaker, .. } => speaker,
+            DetachedRetain::Observed { fq_target, .. } => fq_target,
+        }
+    }
+}
+
 /// Frame a conversational statement with its speaker, so a pooled first-person
 /// statement in the shared team bank stays anchored to the right source.
 /// `speaker` is the operator's name or `"agent"`/`"scan"` for OpsClaw itself.
@@ -511,7 +591,13 @@ fn frame_observed(fq_target: &str, finding: &str) -> String {
 
 /// Map a Hindsight item to our `MemoryRecord`.
 fn record(item: hindsight::MemoryItem) -> MemoryRecord {
-    MemoryRecord { id: item.id, fact: item.fact }
+    MemoryRecord {
+        id: item.id,
+        fact: item.fact,
+        kind: item.kind,
+        context: item.context,
+        mentioned_at: item.mentioned_at,
+    }
 }
 
 /// Message receipt time as an RFC3339 UTC string, the event anchor we hand
@@ -573,9 +659,8 @@ mod tests {
     /// Tiny backoff so the retry path runs fast (real HTTP to the stub, but ~1ms
     /// between attempts instead of the production 500ms→2s→8s).
     fn detach_fast(memory: &Arc<Memory>, message: &str) {
-        memory.retain_detached_with_backoff(
-            "dcp".into(),
-            message.to_owned(),
+        memory.detach_with_backoff(
+            DetachedRetain::Said { speaker: "dcp".into(), message: message.to_owned() },
             std::time::Duration::from_millis(1),
         );
     }
@@ -728,6 +813,86 @@ mod tests {
         assert_eq!(memory.detached_in_flight(), 0);
         assert!(memory.drain_detached(std::time::Duration::from_secs(1)).await);
         assert!(!memory.is_enabled());
+    }
+
+    // The detached observation retain rides the SAME tracked/retry path as
+    // chat retains and lands with the scan framing + context — the wire-level
+    // proof that a scan finding reaches the bank as "scan of {fq_target}
+    // observed: …", never as something someone said.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retain_observation_detached_lands_with_scan_framing() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let memory = memory_against(&server);
+
+        memory.retain_observation_detached(
+            "remundo::prod::web-1".into(),
+            "disk at 92% and climbing".into(),
+        );
+        assert_eq!(memory.detached_in_flight(), 1, "the observation retain is tracked");
+        assert!(memory.drain_detached(std::time::Duration::from_secs(5)).await);
+
+        let reqs = server.received_requests().await.expect("recording enabled");
+        assert_eq!(reqs.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let item = &body["items"][0];
+        assert_eq!(
+            item["content"].as_str().unwrap(),
+            "scan of remundo::prod::web-1 observed: disk at 92% and climbing"
+        );
+        assert_eq!(item["context"].as_str().unwrap(), "scan finding");
+    }
+
+    // `export` is the FULL enumeration — no type filter (the archive must
+    // carry the raw layers too, not just consolidated observations) — and the
+    // per-fact annotations (kind/context/mentioned_at) survive the mapping so
+    // the CLI export can render a timestamped, contextual dump.
+    #[tokio::test]
+    async fn export_enumerates_every_layer_with_annotations() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"^/v1/default/banks/.*/memories/list$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total": 2,
+                "items": [
+                    {
+                        "id": "m1",
+                        "text": "the payments pod OOMs above 400 req/s",
+                        "type": "observation",
+                        "context": "scan finding",
+                        "mentioned_at": "2026-06-18T17:57:17Z"
+                    },
+                    { "id": "m2", "text": "dcp said: restart fixed it", "type": "experience" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let memory = memory_against(&server);
+
+        let (records, total) = memory.export(100).await.unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind.as_deref(), Some("observation"));
+        assert_eq!(records[0].context.as_deref(), Some("scan finding"));
+        assert_eq!(records[0].mentioned_at.as_deref(), Some("2026-06-18T17:57:17Z"));
+        // Missing annotations are None, and the record still exports.
+        assert_eq!(records[1].id, "m2");
+        assert!(records[1].mentioned_at.is_none());
+
+        // No `type=` filter reached the backend: the request enumerates every
+        // layer (query carries only pagination).
+        let reqs = server.received_requests().await.expect("recording enabled");
+        let query = reqs[0].url.query().unwrap_or_default();
+        assert!(!query.contains("type="), "export must not filter a layer out: {query}");
+
+        // Disabled memory exports an honest nothing, not an error.
+        let off = Arc::new(Memory::disabled());
+        let (recs, total) = off.export(100).await.unwrap();
+        assert!(recs.is_empty());
+        assert_eq!(total, 0);
     }
 
     // doc_id must be a FIXED value for a fixed input, not merely stable within

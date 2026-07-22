@@ -224,6 +224,16 @@ impl SchedulerHandle {
         (age > threshold).then_some((last, age))
     }
 
+    /// The last tick-START instant (unix ms), `None` before the first tick —
+    /// what the status surface renders as "last tick" (DESIGN §3: "status
+    /// (heartbeat liveness, per-target scan state, e-stop)"). Reads the SAME
+    /// cell `stall`/`heartbeat_status` read, so the rendered time can never
+    /// disagree with the health verdict shown beside it.
+    pub fn last_tick_at_ms(&self) -> Option<i64> {
+        let last = self.last_tick_ms.load(Ordering::Relaxed);
+        (last != 0).then_some(last)
+    }
+
     /// The heartbeat health an operator sees — reads the SAME cell `stall`
     /// does, so an admin view can never disagree with the alert.
     pub fn heartbeat_status(&self, now_ms: i64) -> HeartbeatStatus {

@@ -131,6 +131,44 @@ pub fn sign_payload(secret: &[u8], body: &[u8], now: chrono::DateTime<chrono::Ut
     format!("t={t},v1={v1}")
 }
 
+/// Verify a PagerDuty v3 webhook signature: `x-pagerduty-signature:
+/// v1=<hmac_sha256_hex>` computed over the RAW request body. This is
+/// PagerDuty's OWN published scheme, not opsclaw's `t=,v1=` convention
+/// above — it carries no timestamp component, so no replay-window check is
+/// possible here (PagerDuty's delivery retries would re-send the identical
+/// signature anyway). During secret rotation PagerDuty sends multiple
+/// comma-separated `v1=` entries; any one matching accepts. Every candidate
+/// runs the same constant-time compare — same timing-side-channel stance as
+/// [`verify_signature`].
+pub fn verify_pagerduty_signature(secret: &[u8], header: &str, body: &[u8]) -> Result<()> {
+    let expected = hmac_sha256_hex(secret, body);
+    let mut saw_v1 = false;
+    let mut matched = false;
+    for part in header.split(',') {
+        if let Some(sig) = part.trim().strip_prefix("v1=") {
+            saw_v1 = true;
+            // No early return on a match: every entry is compared so the
+            // entry COUNT, not the matching entry's position, drives timing.
+            matched |= constant_time_eq(expected.as_bytes(), sig.as_bytes());
+        }
+    }
+    if !saw_v1 {
+        return Err(Error::unauthorized("unparseable pagerduty webhook signature"));
+    }
+    if !matched {
+        return Err(Error::unauthorized("pagerduty webhook signature mismatch"));
+    }
+    Ok(())
+}
+
+/// Produce the `v1=<hmac_hex>` header value PagerDuty would send over
+/// `body` — the exact counterpart of [`verify_pagerduty_signature`], for
+/// tests and any signing relay (same "one signing scheme in one module,
+/// both directions" rationale as [`sign_payload`]).
+pub fn pagerduty_sign(secret: &[u8], body: &[u8]) -> String {
+    format!("v1={}", hmac_sha256_hex(secret, body))
+}
+
 fn parse_sig(sig: &str) -> Option<(String, String)> {
     let (mut t, mut v1) = (None, None);
     for part in sig.split(',') {
@@ -212,6 +250,47 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn pagerduty_valid_signature_is_accepted() {
+        let body = br#"{"event":{"event_type":"incident.triggered"}}"#;
+        let header = pagerduty_sign(b"pd-secret", body);
+        verify_pagerduty_signature(b"pd-secret", &header, body).unwrap();
+    }
+
+    #[test]
+    fn pagerduty_wrong_secret_is_rejected() {
+        let body = b"payload";
+        let header = pagerduty_sign(b"real-secret", body);
+        let err = verify_pagerduty_signature(b"wrong-secret", &header, body).unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+    }
+
+    #[test]
+    fn pagerduty_tampered_body_is_rejected() {
+        let header = pagerduty_sign(b"pd-secret", b"original body");
+        let err = verify_pagerduty_signature(b"pd-secret", &header, b"tampered body").unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+    }
+
+    #[test]
+    fn pagerduty_rotation_accepts_when_any_v1_entry_matches() {
+        // Mid-rotation PagerDuty signs with BOTH the old and new secret;
+        // the valid entry may sit in any position.
+        let body = b"payload";
+        let good = pagerduty_sign(b"new-secret", body);
+        let stale = pagerduty_sign(b"old-secret", body);
+        let header = format!("{stale},{good}");
+        verify_pagerduty_signature(b"new-secret", &header, body).unwrap();
+    }
+
+    #[test]
+    fn pagerduty_header_without_a_v1_entry_is_rejected() {
+        let err = verify_pagerduty_signature(b"pd-secret", "garbage", b"body").unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+        let err = verify_pagerduty_signature(b"pd-secret", "", b"body").unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
     }
 
     #[tokio::test]

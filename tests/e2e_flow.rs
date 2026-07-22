@@ -424,6 +424,76 @@ async fn estop_engage_and_resume_round_trip_over_http() {
     assert_eq!(resumed["estop_engaged"], false);
 }
 
+// ---- status surface (DESIGN §3: heartbeat liveness, per-target scan
+// state, e-stop) ----
+
+#[tokio::test]
+async fn status_reports_last_tick_and_per_target_scan_state() {
+    use opsclaw::db::JobRepo;
+    use opsclaw::domain::{Job, Payload, Schedule};
+
+    let state = AppState::fake();
+    seed_account(&state, "status@example.com", "some-password-123").await;
+
+    // One seeded-style per-target scan job plus one operator-authored job.
+    let scan = Job::new(
+        "remundo::prod::web-1-scan",
+        Schedule::Interval { every_minutes: 5 },
+        Payload::ScanRoutine { routine: "record_scan".into() },
+    )
+    .system();
+    JobRepo::insert(&*state.repos, &scan).await.unwrap();
+    let manual = Job::new(
+        "disk-report",
+        Schedule::Interval { every_minutes: 60 },
+        Payload::Prompt { body: "a possibly sensitive prompt body".into() },
+    );
+    JobRepo::insert(&*state.repos, &manual).await.unwrap();
+
+    let base = spawn_server(state.clone()).await;
+    let client = SessionClient::new();
+    client
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "status@example.com", "password": "some-password-123" }),
+        )
+        .await;
+
+    // Before the first tick: booting, last tick unknown.
+    let body: serde_json::Value =
+        client.get(&format!("{base}/api/status")).await.json().await.unwrap();
+    assert_eq!(body["heartbeat"], "booting");
+    assert!(body["last_tick_ms"].is_null(), "no tick recorded yet: {body}");
+    assert_eq!(body["estop_engaged"], false);
+
+    // The scan-state listing: sorted by name, cadence position per job,
+    // payload KIND only — never the prompt body.
+    let jobs = body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(jobs[0]["name"], "disk-report");
+    assert_eq!(jobs[0]["kind"], "prompt");
+    assert_eq!(jobs[1]["name"], "remundo::prod::web-1-scan");
+    assert_eq!(jobs[1]["kind"], "scan_routine");
+    assert_eq!(jobs[1]["enabled"], true);
+    assert_eq!(jobs[1]["system"], true);
+    assert!(jobs[1]["next_run_at"].is_string(), "a due schedule has a next run: {body}");
+    assert!(jobs[1]["last_run_at"].is_null(), "never fired yet");
+    assert!(
+        !body.to_string().contains("a possibly sensitive prompt body"),
+        "the status surface must never dump a payload body: {body}"
+    );
+
+    // After a tick is recorded (the handle's atomics are shared with the
+    // served state), last tick surfaces and the heartbeat goes healthy.
+    let now = chrono::Utc::now();
+    state.scheduler.mark_tick_start(now);
+    let body: serde_json::Value =
+        client.get(&format!("{base}/api/status")).await.json().await.unwrap();
+    assert_eq!(body["heartbeat"], "healthy");
+    assert_eq!(body["last_tick_ms"], now.timestamp_millis());
+    assert!(body["tick_interval_ms"].is_u64());
+}
+
 // ---- audit ----
 
 #[tokio::test]
@@ -520,6 +590,159 @@ async fn webhook_on_the_fully_faked_spine_is_accepted_with_no_secret() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
+
+// ---- PagerDuty v3 webhook (signature gate + event-type routing) ----
+
+/// Records every `(source, payload)` the webhook routes hand to the ingest
+/// seam — the test double for `http::webhook::IngestAlert`.
+struct RecordingIngest {
+    calls: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+}
+
+impl RecordingIngest {
+    fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(RecordingIngest { calls: std::sync::Mutex::new(Vec::new()) })
+    }
+    fn calls(&self) -> Vec<(String, serde_json::Value)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl opsclaw::http::webhook::IngestAlert for RecordingIngest {
+    async fn ingest(&self, source: &str, payload: &serde_json::Value) -> opsclaw::Result<()> {
+        self.calls.lock().unwrap().push((source.to_string(), payload.clone()));
+        Ok(())
+    }
+}
+
+/// A minimal-but-valid PagerDuty v3 webhook envelope for `event_type`.
+fn pagerduty_fixture(event_type: &str) -> String {
+    serde_json::json!({
+        "event": {
+            "id": "01BRB6ZP4M6T8ZG4X6BP63ZB9O",
+            "event_type": event_type,
+            "resource_type": "incident",
+            "occurred_at": "2026-07-22T09:00:00.000Z",
+            "agent": { "type": "user_reference", "id": "PUSER01" },
+            "data": {
+                "id": "PINC123",
+                "type": "incident",
+                "title": "High error rate on web-1",
+                "status": "triggered",
+                "urgency": "high",
+                "service": { "id": "PSVC01", "summary": "remundo prod" }
+            }
+        }
+    })
+    .to_string()
+}
+
+/// A fake state with a live webhook secret and a recording ingest sink.
+fn pagerduty_state(secret: &str) -> (AppState, std::sync::Arc<RecordingIngest>) {
+    let mut state = AppState::fake();
+    state.webhook_secret = Some(std::sync::Arc::from(secret));
+    let ingest = RecordingIngest::new();
+    state.ingest = ingest.clone();
+    (state, ingest)
+}
+
+#[tokio::test]
+async fn pagerduty_triggered_event_with_a_valid_signature_reaches_ingest() {
+    let (state, ingest) = pagerduty_state("pd-secret");
+    let base = spawn_server(state).await;
+
+    let body = pagerduty_fixture("incident.triggered");
+    let sig = opsclaw::http::webhook::pagerduty_sign(b"pd-secret", body.as_bytes());
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/webhooks/pagerduty"))
+        .header("x-pagerduty-signature", sig)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let calls = ingest.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "pagerduty");
+    assert_eq!(calls[0].1["event"]["event_type"], "incident.triggered");
+    assert_eq!(calls[0].1["event"]["data"]["title"], "High error rate on web-1");
+}
+
+#[tokio::test]
+async fn pagerduty_resolved_event_with_a_valid_signature_reaches_ingest() {
+    let (state, ingest) = pagerduty_state("pd-secret");
+    let base = spawn_server(state).await;
+
+    let body = pagerduty_fixture("incident.resolved");
+    let sig = opsclaw::http::webhook::pagerduty_sign(b"pd-secret", body.as_bytes());
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/webhooks/pagerduty"))
+        .header("x-pagerduty-signature", sig)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(ingest.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn pagerduty_bad_signature_is_rejected_and_nothing_is_ingested() {
+    let (state, ingest) = pagerduty_state("pd-secret");
+    let base = spawn_server(state).await;
+
+    let body = pagerduty_fixture("incident.triggered");
+    // Signed with the WRONG secret — a valid-shaped but unverifiable header.
+    let sig = opsclaw::http::webhook::pagerduty_sign(b"not-the-secret", body.as_bytes());
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/webhooks/pagerduty"))
+        .header("x-pagerduty-signature", sig)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(ingest.calls().is_empty(), "a rejected delivery must never reach ingest");
+}
+
+#[tokio::test]
+async fn pagerduty_missing_signature_header_is_rejected() {
+    let (state, ingest) = pagerduty_state("pd-secret");
+    let base = spawn_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/webhooks/pagerduty"))
+        .body(pagerduty_fixture("incident.triggered"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(ingest.calls().is_empty());
+}
+
+#[tokio::test]
+async fn pagerduty_unknown_event_type_is_ignored_with_204() {
+    let (state, ingest) = pagerduty_state("pd-secret");
+    let base = spawn_server(state).await;
+
+    // `pagey.ping` is PagerDuty's own subscription test event — verified,
+    // then dropped, never an error on PagerDuty's side.
+    for event_type in ["pagey.ping", "incident.annotated"] {
+        let body = pagerduty_fixture(event_type);
+        let sig = opsclaw::http::webhook::pagerduty_sign(b"pd-secret", body.as_bytes());
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/webhooks/pagerduty"))
+            .header("x-pagerduty-signature", sig)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT, "{event_type}");
+    }
+    assert!(ingest.calls().is_empty(), "ignored event types must never reach ingest");
 }
 
 // ---- secret-never-in-response ----

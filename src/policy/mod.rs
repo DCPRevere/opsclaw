@@ -238,8 +238,22 @@ impl Policy {
             id = approval.id,
             expires = approval.expires_at.format("%H:%M:%S"),
         );
+        // The structured twin of the text: channels that can render actions
+        // (the web SSE hub) show inline approve/deny buttons in the chat
+        // log from this; text-only channels ignore it. The command here is
+        // the SCRUBBED form, same as the body.
+        let meta = Some(serde_json::json!({
+            "kind": "approval",
+            "id": approval.id,
+            "risk": approval.risk.to_string(),
+            "tool": approval.tool,
+            "target": approval.target,
+            "command": scrubbed_command,
+            "hypothesis": approval.hypothesis,
+            "expires_at": approval.expires_at.to_rfc3339(),
+        }));
         if let Err(e) =
-            channel.send(crate::channels::OutboundMessage { operator: None, body }).await
+            channel.send(crate::channels::OutboundMessage { operator: None, body, meta }).await
         {
             tracing::warn!(approval = %approval.id, "approval announcement failed: {e}");
         }

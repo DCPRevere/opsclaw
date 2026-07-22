@@ -33,6 +33,22 @@ pub struct OutboundMessage {
     /// Specific operator, or None for the whole team channel.
     pub operator: Option<Uuid>,
     pub body: String,
+    /// Structured hint for channels that can render richer than text — a
+    /// JSON object whose `"kind"` field ("approval", "incident") tells the
+    /// web SSE hub to emit an actionable event (inline approve/deny or
+    /// acknowledge buttons in the chat log) instead of a plain message.
+    /// Text-only channels (Telegram, webhook, push) ignore it entirely:
+    /// `body` must always stand alone, because for those channels it is
+    /// the whole message.
+    pub meta: Option<serde_json::Value>,
+}
+
+impl OutboundMessage {
+    /// The common plain-text case (every send site that has no structured
+    /// rendering to offer).
+    pub fn text(operator: Option<Uuid>, body: impl Into<String>) -> Self {
+        OutboundMessage { operator, body: body.into(), meta: None }
+    }
 }
 
 /// A message arriving from an operator on some channel.
@@ -227,7 +243,7 @@ mod tests {
         let recording = std::sync::Arc::new(RecordingChannel::new());
         let multi = MultiChannel::new(vec![std::sync::Arc::new(FailingChannel), recording.clone()]);
 
-        let msg = OutboundMessage { operator: None, body: "hello".into() };
+        let msg = OutboundMessage { operator: None, body: "hello".into(), meta: None };
         let r = multi.send(msg).await;
 
         // MultiChannel::send is best-effort fan-out: it must still return Ok

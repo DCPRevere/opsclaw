@@ -100,6 +100,15 @@
   .toolrow .toolstatus.ok { color: var(--ok); }
   .toolrow .toolstatus.error { color: var(--danger); }
   .daysep { align-self: center; font-size: .72rem; color: var(--text-dim); background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: .1rem .6rem; margin: .25rem 0; }
+  .actioncard { align-self: stretch; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: .6rem; background: var(--panel); padding: .6rem .8rem; display: flex; flex-direction: column; gap: .35rem; }
+  .actioncard.incident { border-left-color: var(--danger); }
+  .actioncard.decided { opacity: .75; }
+  .actioncard .ac-head { font-weight: 600; }
+  .actioncard .badge { font-size: .72rem; text-transform: uppercase; background: var(--panel-2); border: 1px solid var(--border); border-radius: .3rem; padding: 0 .35rem; margin-left: .3rem; }
+  .actioncard .ac-cmd { font-family: ui-monospace, monospace; background: var(--panel-2); padding: .35rem .5rem; border-radius: .4rem; word-break: break-all; }
+  .actioncard .ac-line { font-size: .85rem; }
+  .actioncard .ac-actions { display: flex; gap: .5rem; margin-top: .2rem; }
+  .actioncard .ac-note { font-size: .8rem; min-height: 1em; }
   #chat-earlier { align-self: center; font-size: .8rem; }
   #chat-form { display: flex; gap: .5rem; flex: none; }
   #chat-form input { flex: 1; }

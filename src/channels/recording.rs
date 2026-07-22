@@ -58,7 +58,9 @@ mod tests {
     #[tokio::test]
     async fn records_sent_messages() {
         let ch = RecordingChannel::new();
-        ch.send(OutboundMessage { operator: None, body: "hello".into() }).await.unwrap();
+        ch.send(OutboundMessage { operator: None, body: "hello".into(), meta: None })
+            .await
+            .unwrap();
         assert_eq!(ch.sent().len(), 1);
         assert_eq!(ch.last().unwrap().body, "hello");
     }

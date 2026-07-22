@@ -130,7 +130,9 @@ impl CostGuard {
         );
         match self.notifier.get() {
             Some(channel) => {
-                if let Err(e) = channel.send(OutboundMessage { operator: None, body }).await {
+                if let Err(e) =
+                    channel.send(OutboundMessage { operator: None, body, meta: None }).await
+                {
                     tracing::error!(error = %e, "cap-reached notification failed to send");
                 }
             }

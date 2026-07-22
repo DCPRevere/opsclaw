@@ -53,7 +53,11 @@ impl Channel for CliChannel {
     // on every reply landing in the same capture queue the REPL drains —
     // must override it explicitly rather than inherit the default.
     async fn send_reply(&self, _sender: &str, text: &str) -> Result<()> {
-        self.sent.lock().unwrap().push(OutboundMessage { operator: None, body: text.to_string() });
+        self.sent.lock().unwrap().push(OutboundMessage {
+            operator: None,
+            body: text.to_string(),
+            meta: None,
+        });
         Ok(())
     }
 }
@@ -66,7 +70,9 @@ mod tests {
     async fn captures_and_drains_in_order() {
         let ch = CliChannel::new();
         ch.send_reply("cli:local", "first").await.unwrap();
-        ch.send(OutboundMessage { operator: None, body: "second".into() }).await.unwrap();
+        ch.send(OutboundMessage { operator: None, body: "second".into(), meta: None })
+            .await
+            .unwrap();
 
         assert_eq!(ch.drain_text(), vec!["first", "second"]);
         // Drained queue is empty afterwards.

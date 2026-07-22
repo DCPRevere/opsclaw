@@ -111,7 +111,17 @@ async fn drive_one(
 
     let contact = &chain.steps[step.min(chain.steps.len() - 1)].contact;
     let body = render_page(incident, kind, step, chain.steps.len());
-    match contact_channel(deps, contact).send(OutboundMessage { operator: None, body }).await {
+    // Structured twin for action-capable channels (web chat renders an
+    // inline Acknowledge button from this); text-only channels ignore it.
+    let meta = Some(serde_json::json!({
+        "kind": "incident",
+        "id": incident.id,
+        "severity": incident.severity,
+        "target": incident.target,
+        "hypothesis": incident.hypothesis,
+    }));
+    match contact_channel(deps, contact).send(OutboundMessage { operator: None, body, meta }).await
+    {
         Ok(()) => {
             // Renotify keeps the step's ack clock; a first Notify or an
             // Escalate starts (or restarts) it at this send.
@@ -199,7 +209,9 @@ pub(super) async fn expire_approvals(deps: &SchedulerDeps, now: DateTime<Utc>) -
             target = req.target,
             risk = req.risk,
         );
-        if let Err(e) = deps.channel.send(OutboundMessage { operator: None, body }).await {
+        if let Err(e) =
+            deps.channel.send(OutboundMessage { operator: None, body, meta: None }).await
+        {
             tracing::warn!("could not announce expired approval {}: {e}", req.id);
         }
     }

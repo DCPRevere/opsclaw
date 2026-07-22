@@ -112,7 +112,7 @@ mod tests {
             .await;
 
         let ch = WebhookOutChannel::new(format!("{}/hook", server.uri()), None);
-        ch.send(OutboundMessage { operator: None, body: "disk full on web-1".into() })
+        ch.send(OutboundMessage { operator: None, body: "disk full on web-1".into(), meta: None })
             .await
             .unwrap();
 
@@ -133,7 +133,9 @@ mod tests {
             .await;
 
         let ch = WebhookOutChannel::new(server.uri(), Some("shared-secret".into()));
-        ch.send(OutboundMessage { operator: None, body: "escalating".into() }).await.unwrap();
+        ch.send(OutboundMessage { operator: None, body: "escalating".into(), meta: None })
+            .await
+            .unwrap();
 
         let received: Vec<Request> = server.received_requests().await.unwrap();
         let sig = received[0].headers.get("X-Opsclaw-Signature").unwrap().to_str().unwrap();
@@ -154,7 +156,10 @@ mod tests {
         Mock::given(method("POST")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
 
         let ch = WebhookOutChannel::new(server.uri(), None);
-        let err = ch.send(OutboundMessage { operator: None, body: "x".into() }).await.unwrap_err();
+        let err = ch
+            .send(OutboundMessage { operator: None, body: "x".into(), meta: None })
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("rejected delivery"), "{err}");
     }
 
@@ -164,7 +169,7 @@ mod tests {
         Mock::given(method("POST")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
 
         let ch = WebhookOutChannel::new(server.uri(), None);
-        ch.send(OutboundMessage { operator: None, body: "x".into() }).await.unwrap();
+        ch.send(OutboundMessage { operator: None, body: "x".into(), meta: None }).await.unwrap();
 
         let received = server.received_requests().await.unwrap();
         assert!(received[0].headers.get("X-Opsclaw-Signature").is_none());

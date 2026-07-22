@@ -76,11 +76,114 @@ export async function openStream() {
       pendingRow.parentNode.scrollTop = pendingRow.parentNode.scrollHeight;
     }
   });
+  // Structured announcements (channels::web maps OutboundMessage.meta):
+  // an approval or an incident page renders as an ACTIONABLE card in the
+  // chat log — the buttons drive the same endpoints as the dedicated tabs,
+  // so acting from chat and acting from the tab are the same operation.
+  evtSource.addEventListener('approval', (e) => {
+    let ev = {};
+    try { ev = JSON.parse(e.data); } catch (_) { return; }
+    addApprovalCard(ev.body || {});
+  });
+  evtSource.addEventListener('incident', (e) => {
+    let ev = {};
+    try { ev = JSON.parse(e.data); } catch (_) { return; }
+    addIncidentCard(ev.body || {});
+  });
   evtSource.onerror = () => {
     evtSource.close();
     evtSource = null;
     scheduleReconnect();
   };
+}
+
+// Shared card scaffolding for actionable announcements. `decide` runs the
+// clicked action with every button disabled; failure re-enables them and
+// surfaces the server's error text (a 409 here usually means someone else
+// decided first — the note says so rather than pretending success).
+function actionCard(className, headHtml, bodyLines) {
+  const log = document.getElementById('chat-log');
+  const card = document.createElement('div');
+  card.className = 'actioncard ' + className;
+  const head = document.createElement('div');
+  head.className = 'ac-head';
+  head.innerHTML = headHtml;
+  card.appendChild(head);
+  for (const el of bodyLines) card.appendChild(el);
+  const actions = document.createElement('div');
+  actions.className = 'ac-actions';
+  const note = document.createElement('div');
+  note.className = 'ac-note muted';
+  card.appendChild(actions);
+  card.appendChild(note);
+  log.appendChild(card);
+  log.scrollTop = log.scrollHeight;
+  return { card, actions, note };
+}
+
+function line(cls, text) {
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = text;
+  return d;
+}
+
+function addApprovalCard(a) {
+  const cmd = document.createElement('code');
+  cmd.className = 'ac-cmd';
+  cmd.textContent = a.command || '';
+  const rows = [cmd, line('ac-line', `${a.tool || ''} on ${a.target || ''}`)];
+  if (a.hypothesis) rows.push(line('ac-line muted', a.hypothesis));
+  const { card, actions, note } = actionCard(
+    'approval',
+    `Approval needed <span class="badge">${escapeHtml(a.risk || '')}</span>`,
+    rows,
+  );
+  const decide = async (verb) => {
+    actions.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    const r = await api(`/api/approvals/${a.id}/${verb}`, 'POST');
+    if (r.ok) {
+      note.textContent = verb === 'approve' ? 'Approved — the command will now execute.' : 'Denied.';
+      card.classList.add('decided');
+    } else {
+      note.textContent = (r.data && r.data.error) || 'Could not record the decision — see the Approvals tab.';
+      actions.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+    }
+  };
+  const ap = document.createElement('button');
+  ap.className = 'primary';
+  ap.textContent = 'Approve';
+  ap.addEventListener('click', () => decide('approve'));
+  const dn = document.createElement('button');
+  dn.className = 'danger';
+  dn.textContent = 'Deny';
+  dn.addEventListener('click', () => decide('deny'));
+  actions.append(ap, dn);
+}
+
+function addIncidentCard(i) {
+  const rows = [line('ac-line', i.target || '')];
+  if (i.hypothesis) rows.push(line('ac-line muted', i.hypothesis));
+  const { card, actions, note } = actionCard(
+    'incident',
+    `Incident <span class="badge">${escapeHtml(i.severity || '')}</span>`,
+    rows,
+  );
+  const ack = document.createElement('button');
+  ack.className = 'primary';
+  ack.textContent = 'Acknowledge';
+  ack.addEventListener('click', async () => {
+    ack.disabled = true;
+    const r = await api(`/api/incidents/${i.id}/ack`, 'POST');
+    if (r.ok) {
+      note.textContent = 'Acknowledged — paging stops; details in the Incidents tab.';
+      card.classList.add('decided');
+    } else {
+      note.textContent = (r.data && r.data.error) || 'Could not acknowledge — see the Incidents tab.';
+      ack.disabled = false;
+    }
+  });
+  actions.append(ack);
 }
 
 export function closeStream() {

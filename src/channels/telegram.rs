@@ -976,7 +976,7 @@ mod tests {
         );
         // No roster entries -> send resolves to nothing and returns Ok (the
         // operator is reachable on another channel).
-        let r = t.send(OutboundMessage { operator: None, body: "hi".into() }).await;
+        let r = t.send(OutboundMessage { operator: None, body: "hi".into(), meta: None }).await;
         assert!(r.is_ok());
     }
 

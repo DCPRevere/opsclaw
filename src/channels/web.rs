@@ -92,6 +92,30 @@ impl Channel for WebHub {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
+        // Structured announcements (OutboundMessage.meta with a known
+        // "kind") become their own SSE event kind so the client can render
+        // an ACTIONABLE card (inline approve/deny, acknowledge) instead of
+        // plain text. `kind` must map to one of the static strings below —
+        // an unknown kind degrades to a plain message, never an error (the
+        // body always stands alone by OutboundMessage's contract). The text
+        // body rides along in the payload so the card can fall back to it.
+        if let Some(meta) = &msg.meta
+            && let Some(kind) = meta.get("kind").and_then(|k| k.as_str())
+        {
+            let stable: Option<&'static str> = match kind {
+                "approval" => Some("approval"),
+                "incident" => Some("incident"),
+                _ => None,
+            };
+            if let Some(kind) = stable {
+                let mut body = meta.clone();
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("text".into(), serde_json::json!(msg.body));
+                }
+                self.publish(WebEvent { kind, body });
+                return Ok(());
+            }
+        }
         self.publish(WebEvent::message(&msg.body));
         Ok(())
     }
@@ -116,7 +140,9 @@ mod tests {
         let mut a = hub.subscribe();
         let mut b = hub.subscribe();
 
-        hub.send(OutboundMessage { operator: None, body: "hello".into() }).await.unwrap();
+        hub.send(OutboundMessage { operator: None, body: "hello".into(), meta: None })
+            .await
+            .unwrap();
 
         let ev_a = a.recv().await.unwrap();
         let ev_b = b.recv().await.unwrap();
@@ -135,6 +161,38 @@ mod tests {
     #[tokio::test]
     async fn publish_with_no_subscribers_does_not_error() {
         let hub = WebHub::new();
-        hub.send(OutboundMessage { operator: None, body: "into the void".into() }).await.unwrap();
+        hub.send(OutboundMessage { operator: None, body: "into the void".into(), meta: None })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn structured_meta_becomes_its_own_event_kind_with_text_fallback() {
+        let hub = WebHub::new();
+        let mut rx = hub.subscribe();
+        hub.send(OutboundMessage {
+            operator: None,
+            body: "APPROVAL NEEDED …".into(),
+            meta: Some(serde_json::json!({"kind": "approval", "id": "abc"})),
+        })
+        .await
+        .unwrap();
+        // An UNKNOWN kind must degrade to a plain message (the body always
+        // stands alone), never error or emit a kind the client won't know.
+        hub.send(OutboundMessage {
+            operator: None,
+            body: "plain".into(),
+            meta: Some(serde_json::json!({"kind": "mystery"})),
+        })
+        .await
+        .unwrap();
+
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(ev.kind, "approval");
+        assert_eq!(ev.body["id"], "abc");
+        assert_eq!(ev.body["text"], "APPROVAL NEEDED …", "body rides along for fallback render");
+        let ev2 = rx.recv().await.unwrap();
+        assert_eq!(ev2.kind, "message");
+        assert_eq!(ev2.body["text"], "plain");
     }
 }

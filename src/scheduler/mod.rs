@@ -480,6 +480,7 @@ fn spawn_watchdog(
                     deps.channel
                         .send(crate::channels::OutboundMessage {
                             operator: None,
+                            meta: None,
                             body: format!(
                                 "Scheduler stalled: the fast loop has not ticked in {}s. \
                              Scan jobs and the dead-man heartbeat are NOT running. \
@@ -501,6 +502,7 @@ fn spawn_watchdog(
                     deps.channel
                         .send(crate::channels::OutboundMessage {
                             operator: None,
+                            meta: None,
                             body: format!(
                                 "Scheduler running late: the last tick took {}s against a {}s \
                              cadence. The loop is alive but proactive delivery is persistently \

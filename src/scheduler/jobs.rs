@@ -252,7 +252,11 @@ async fn fire_one_job(deps: &SchedulerDeps, job: &mut Job, now_utc: DateTime<Utc
                 tracing::error!(job = %job.id, "fire claim failed (proceeding; duplicate possible): {e}");
             }
         }
-        match deps.channel.send(OutboundMessage { operator: None, body: body.clone() }).await {
+        match deps
+            .channel
+            .send(OutboundMessage { operator: None, body: body.clone(), meta: None })
+            .await
+        {
             Ok(()) => {
                 sent = true;
                 tracing::info!(job = %job.id, name = %job.name, body_len = body.len(), "job fired");
@@ -376,6 +380,7 @@ async fn alert_deadletter(
     deps.channel
         .send(OutboundMessage {
             operator: None,
+            meta: None,
             body: format!(
                 "Scheduled job '{}' failed to compose or send for over 24h ({attempts} attempts) \
                  and has been given up on. Last error: {error}.",
@@ -403,6 +408,7 @@ async fn alert_failing(
     deps.channel
         .send(OutboundMessage {
             operator: None,
+            meta: None,
             body: format!(
                 "Scheduled job '{}' has failed {attempts} times and is retrying with backoff. \
                  Last error: {error}.",

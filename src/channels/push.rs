@@ -348,9 +348,13 @@ mod tests {
         repo.upsert_push_subscription(&sub("https://push.example/alive-2")).await.unwrap();
         repo.upsert_push_subscription(&sub("https://push.example/gone")).await.unwrap();
 
-        ch.send(OutboundMessage { operator: None, body: "New approval requested".into() })
-            .await
-            .unwrap();
+        ch.send(OutboundMessage {
+            operator: None,
+            body: "New approval requested".into(),
+            meta: None,
+        })
+        .await
+        .unwrap();
 
         let eps: Vec<_> = fake.sent().iter().map(|(e, _)| e.clone()).collect();
         assert!(eps.iter().any(|e| e.contains("alive-1")));
@@ -372,7 +376,9 @@ mod tests {
         let ch = PushChannel::new(repo.clone(), fake.clone());
         repo.upsert_push_subscription(&sub("https://push.example/one")).await.unwrap();
 
-        ch.send(OutboundMessage { operator: None, body: "x".repeat(1000) }).await.unwrap();
+        ch.send(OutboundMessage { operator: None, body: "x".repeat(1000), meta: None })
+            .await
+            .unwrap();
         assert!(fake.sent().last().unwrap().1.contains("open OpsClaw for the rest"));
     }
 
@@ -383,7 +389,7 @@ mod tests {
         let fake = Arc::new(FakePushSender::new());
         let ch = PushChannel::new(repo, fake.clone());
 
-        let r = ch.send(OutboundMessage { operator: None, body: "hi".into() }).await;
+        let r = ch.send(OutboundMessage { operator: None, body: "hi".into(), meta: None }).await;
         assert!(r.is_ok());
         assert!(fake.sent().is_empty());
     }
@@ -424,7 +430,7 @@ mod tests {
         // whole (best-effort by design) — the good subscription is still
         // stored (its own send succeeded; nothing was pruned since the
         // failure wasn't a SubscriptionGone outcome).
-        let r = ch.send(OutboundMessage { operator: None, body: "hi".into() }).await;
+        let r = ch.send(OutboundMessage { operator: None, body: "hi".into(), meta: None }).await;
         assert!(r.is_ok());
         assert_eq!(repo.list_push_subscriptions().await.unwrap().len(), 2);
     }

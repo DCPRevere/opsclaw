@@ -376,7 +376,11 @@ impl IngestAlert for WebhookIngest {
 
         if !diagnosis.is_empty() {
             self.channel
-                .send(crate::channels::OutboundMessage { operator: None, body: reply.reply })
+                .send(crate::channels::OutboundMessage {
+                    operator: None,
+                    body: reply.reply,
+                    meta: None,
+                })
                 .await?;
         }
         Ok(())

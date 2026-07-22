@@ -41,6 +41,63 @@ fn parse_severity(s: &str) -> Result<Severity, ToolError> {
     }
 }
 
+/// The closed fault_class vocabulary. Fingerprint identity hangs on this
+/// label, and a model invents a fresh synonym per run when left free — one
+/// live day produced dapr_sentry_cert_expired / dapr_cert_expired /
+/// certificate_expired for the SAME expired CA (plus secret_key_missing vs
+/// secret_missing_keys, image_not_found vs image_pull_backoff), so every
+/// re-detection minted a new incident and dedup/re-open never matched.
+/// `other` is the escape hatch; `resource` carries the specificity.
+pub const FAULT_CLASSES: &[&str] = &[
+    "crashloop",
+    "oom_kill",
+    "image_pull_failure",
+    "cert_expired",
+    "config_missing",
+    "scheduling_failure",
+    "volume_failure",
+    "rollout_stuck",
+    "resource_saturation",
+    "error_rate",
+    "queue_backlog",
+    "target_unreachable",
+    "other",
+];
+
+/// Strip per-instance suffixes so the fingerprint anchors to the WORKLOAD,
+/// not one pod's incarnation: deployment pods carry `-<template-hash>-<id>`
+/// and statefulset pods `-<ordinal>`, both of which churn across restarts
+/// while the fault stays the same. Applies to the last path segment only
+/// (a `namespace/` prefix passes through untouched).
+fn stable_resource(resource: &str) -> String {
+    let (prefix, name) = match resource.rsplit_once('/') {
+        Some((p, n)) => (Some(p), n),
+        None => (None, resource),
+    };
+    let segs: Vec<&str> = name.split('-').collect();
+    let is_hashy = |s: &str, min: usize| {
+        s.len() >= min && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    };
+    let keep = if segs.len() >= 3
+        && is_hashy(segs[segs.len() - 1], 5)
+        && is_hashy(segs[segs.len() - 2], 5)
+        && segs[segs.len() - 2].chars().any(|c| c.is_ascii_digit())
+    {
+        // deployment pod: name-<template-hash>-<random id>
+        segs.len() - 2
+    } else if segs.len() >= 2 && segs[segs.len() - 1].chars().all(|c| c.is_ascii_digit()) {
+        // statefulset pod: name-<ordinal>
+        segs.len() - 1
+    } else {
+        segs.len()
+    };
+    let name = segs[..keep].join("-");
+    match prefix {
+        Some(p) => format!("{p}/{name}"),
+        None => name,
+    }
+}
+
 #[async_trait]
 impl Tool for NotifyTool {
     fn name(&self) -> &'static str {
@@ -51,14 +108,15 @@ impl Tool for NotifyTool {
         "Escalate a confirmed problem to a human. This is the ONLY way to raise an incident \
          — call it once you've confirmed a signal with a diagnostic tool and formed a \
          hypothesis, not on a single unconfirmed reading. Provide: severity, the \
-         fully-qualified target, `fault_class` (a short stable label for the kind of \
-         problem, e.g. cpu_saturation, dlq_backlog, target_unreachable — used to detect a \
-         repeat of the SAME problem so it doesn't page twice), `resource` (the specific \
-         thing affected within the target, or empty string if the fault has no finer \
-         resource than the target itself), `evidence` (the observed signals WITH ACTUAL \
-         NUMBERS), `hypothesis`, and an optional `recommended_action`. Calling this again \
-         for the same target+fault_class+resource while it's still open attaches as a new \
-         occurrence — it does not create a duplicate incident or double-page."
+         fully-qualified target, `fault_class` (one of a FIXED vocabulary — it is the \
+         incident's dedup identity, so a repeat of the same problem must map to the same \
+         label), `resource` (the specific thing affected within the target: prefer the \
+         stable workload identity like namespace/deployment-name, never a pod instance \
+         name — pod hash suffixes churn every restart; empty string if the fault has no \
+         finer resource than the target itself), `evidence` (the observed signals WITH \
+         ACTUAL NUMBERS), `hypothesis`, and an optional `recommended_action`. Calling this \
+         again for the same target+fault_class+resource while it's still open attaches as \
+         a new occurrence — it does not create a duplicate incident or double-page."
     }
 
     fn schema(&self) -> Value {
@@ -67,8 +125,8 @@ impl Tool for NotifyTool {
             "properties": {
                 "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
                 "target": {"type": "string", "description": "fully-qualified target"},
-                "fault_class": {"type": "string", "description": "stable short label for the fault kind, e.g. cpu_saturation"},
-                "resource": {"type": "string", "description": "the specific resource affected, or \"\" if none finer than the target"},
+                "fault_class": {"type": "string", "enum": FAULT_CLASSES, "description": "the fault kind — the incident's dedup identity; pick the closest, use \"other\" only when nothing fits"},
+                "resource": {"type": "string", "description": "the stable workload affected (e.g. namespace/deployment-name, never a pod instance name), or \"\" if none finer than the target"},
                 "evidence": {"type": "string", "description": "observed signals with actual numbers"},
                 "hypothesis": {"type": "string"},
                 "recommended_action": {"type": "string"}
@@ -111,7 +169,19 @@ impl Tool for NotifyTool {
         let fault_class = args["fault_class"].as_str().ok_or_else(|| {
             ToolError::UserFacing("opsclaw_notify requires \"fault_class\"".to_string())
         })?;
-        let resource = args["resource"].as_str().unwrap_or("");
+        // Enforce the vocabulary server-side too — schema enums are advisory
+        // to some providers, and an invented synonym silently forks the
+        // dedup identity. The error teaches the list so the retry lands.
+        if !FAULT_CLASSES.contains(&fault_class) {
+            return Err(ToolError::UserFacing(format!(
+                "unknown fault_class {fault_class:?} — it is the incident's dedup identity and \
+                 must come from the fixed vocabulary: {}. Pick the closest; use \"other\" only \
+                 when nothing fits (resource carries the specificity).",
+                FAULT_CLASSES.join(", ")
+            )));
+        }
+        let resource = stable_resource(args["resource"].as_str().unwrap_or(""));
+        let resource = resource.as_str();
         let evidence = args["evidence"].as_str().ok_or_else(|| {
             ToolError::UserFacing("opsclaw_notify requires \"evidence\"".to_string())
         })?;
@@ -239,7 +309,7 @@ mod tests {
         json!({
             "severity": "critical",
             "target": "remundo::prod::web-1",
-            "fault_class": "cpu_saturation",
+            "fault_class": "resource_saturation",
             "resource": "",
             "evidence": "cpu at 97% for 8 minutes",
             "hypothesis": "runaway worker process"
@@ -254,7 +324,7 @@ mod tests {
         assert!(r.output.contains("opened incident"));
 
         let open = db
-            .find_open_by_fingerprint(&fingerprint_for(&target(), "cpu_saturation", ""))
+            .find_open_by_fingerprint(&fingerprint_for(&target(), "resource_saturation", ""))
             .await
             .unwrap();
         assert!(open.is_some());
@@ -277,12 +347,67 @@ mod tests {
         assert_eq!(all.len(), 1, "must not create a second incident row");
     }
 
+    #[test]
+    fn stable_resource_strips_pod_instance_suffixes_only() {
+        // deployment pod → workload
+        assert_eq!(
+            stable_resource("dapr-system/dapr-sentry-677b4c4c8d-jq49j"),
+            "dapr-system/dapr-sentry"
+        );
+        assert_eq!(
+            stable_resource("prod-remundo-api-admin-fbcd9dc96-csv2x"),
+            "prod-remundo-api-admin"
+        );
+        // statefulset pod → workload
+        assert_eq!(
+            stable_resource("elastic-backend/elasticsearch-0"),
+            "elastic-backend/elasticsearch"
+        );
+        assert_eq!(stable_resource("apisix-etcd-1"), "apisix-etcd");
+        // already-stable names pass through
+        assert_eq!(stable_resource("prod-backend/notifier"), "prod-backend/notifier");
+        assert_eq!(stable_resource("elasticsearch-latest"), "elasticsearch-latest");
+        assert_eq!(stable_resource(""), "");
+    }
+
+    #[tokio::test]
+    async fn invented_fault_class_is_rejected_with_the_vocabulary() {
+        let db: Arc<dyn IncidentRepo> = Arc::new(InMemoryDb::new());
+        let ctx = ctx_with(db.clone());
+        let mut args = base_args();
+        args["fault_class"] = json!("dapr_sentry_cert_expired");
+        let err = NotifyTool.call(&ctx, args).await.unwrap_err();
+        match err {
+            ToolError::UserFacing(msg) => {
+                assert!(msg.contains("cert_expired"), "error must teach the vocabulary: {msg}")
+            }
+            other => panic!("expected UserFacing, got {other:?}"),
+        }
+        assert!(db.list(true, 100).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pod_instance_resources_land_on_the_same_fingerprint() {
+        // Two detections of one fault, reported against different pod
+        // incarnations of the same workload, must be ONE incident.
+        let db: Arc<dyn IncidentRepo> = Arc::new(InMemoryDb::new());
+        let ctx = ctx_with(db.clone());
+        let mut first = base_args();
+        first["resource"] = json!("dapr-system/dapr-sentry-677b4c4c8d-jq49j");
+        NotifyTool.call(&ctx, first).await.unwrap();
+        let mut second = base_args();
+        second["resource"] = json!("dapr-system/dapr-sentry-5d9f8b7c66-x2mlp");
+        let r = NotifyTool.call(&ctx, second).await.unwrap();
+        assert!(r.output.contains("already tracking"), "{}", r.output);
+        assert_eq!(db.list(true, 100).await.unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn expired_incident_is_reopened_not_duplicated() {
         let db: Arc<dyn IncidentRepo> = Arc::new(InMemoryDb::new());
         let ctx = ctx_with(db.clone());
         NotifyTool.call(&ctx, base_args()).await.unwrap();
-        let fp = fingerprint_for(&target(), "cpu_saturation", "");
+        let fp = fingerprint_for(&target(), "resource_saturation", "");
         let original = db.find_open_by_fingerprint(&fp).await.unwrap().unwrap();
         db.set_state(original.id, IncidentState::Expired, None).await.unwrap();
 
@@ -306,7 +431,7 @@ mod tests {
         let db: Arc<dyn IncidentRepo> = Arc::new(InMemoryDb::new());
         let ctx = ctx_with(db.clone());
         NotifyTool.call(&ctx, base_args()).await.unwrap();
-        let fp = fingerprint_for(&target(), "cpu_saturation", "");
+        let fp = fingerprint_for(&target(), "resource_saturation", "");
         let original = db.find_open_by_fingerprint(&fp).await.unwrap().unwrap();
         db.set_state(original.id, IncidentState::Resolved, None).await.unwrap();
 
@@ -328,7 +453,7 @@ mod tests {
         NotifyTool.call(&ctx, base_args()).await.unwrap();
 
         let mut second = base_args();
-        second["fault_class"] = json!("disk_full");
+        second["fault_class"] = json!("volume_failure");
         NotifyTool.call(&ctx, second).await.unwrap();
 
         let all = db.list(true, 100).await.unwrap();
@@ -341,7 +466,7 @@ mod tests {
         let ctx = ctx_with(db.clone());
         NotifyTool.call(&ctx, base_args()).await.unwrap();
         let incident = db
-            .find_open_by_fingerprint(&fingerprint_for(&target(), "cpu_saturation", ""))
+            .find_open_by_fingerprint(&fingerprint_for(&target(), "resource_saturation", ""))
             .await
             .unwrap()
             .unwrap();

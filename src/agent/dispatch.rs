@@ -849,7 +849,7 @@ mod tests {
                 json!({
                     "severity": "critical",
                     "target": "remundo::prod::web-1",
-                    "fault_class": "disk_full",
+                    "fault_class": "resource_saturation",
                     "resource": "",
                     "evidence": "disk at 98%",
                     "hypothesis": "runaway log growth"
@@ -1226,7 +1226,7 @@ mod tests {
                 json!({
                     "severity": "critical",
                     "target": "remundo::prod::web-1",
-                    "fault_class": "disk_full",
+                    "fault_class": "resource_saturation",
                     "resource": "",
                     "evidence": "disk at 98%",
                     "hypothesis": "runaway log growth"

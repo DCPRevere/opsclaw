@@ -154,14 +154,22 @@ impl HindsightClient {
                 Error::other(format!("hindsight retain: {e}"))
             })?;
         let status = resp.status().as_u16();
-        let r = ensure_ok(resp, "retain").await;
+        // Async retain: 200 means ACCEPTED, not extracted. The operation id is
+        // the only handle on the background job — log it so a failed extraction
+        // can be traced in Hindsight's own logs.
+        let r = json_ok(resp, "retain").await;
         match &r {
-            Ok(()) => {
-                tracing::info!(bank = %self.bank, status, latency_ms = started.elapsed().as_millis() as u64, "memory.retain ok")
+            Ok(v) => {
+                tracing::info!(
+                    bank = %self.bank, status,
+                    latency_ms = started.elapsed().as_millis() as u64,
+                    operation_id = v["operation_id"].as_str().unwrap_or("-"),
+                    "memory.retain accepted (async extraction)"
+                )
             }
             Err(e) => tracing::warn!(bank = %self.bank, status, "memory.retain failed: {e}"),
         }
-        r
+        r.map(|_| ())
     }
 
     /// list: the bank's full set of stored facts, paginated and complete — the
@@ -445,7 +453,14 @@ fn retain_body(framed_content: &str, opts: &RetainOpts) -> serde_json::Value {
     if let Some(ctx) = &opts.context {
         item.insert("context".into(), serde_json::Value::String(ctx.clone()));
     }
-    serde_json::json!({ "items": [serde_json::Value::Object(item)] })
+    // `async: true` is load-bearing, not an optimisation: Hindsight's default
+    // synchronous retain runs its fact-extraction LLM call INLINE before the
+    // HTTP response (measured 11.8s for one sentence, 18–426s for real scan
+    // reports), which blows our 30s client timeout — every retain "failed",
+    // the retries re-ingested documents the server had actually completed,
+    // and the bank silently double-processed. Async returns in ~17ms with an
+    // operation id and extraction lands in the background.
+    serde_json::json!({ "async": true, "items": [serde_json::Value::Object(item)] })
 }
 
 /// Bank configuration (PATCH /config): steer extraction + reflection for an SRE
@@ -577,6 +592,11 @@ mod tests {
             &RetainOpts::default(),
         );
         assert!(obs["items"][0]["content"].as_str().unwrap().starts_with("scan of"));
+
+        // Every retain is async — synchronous retain runs the extraction LLM
+        // inline and blows the 30s client timeout on real scan payloads.
+        assert_eq!(body["async"], true);
+        assert_eq!(obs["async"], true);
     }
 
     #[test]

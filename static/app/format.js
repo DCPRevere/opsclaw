@@ -53,8 +53,32 @@ export function renderMarkdown(src){
       const suffix=showHost?' ('+host+')':'';
       return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>${suffix}`;
     });
+  // Block pass: markdown tables (a header row of |cells|, a |---|:---|
+  // separator row, then body rows) become a real <table>. Runs before the
+  // per-line pass so table lines never get bullet/heading treatment, and
+  // the rows are joined WITHOUT newlines — the bubble's white-space:
+  // pre-wrap would otherwise render each inter-row newline as a blank line.
+  const lines=s.split('\n');
+  const out=[];
+  const isRow=(l)=>/^\s*\|.*\|\s*$/.test(l);
+  const isSep=(l)=>/^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(l);
+  const cells=(l)=>l.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>c.trim());
+  for(let i=0;i<lines.length;i++){
+    if(isRow(lines[i])&&i+1<lines.length&&isSep(lines[i+1])){
+      let html='<table><thead><tr>'+cells(lines[i]).map(c=>'<th>'+c+'</th>').join('')+'</tr></thead><tbody>';
+      i+=1; // skip the separator row
+      while(i+1<lines.length&&isRow(lines[i+1])&&!isSep(lines[i+1])){
+        i+=1;
+        html+='<tr>'+cells(lines[i]).map(c=>'<td>'+c+'</td>').join('')+'</tr>';
+      }
+      out.push(html+'</tbody></table>');
+      continue;
+    }
+    out.push(lines[i]);
+  }
   // Per-line: headings -> bold line; -/* bullets -> • marker.
-  s=s.split('\n').map(line=>{
+  s=out.map(line=>{
+    if(line.startsWith('<table>'))return line;
     const h=line.match(/^\s*#{1,6}\s+(.*)$/);
     if(h)return '<strong>'+h[1]+'</strong>';
     const b=line.match(/^(\s*)[-*]\s+(.*)$/);

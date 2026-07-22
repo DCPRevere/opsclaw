@@ -28,6 +28,13 @@ pub trait Prompter {
     /// Ask a yes/no question. `default` picks what an empty answer means.
     fn confirm(&mut self, question: &str, default: bool) -> Result<bool>;
 
+    /// Ask for a secret value with terminal echo disabled — wizards use this
+    /// when a `store:KEY` answer needs its value seeded on the spot, so the
+    /// value obeys the same never-echoed rule as `secret set`'s hidden
+    /// prompt. No default: an accidental empty secret must be an explicit
+    /// empty answer, never a fallback.
+    fn ask_hidden(&mut self, question: &str) -> Result<String>;
+
     /// Print an informational line (wizard narration, not a question).
     fn say(&mut self, line: &str);
 }
@@ -73,6 +80,20 @@ impl Prompter for StdioPrompter {
             "n" | "no" => false,
             _ => default,
         })
+    }
+
+    fn ask_hidden(&mut self, question: &str) -> Result<String> {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            rpassword::prompt_password(format!("{question}: "))
+                .map_err(|e| crate::Error::other(format!("could not read hidden input: {e}")))
+        } else {
+            // Piped stdin (scripted install): same fallback the binary's
+            // password reader uses — nothing to hide from a pipe.
+            print!("{question}: ");
+            std::io::stdout().flush().ok();
+            self.read_line()
+        }
     }
 
     fn say(&mut self, line: &str) {
@@ -124,6 +145,12 @@ impl Prompter for ScriptedPrompter {
             "n" | "no" => false,
             other => panic!("ScriptedPrompter: bad confirm answer {other:?} for {question:?}"),
         })
+    }
+
+    fn ask_hidden(&mut self, question: &str) -> Result<String> {
+        Ok(self.answers.pop_front().unwrap_or_else(|| {
+            panic!("ScriptedPrompter under-scripted at ask_hidden({question:?})")
+        }))
     }
 
     fn say(&mut self, line: &str) {

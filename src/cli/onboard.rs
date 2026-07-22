@@ -135,6 +135,47 @@ fn ensure_jwt(cfg: &mut Config, store: &SecretStore) -> Result<bool> {
     Ok(generated)
 }
 
+/// Chained operator-account creation for the interactive wizard. Opens the
+/// same database file the daemon (and `account create`) would — explicit
+/// `daemon.db_path` or the default `<home>/opsclaw.sqlite3` — so the account
+/// is already there on first boot. The 12-character password rule is stated
+/// BEFORE any input and enforced before the confirmation prompt: the old
+/// flow's rejection only after typing the password twice is exactly the
+/// friction this exists to remove. Returns the created account's email.
+async fn wizard_account(p: &mut dyn Prompter, cfg: &Config, opsclaw_home: &Path) -> Result<String> {
+    let db_path = cfg
+        .daemon
+        .db_path
+        .clone()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| opsclaw_home.join("opsclaw.sqlite3").display().to_string());
+    let db = crate::db::Db::connect(&db_path).await?;
+
+    let email = p.ask("operator email", None)?;
+    let display_name = p.ask("display name", Some(&email))?;
+    p.say("  the password must be at least 12 characters (it guards a daemon that can act on");
+    p.say("  production systems).");
+    let password = loop {
+        let first = p.ask_hidden("password (min 12 characters; hidden)")?;
+        if first.len() < 12 {
+            p.say("  too short — at least 12 characters, try again");
+            continue;
+        }
+        let second = p.ask_hidden("confirm password")?;
+        if first != second {
+            p.say("  passwords did not match — try again");
+            continue;
+        }
+        break first;
+    };
+    let out = crate::cli::account_cmd::create(&db, &email, &display_name, &password).await?;
+    p.say(&format!(
+        "  created operator {} — sign in at the web UI once the daemon is running",
+        out.email
+    ));
+    Ok(out.email)
+}
+
 /// Interactive path: ask, don't assume. Every question has a sensible
 /// default (empty = skip that integration, matching fakes mode) so an
 /// operator can hit enter through the whole thing and land on a fully-faked,
@@ -148,11 +189,26 @@ pub async fn run(
     let (mut cfg, config_existed, store) = prepare(config_path, opsclaw_home)?;
     let mut summary = Vec::new();
 
-    p.say("OpsClaw onboarding — every question can be left blank to skip that integration.");
+    p.say("OpsClaw onboarding — this step creates two things:");
+    p.say(&format!("  the config file:            {}", config_path.display()));
+    p.say(&format!(
+        "  the encrypted secret store: {} (AES-256-GCM, 0600 key file beside it)",
+        opsclaw_home.join("secrets.enc").display()
+    ));
+    p.say("every question can be left blank to skip that integration — the daemon then runs it");
+    p.say("in self-validating fakes mode, and you can rerun `opsclaw-cli onboard` any time.");
 
+    p.say("[llm] OpsClaw reasons with an OpenRouter model. The API key is stored by REFERENCE");
+    p.say("      (the env var's NAME) — the key's value never enters the config file.");
     let llm_key_env =
         p.ask("OpenRouter API key env var name (blank to skip; sets fakes-mode LLM)", None)?;
     if !llm_key_env.is_empty() {
+        if std::env::var(&llm_key_env).is_err() {
+            p.say(&format!(
+                "  warning: ${llm_key_env} is not set in this shell — export it where the daemon \
+                 runs or the LLM will fail to authenticate"
+            ));
+        }
         cfg.llm.api_key = Some(SecretRef::env(&llm_key_env));
         let models_raw =
             p.ask("comma-separated OpenRouter model list (required if a key is set)", None)?;
@@ -163,6 +219,8 @@ pub async fn run(
         summary.push("LLM: not configured (fakes mode)".to_string());
     }
 
+    p.say("[memory] Hindsight is the optional long-term memory service; without it, memory");
+    p.say("         features run as an honest no-op.");
     let hindsight_url =
         p.ask("Hindsight URL (blank to skip; memory runs as an honest no-op)", None)?;
     if !hindsight_url.is_empty() {
@@ -172,14 +230,24 @@ pub async fn run(
         summary.push("Memory: not configured (honest no-op)".to_string());
     }
 
+    p.say("[telegram] optional chat channel for alerts and approvals; the bot token is stored");
+    p.say("           by env-var REFERENCE, like the LLM key.");
     let telegram_env = p.ask("Telegram bot token env var name (blank to skip)", None)?;
     if !telegram_env.is_empty() {
+        if std::env::var(&telegram_env).is_err() {
+            p.say(&format!(
+                "  warning: ${telegram_env} is not set in this shell — export it where the \
+                 daemon runs"
+            ));
+        }
         cfg.telegram.bot_token = Some(SecretRef::env(&telegram_env));
         summary.push(format!("Telegram: env:{telegram_env}"));
     } else {
         summary.push("Telegram: not configured".to_string());
     }
 
+    p.say("[dead-man] an external heartbeat URL (e.g. healthchecks.io) that alerts you when");
+    p.say("           OpsClaw itself dies — essential if it runs inside a cluster it monitors.");
     let deadman_url = p.ask(
         "external dead-man heartbeat URL (blank to skip; REQUIRED for in-cluster installs)",
         None,
@@ -208,8 +276,68 @@ pub async fn run(
     cfg.validate()?;
     write_config(config_path, &cfg)?;
 
-    p.say(&format!("wrote {}", config_path.display()));
-    p.say("next: `opsclaw-cli config project add` to add a project, then `opsclaw-cli doctor`.");
+    p.say(&format!("-- base setup done: wrote {} --", config_path.display()));
+    for line in &summary {
+        p.say(&format!("  {line}"));
+    }
+
+    // The remaining first-run steps (project wizard → operator account →
+    // doctor) used to live only in the operator's head; offer each one
+    // inline, and print the standalone command whenever a stage is skipped
+    // or fails so nothing is lost by bailing out. A stage failure narrates
+    // and continues rather than erroring the whole onboard — everything up
+    // to here is already safely on disk.
+    p.say("[projects] a project groups environments, which group targets — the machines and");
+    p.say("           clusters OpsClaw watches. Nothing is monitored until one exists.");
+    if p.confirm("add your first project now?", false)? {
+        match crate::cli::config_cmd::add_project(p, config_path, &store) {
+            Ok(project) => summary.push(format!("Project: added {:?}", project.name)),
+            Err(e) => {
+                p.say(&format!(
+                    "  project wizard failed: {e} — run `opsclaw-cli config project add` when ready"
+                ));
+            }
+        }
+    } else {
+        p.say("  skipped — run `opsclaw-cli config project add` when ready.");
+    }
+
+    p.say("[account] the web UI needs an operator account; the FIRST one can only be created");
+    p.say("          from this CLI (it goes straight into the daemon's local database).");
+    if p.confirm("create your operator account now?", false)? {
+        match wizard_account(p, &cfg, opsclaw_home).await {
+            Ok(email) => summary.push(format!("Account: created {email}")),
+            Err(e) => {
+                p.say(&format!(
+                    "  account creation failed: {e} — run `opsclaw-cli account create <email>` \
+                     when ready"
+                ));
+            }
+        }
+    } else {
+        p.say("  skipped — run `opsclaw-cli account create <email>` when ready.");
+    }
+
+    p.say("[doctor] verifies the whole setup end to end: config validity, every secret");
+    p.say("         reference, and reachability of each configured target.");
+    if p.confirm("run doctor now?", true)? {
+        match crate::cli::doctor::run(config_path, opsclaw_home).await {
+            Ok(report) => {
+                for check in &report.checks {
+                    let mark = if check.ok { "OK  " } else { "FAIL" };
+                    p.say(&format!("  [{mark}] {}: {}", check.name, check.detail));
+                }
+                if !report.ok() {
+                    p.say("  fix the FAILs above and re-run `opsclaw-cli doctor` before starting.");
+                }
+            }
+            Err(e) => p.say(&format!("  doctor failed to run: {e}")),
+        }
+    } else {
+        p.say("  skipped — run `opsclaw-cli doctor` before starting the daemon.");
+    }
+
+    p.say("all set — start OpsClaw with: `opsclaw-cli daemon`");
 
     Ok(OnboardOutcome {
         config_path: config_path.display().to_string(),
@@ -443,11 +571,88 @@ mod tests {
             "",                      // hindsight url: skip
             "",                      // telegram env: skip
             "https://hc-ping.com/x", // deadman url
+            "n",                     // chained project wizard: skip
+            "n",                     // chained account creation: skip
+            "n",                     // chained doctor run: skip
         ]);
 
         let outcome = run(&mut p, &config_path, dir.path()).await.unwrap();
         assert!(outcome.config_created);
         let cfg = Config::load(Some(&config_path)).unwrap();
         assert_eq!(cfg.daemon.deadman_url.as_deref(), Some("https://hc-ping.com/x"));
+    }
+
+    #[tokio::test]
+    async fn chained_flow_runs_project_account_and_doctor_then_points_at_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut p = ScriptedPrompter::new([
+            "", // llm key env: skip
+            "", // hindsight url: skip
+            "", // telegram env: skip
+            "", // deadman url: skip
+            // -- chained project wizard --
+            "y",
+            "demo",      // project name
+            "",          // project autonomy: default
+            "prod",      // env name
+            "",          // env autonomy: inherit
+            "running",   // env expected_state
+            "this-host", // target name
+            "local",     // target kind (no credential prompt)
+            "",          // address
+            "",          // target autonomy: inherit
+            "running",   // target expected_state
+            "n",         // another target? no
+            "n",         // another env? no
+            // -- chained account creation --
+            "y",
+            "ops@example.com", // email
+            "",                // display name: default (the email)
+            "short",           // too short: refused BEFORE any confirmation prompt
+            "a-long-enough-password",
+            "a-long-enough-password",
+            // -- chained doctor --
+            "y",
+        ]);
+
+        let outcome = run(&mut p, &config_path, dir.path()).await.unwrap();
+        assert!(outcome.config_created);
+
+        let cfg = Config::load(Some(&config_path)).unwrap();
+        assert_eq!(cfg.projects.len(), 1, "chained project wizard must have persisted");
+        assert_eq!(cfg.projects[0].name, "demo");
+
+        // The account landed in the same db file the daemon will open.
+        let db = crate::db::Db::connect(&dir.path().join("opsclaw.sqlite3").display().to_string())
+            .await
+            .unwrap();
+        let accounts = crate::cli::account_cmd::list(&db).await.unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].email, "ops@example.com");
+
+        // Rule stated upfront; the short attempt refused before confirmation.
+        assert!(p.said.iter().any(|l| l.contains("at least 12 characters")), "{:?}", p.said);
+        assert!(p.said.iter().any(|l| l.contains("too short")), "{:?}", p.said);
+
+        // Doctor ran green on the fully-faked base + local target...
+        assert!(p.said.iter().any(|l| l.contains("[OK  ] config")), "{:?}", p.said);
+        // ...and the wizard ends by naming the exact next command.
+        assert!(p.said.last().unwrap().contains("`opsclaw-cli daemon`"), "{:?}", p.said);
+    }
+
+    #[tokio::test]
+    async fn chained_flow_skips_print_the_standalone_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut p = ScriptedPrompter::new(["", "", "", "", "n", "n", "n"]);
+
+        run(&mut p, &config_path, dir.path()).await.unwrap();
+
+        let said = p.said.join("\n");
+        assert!(said.contains("`opsclaw-cli config project add`"), "{said}");
+        assert!(said.contains("`opsclaw-cli account create <email>`"), "{said}");
+        assert!(said.contains("`opsclaw-cli doctor`"), "{said}");
+        assert!(p.said.last().unwrap().contains("`opsclaw-cli daemon`"), "{said}");
     }
 }

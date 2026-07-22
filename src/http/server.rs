@@ -30,9 +30,12 @@ pub async fn run(state: AppState) -> Result<()> {
 
     // Inbound chat: listeners + consumer over every listening channel
     // (no-op when the list is empty — fakes mode, or no Telegram token).
+    // Gets the e-stop so the `!estop` chat command works even with the
+    // agent loop unwired or wedged (DESIGN §4: remote e-stop via chat).
     crate::channels::inbound::spawn(
         state.listen_channels.clone(),
         state.chat.clone(),
+        state.estop.clone(),
         shutdown.clone(),
         &tracker,
     );

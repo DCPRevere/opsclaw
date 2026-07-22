@@ -1382,15 +1382,11 @@ async fn chat_history_on_the_fakes_spine_is_empty_not_an_error() {
 }
 
 #[tokio::test]
-async fn a_successful_chat_turn_returns_the_reply_and_lands_on_the_sse_hub() {
+async fn a_successful_chat_turn_returns_the_reply_through_the_authed_seam() {
     let mut state = AppState::fake();
     let fake = std::sync::Arc::new(FakeChat::new("42 is the answer"));
     state.chat = fake.clone();
     let account_id = seed_account(&state, "chatter@example.com", "some-password-123").await;
-
-    // Subscribe to the SSE hub BEFORE the turn, so both broadcast events
-    // are guaranteed to be waiting in the receiver's queue afterward.
-    let mut sub = state.web.subscribe();
 
     let base = spawn_server(state).await;
     let client = SessionClient::new();
@@ -1419,17 +1415,13 @@ async fn a_successful_chat_turn_returns_the_reply_and_lands_on_the_sse_hub() {
         assert_eq!(message, "what is 6*7?");
     }
 
-    // Both the operator's own message and the reply were broadcast to the
-    // web SSE hub, in order, as "chat"-kind events (module doc:
-    // http::routes::chat — "web chat is a team surface").
-    let ev1 = sub.recv().await.unwrap();
-    assert_eq!(ev1.kind, "chat");
-    assert_eq!(ev1.body["role"], "user");
-    assert_eq!(ev1.body["speaker"], "Test Operator");
-    assert_eq!(ev1.body["text"], "what is 6*7?");
-
-    let ev2 = sub.recv().await.unwrap();
-    assert_eq!(ev2.kind, "chat");
-    assert_eq!(ev2.body["role"], "assistant");
-    assert_eq!(ev2.body["text"], "42 is the answer");
+    // NOT asserted here: the SSE broadcast. Publishing both sides of the
+    // exchange (plus live tool events) is `ChatTurn`'s own responsibility
+    // now — moved INTO the handler so a Telegram/CLI-originated turn
+    // reaches web tabs identically — so a fake handler publishes nothing,
+    // and asserting it here would mean teaching the fake to imitate the
+    // real broadcast (a test of the fixture, not the product). The real
+    // path is pinned by `agent::dispatch`'s
+    // `chat_turn_persists_the_durable_log_streams_tools_and_hydrates`,
+    // which drives a real ChatTurn against a real hub.
 }

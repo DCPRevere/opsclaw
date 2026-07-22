@@ -98,12 +98,24 @@ impl Tool for RunbookListTool {
             // own doc — which reads as "no data" below, not "0% reliable").
             let rate_note = if let Some(repo) = &ctx.runbook_runs {
                 match repo.success_rate(&fm.title).await {
-                    Ok(rate) if rate.total_runs > 0 => format!(
-                        " — {}/{} runs succeeded ({:.0}%)",
-                        rate.successful_runs,
-                        rate.total_runs,
-                        rate.rate * 100.0
-                    ),
+                    Ok(rate) if rate.total_runs > 0 => {
+                        // Brief §7 "low scorers surfaced for review": the
+                        // explicit marker makes the model SEE unreliability
+                        // instead of having to derive it from the raw
+                        // fraction — same marker string as `opsclaw-cli
+                        // runbook list` (one definition, `runbooks::
+                        // low_success_marker`).
+                        let marker =
+                            crate::runbooks::low_success_marker(rate.total_runs, rate.rate)
+                                .map(|m| format!(" {m}"))
+                                .unwrap_or_default();
+                        format!(
+                            " — {}/{} runs succeeded ({:.0}%){marker}",
+                            rate.successful_runs,
+                            rate.total_runs,
+                            rate.rate * 100.0
+                        )
+                    }
                     Ok(_) => " — no run history yet".to_string(),
                     Err(_) => String::new(), // best-effort join; a lookup failure just omits the note
                 }
@@ -303,6 +315,42 @@ mod tests {
 
         let r = RunbookListTool.call(&ctx, json!({})).await.unwrap();
         assert!(r.output.contains("1/2 runs succeeded"), "{}", r.output);
+    }
+
+    #[tokio::test]
+    async fn list_marks_low_success_runbooks_for_review() {
+        let rb = Runbook::parse(&runbook_src("Flaky runbook", &["flaky"])).unwrap();
+        let store = RunbookStore::from_parsed("/nonexistent", vec![("flaky.md".into(), rb)]);
+        let db = InMemoryDb::new();
+        // 1 ok / 3 runs = 33% over the 3-run minimum sample: flagged.
+        RunbookRunRepo::record_run(&db, &run("Flaky runbook", true)).await.unwrap();
+        RunbookRunRepo::record_run(&db, &run("Flaky runbook", false)).await.unwrap();
+        RunbookRunRepo::record_run(&db, &run("Flaky runbook", false)).await.unwrap();
+
+        let mut ctx = base_ctx();
+        ctx.runbooks = Some(Arc::new(store));
+        ctx.runbook_runs = Some(Arc::new(db));
+
+        let r = RunbookListTool.call(&ctx, json!({})).await.unwrap();
+        assert!(r.output.contains("[low success: 33% over 3 runs]"), "{}", r.output);
+    }
+
+    #[tokio::test]
+    async fn list_no_low_success_marker_below_the_minimum_sample() {
+        let rb = Runbook::parse(&runbook_src("Barely run", &["x"])).unwrap();
+        let store = RunbookStore::from_parsed("/nonexistent", vec![("br.md".into(), rb)]);
+        let db = InMemoryDb::new();
+        // 0/2 is a terrible rate but below MIN_RUNS_FOR_SIGNAL: no marker.
+        RunbookRunRepo::record_run(&db, &run("Barely run", false)).await.unwrap();
+        RunbookRunRepo::record_run(&db, &run("Barely run", false)).await.unwrap();
+
+        let mut ctx = base_ctx();
+        ctx.runbooks = Some(Arc::new(store));
+        ctx.runbook_runs = Some(Arc::new(db));
+
+        let r = RunbookListTool.call(&ctx, json!({})).await.unwrap();
+        assert!(!r.output.contains("low success"), "{}", r.output);
+        assert!(r.output.contains("0/2 runs succeeded"), "{}", r.output);
     }
 
     #[tokio::test]

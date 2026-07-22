@@ -68,16 +68,42 @@ pub fn success_rate(runs: &[RunbookRun]) -> f64 {
     succeeded as f64 / runs.len() as f64
 }
 
+/// Minimum recorded runs before success-rate signals mean anything — one
+/// unlucky run must not flag a runbook nobody has exercised yet.
+pub const MIN_RUNS_FOR_SIGNAL: usize = 3;
+
+/// Rate at or below which a runbook is surfaced for review (brief §7:
+/// "low scorers surfaced for review").
+pub const LOW_SUCCESS_THRESHOLD: f64 = 0.5;
+
 /// True when a runbook has enough runs to be meaningful AND its success rate
 /// is at or below `threshold` — the surfacing rule for "needs review". Fewer
-/// than `MIN_RUNS_FOR_SIGNAL` runs never trips this: one unlucky run must not
-/// flag a runbook nobody has exercised yet.
+/// than [`MIN_RUNS_FOR_SIGNAL`] runs never trips this.
 pub fn low_success(runs: &[RunbookRun], threshold: f64) -> bool {
-    const MIN_RUNS_FOR_SIGNAL: usize = 3;
     if runs.len() < MIN_RUNS_FOR_SIGNAL {
         return false;
     }
     success_rate(runs) <= threshold
+}
+
+/// The same rule as [`low_success`], but over an already-aggregated
+/// `(total, rate)` pair — the shape `db::RunbookRunRepo::success_rate`
+/// returns — with the canonical [`LOW_SUCCESS_THRESHOLD`] baked in, so the
+/// two surfacing sites (`opsclaw-cli runbook list` and the `runbook_list`
+/// tool) share one rule instead of each re-deriving threshold and sample
+/// size.
+pub fn low_success_from_rate(total_runs: i64, rate: f64) -> bool {
+    total_runs >= MIN_RUNS_FOR_SIGNAL as i64 && rate <= LOW_SUCCESS_THRESHOLD
+}
+
+/// The review marker both surfacing sites print, e.g.
+/// `[low success: 40% over 5 runs]` — one definition so the CLI listing and
+/// the `runbook_list` tool output can't drift apart (the marker is what an
+/// operator greps for and what the model pattern-matches on). `None` when
+/// the runbook isn't a low scorer per [`low_success_from_rate`].
+pub fn low_success_marker(total_runs: i64, rate: f64) -> Option<String> {
+    low_success_from_rate(total_runs, rate)
+        .then(|| format!("[low success: {:.0}% over {} runs]", rate * 100.0, total_runs))
 }
 
 #[cfg(test)]
@@ -185,5 +211,24 @@ mod tests {
         ];
         // Exactly 0.5 success rate, threshold 0.5 -> flagged (<=).
         assert!(low_success(&runs, 0.5));
+    }
+
+    #[test]
+    fn low_success_from_rate_mirrors_the_slice_rule() {
+        // Below the minimum sample: never flagged, however bad the rate.
+        assert!(!low_success_from_rate(2, 0.0));
+        // At the minimum sample with a low rate: flagged.
+        assert!(low_success_from_rate(3, 0.4));
+        // Inclusive boundary, same as `low_success`.
+        assert!(low_success_from_rate(4, 0.5));
+        // Healthy rate: not flagged.
+        assert!(!low_success_from_rate(10, 0.9));
+    }
+
+    #[test]
+    fn low_success_marker_formats_percent_and_run_count() {
+        assert_eq!(low_success_marker(5, 0.4).as_deref(), Some("[low success: 40% over 5 runs]"));
+        assert_eq!(low_success_marker(10, 0.9), None);
+        assert_eq!(low_success_marker(2, 0.0), None, "below minimum sample: no marker");
     }
 }

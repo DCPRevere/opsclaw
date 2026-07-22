@@ -83,6 +83,25 @@ pub struct RunbookSummary {
     pub alert_categories: Vec<String>,
     pub keywords: Vec<String>,
     pub target_glob: Option<String>,
+    /// Success-rate join from run history (brief §7: "per-runbook
+    /// success-rate tracking with low scorers surfaced for review").
+    /// `None` when history isn't available — plain [`list`] without a DB,
+    /// or a runbook that has never run — which the listing renders as no
+    /// note at all, not "0% reliable".
+    pub success: Option<SuccessSummary>,
+}
+
+/// One runbook's aggregated run history, as joined into [`RunbookSummary`]
+/// by [`list_with_history`].
+#[derive(Debug, Serialize)]
+pub struct SuccessSummary {
+    pub successful_runs: i64,
+    pub total_runs: i64,
+    pub rate: f64,
+    /// The brief-§7 review flag: enough runs to be meaningful at a rate at
+    /// or below the threshold (`runbooks::low_success_from_rate` — one rule
+    /// shared with the `runbook_list` tool).
+    pub low_success: bool,
 }
 
 /// List every runbook under the opsclaw home's runbooks dir, via
@@ -108,11 +127,39 @@ pub fn list(opsclaw_home: &Path) -> Result<Vec<std::result::Result<RunbookSummar
                 alert_categories: lr.runbook.front_matter.trigger.alert_categories.clone(),
                 keywords: lr.runbook.front_matter.trigger.keywords.clone(),
                 target_glob: lr.runbook.front_matter.trigger.target_glob.clone(),
+                success: None,
             })
         })
         .collect();
     out.extend(store.errors().into_iter().map(|e| Err(format!("{}: {}", e.file, e.message))));
     Ok(out)
+}
+
+/// [`list`], plus a per-runbook success-rate join from `runs` (brief §7:
+/// low scorers get surfaced for review — `main.rs` renders the flagged ones
+/// with the `runbooks::low_success_marker` text). The join is best-effort,
+/// same posture as `tools::runbooks_tool`'s rate note: a lookup failure or
+/// a runbook with zero recorded runs just leaves `success` as `None` — it
+/// must never fail the listing, which has to keep working on a host whose
+/// daemon has barely (or never) run.
+pub async fn list_with_history(
+    opsclaw_home: &Path,
+    runs: &Arc<dyn crate::db::RunbookRunRepo>,
+) -> Result<Vec<std::result::Result<RunbookSummary, String>>> {
+    let mut summaries = list(opsclaw_home)?;
+    for entry in summaries.iter_mut().flatten() {
+        if let Ok(rate) = runs.success_rate(&entry.title).await
+            && rate.total_runs > 0
+        {
+            entry.success = Some(SuccessSummary {
+                successful_runs: rate.successful_runs,
+                total_runs: rate.total_runs,
+                rate: rate.rate,
+                low_success: crate::runbooks::low_success_from_rate(rate.total_runs, rate.rate),
+            });
+        }
+    }
+    Ok(summaries)
 }
 
 /// Parse and return one runbook by file stem (`show foo` reads
@@ -445,6 +492,63 @@ mod tests {
         let err_count = summaries.iter().filter(|r| r.is_err()).count();
         assert_eq!(ok_count, 1);
         assert_eq!(err_count, 1);
+    }
+
+    #[tokio::test]
+    async fn list_with_history_flags_low_success_runbooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let rb_dir = runbooks_dir(dir.path());
+        std::fs::create_dir_all(&rb_dir).unwrap();
+        std::fs::write(
+            rb_dir.join("flaky.md"),
+            "+++\ntitle = \"Flaky runbook\"\n\n[trigger]\nkeywords = [\"x\"]\n+++\n- step one\n",
+        )
+        .unwrap();
+
+        let db = crate::db::Db::fake();
+        let runs: Arc<dyn crate::db::RunbookRunRepo> = db.repos();
+        // 2 ok / 5 runs = 40%: over the minimum sample, under the threshold.
+        for ok in [true, true, false, false, false] {
+            let record = crate::runbooks::RunbookRun {
+                id: Uuid::new_v4(),
+                runbook: "Flaky runbook".into(),
+                target: test_target(),
+                principal: None,
+                started_at: Utc::now(),
+                finished_at: Some(Utc::now()),
+                steps: vec![StepOutcome {
+                    step_index: 0,
+                    status: if ok { StepStatus::Ok } else { StepStatus::Failed },
+                    output: String::new(),
+                }],
+            };
+            runs.record_run(&record).await.unwrap();
+        }
+
+        let summaries = list_with_history(dir.path(), &runs).await.unwrap();
+        let s = summaries[0].as_ref().unwrap();
+        let success = s.success.as_ref().expect("history join must populate success");
+        assert_eq!(success.total_runs, 5);
+        assert_eq!(success.successful_runs, 2);
+        assert!(success.low_success, "40% over 5 runs must be flagged for review");
+        assert_eq!(
+            crate::runbooks::low_success_marker(success.total_runs, success.rate).as_deref(),
+            Some("[low success: 40% over 5 runs]")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_with_history_never_run_leaves_success_none() {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), "fresh").unwrap();
+        let db = crate::db::Db::fake();
+        let runs: Arc<dyn crate::db::RunbookRunRepo> = db.repos();
+
+        let summaries = list_with_history(dir.path(), &runs).await.unwrap();
+        assert!(
+            summaries[0].as_ref().unwrap().success.is_none(),
+            "no run history must read as no data, not 0% reliable"
+        );
     }
 
     #[test]

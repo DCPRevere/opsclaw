@@ -353,16 +353,17 @@ async fn case_notify_discipline(llm: Arc<dyn LlmProvider>) -> Result<(), String>
     )?;
 
     // "Name it correctly": the sim scenario's declared fault must be named
-    // by the persisted incident. The fingerprint is checked because it is
-    // one of the two durable fields an incident carries; in practice it is
-    // a hex digest, so the hypothesis is where the name shows up.
+    // by the persisted incident. `fault_class` is the durable field the
+    // notify tool stores in the clear (the same string hashed into the
+    // fingerprint) — the primary haystack; hypothesis is the prose
+    // fallback for label variants ("disk_full" + "the disk is filling").
     let expected_fault = scenario_expected_fault("disk-fill")?;
     ok_if(
-        incident_names_fault(&expected_fault, &incident.fingerprint, &incident.hypothesis),
+        incident_names_fault(&expected_fault, &incident.fault_class, &incident.hypothesis),
         format!(
             "incident does not name the fault {expected_fault:?} \
-             (sim/scenarios/disk-fill/expected.json): fingerprint={:?} hypothesis={:?}",
-            incident.fingerprint, incident.hypothesis
+             (sim/scenarios/disk-fill/expected.json): fault_class={:?} hypothesis={:?}",
+            incident.fault_class, incident.hypothesis
         ),
     )
 }
@@ -389,8 +390,8 @@ fn scenario_expected_fault(scenario: &str) -> Result<String, String> {
 /// word appears somewhere, so "the /data disk is filling" also counts).
 /// Wording flexibility only — an incident naming NO part of the fault never
 /// passes, and an empty expectation never passes vacuously.
-fn incident_names_fault(expected: &str, fingerprint: &str, hypothesis: &str) -> bool {
-    let hay = format!("{fingerprint} {hypothesis}").to_lowercase().replace(['-', '_'], " ");
+fn incident_names_fault(expected: &str, fault_class: &str, hypothesis: &str) -> bool {
+    let hay = format!("{fault_class} {hypothesis}").to_lowercase().replace(['-', '_'], " ");
     let want = expected.to_lowercase().replace(['-', '_'], " ");
     if want.trim().is_empty() {
         return false;
@@ -403,11 +404,14 @@ fn incident_names_fault(expected: &str, fingerprint: &str, hypothesis: &str) -> 
 /// ever passing on an incident that names nothing.
 #[test]
 fn fault_naming_matcher_is_separator_insensitive_but_never_vacuous() {
-    assert!(incident_names_fault("disk-fill", "abc123", "the disk_fill threshold was crossed"));
-    assert!(incident_names_fault("disk-fill", "abc123", "/data disk is filling at 2%/hour"));
+    // fault_class alone carries it (the durable, structured path)…
+    assert!(incident_names_fault("disk-fill", "disk_fill", "volume growing"));
+    assert!(incident_names_fault("disk-fill", "", "the disk_fill threshold was crossed"));
+    // …and word-tolerant prose still passes for label variants.
+    assert!(incident_names_fault("disk-fill", "", "/data disk is filling at 2%/hour"));
     assert!(incident_names_fault("cpu-saturation", "", "CPU saturation across 4 cores"));
-    assert!(!incident_names_fault("disk-fill", "abc123", "nginx workers wedged"));
-    assert!(!incident_names_fault("", "abc123", "anything at all"));
+    assert!(!incident_names_fault("disk-fill", "", "nginx workers wedged"));
+    assert!(!incident_names_fault("", "disk_fill", "anything at all"));
 }
 
 /// The wiring itself stays honest ungated too: the scenario file this case

@@ -52,6 +52,7 @@ fn row_to_incident(row: &SqliteRow) -> Incident {
     Incident {
         id: Uuid::parse_str(row.get("id")).expect("stored uuid"),
         fingerprint: row.get("fingerprint"),
+        fault_class: row.get("fault_class"),
         target: serde_json::from_str(&target_json).expect("stored FqTarget json"),
         severity: parse_severity(row.get::<String, _>("severity").as_str()),
         state: parse_state(row.get::<String, _>("state").as_str()),
@@ -84,13 +85,15 @@ impl crate::db::IncidentRepo for SqliteDb {
             .map_err(|e| crate::Error::Other(format!("encode target: {e}")))?;
         sqlx::query(
             "INSERT INTO incidents
-               (id, fingerprint, target, severity, state, signals, hypothesis,
-                recommended_action, opened_at, acked_at, acked_by, resolved_at,
-                last_notified_at, notify_count, escalation_step, step_started_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (id, fingerprint, fault_class, target, severity, state, signals,
+                hypothesis, recommended_action, opened_at, acked_at, acked_by,
+                resolved_at, last_notified_at, notify_count, escalation_step,
+                step_started_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(incident.id.to_string())
         .bind(&incident.fingerprint)
+        .bind(&incident.fault_class)
         .bind(target_json)
         .bind(severity_str(incident.severity))
         .bind(state_str(incident.state))

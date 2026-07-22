@@ -110,6 +110,7 @@ mod tests {
         Incident {
             id: Uuid::new_v4(),
             fingerprint: "fp".into(),
+            fault_class: String::new(),
             target: FqTarget::new("remundo", "prod", "web-1"),
             severity: Severity::Warning,
             state,

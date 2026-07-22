@@ -147,6 +147,7 @@ mod tests {
         Incident {
             id: Uuid::nil(),
             fingerprint: "abc123fingerprint".into(),
+            fault_class: String::new(),
             target: FqTarget::new("remundo", "prod", "web-1"),
             severity: Severity::Critical,
             state: IncidentState::Resolved,

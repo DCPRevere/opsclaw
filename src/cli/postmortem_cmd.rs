@@ -65,6 +65,7 @@ mod tests {
         Incident {
             id: Uuid::new_v4(),
             fingerprint: "fp-1".into(),
+            fault_class: String::new(),
             target: FqTarget::new("p", "e", "t"),
             severity: Severity::Critical,
             state: IncidentState::Resolved,

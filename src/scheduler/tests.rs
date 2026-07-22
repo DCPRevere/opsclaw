@@ -746,6 +746,7 @@ fn active_incident(fingerprint: &str, opened_at: DateTime<Utc>) -> crate::domain
     Incident {
         id: uuid::Uuid::new_v4(),
         fingerprint: fingerprint.into(),
+        fault_class: String::new(),
         target: FqTarget::new("remundo", "prod", "cluster"),
         severity: Severity::Critical,
         state: IncidentState::Active,

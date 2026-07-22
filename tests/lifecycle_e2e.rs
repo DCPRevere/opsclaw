@@ -111,6 +111,7 @@ async fn daemon_boots_serves_drains_on_the_shutdown_token_and_persists_across_re
     let incident = Incident {
         id: incident_id,
         fingerprint: "lifecycle-e2e-fingerprint".into(),
+        fault_class: String::new(),
         target: FqTarget::new("remundo", "prod", "web-1"),
         severity: Severity::Critical,
         state: IncidentState::Active,

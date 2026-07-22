@@ -116,6 +116,7 @@ fn incident(id: Uuid, fingerprint: &str) -> Incident {
     Incident {
         id,
         fingerprint: fingerprint.into(),
+        fault_class: "cpu-saturation".into(),
         target: target("cluster"),
         severity: Severity::Warning,
         state: IncidentState::Active,
@@ -226,6 +227,9 @@ parity_tests! {
 incident_roundtrip_and_list => |db| {
     let id = Uuid::new_v4();
     IncidentRepo::insert(db, &incident(id, "fp-1")).await.unwrap();
+    // fault_class persists in the clear (the eval harness's "named
+    // correctly" check reads it back — not just the fingerprint hash).
+    assert_eq!(IncidentRepo::get(db, id).await.unwrap().unwrap().fault_class, "cpu-saturation");
 
     let got = IncidentRepo::get(db, id).await.unwrap().unwrap();
     assert_eq!(got.fingerprint, "fp-1");

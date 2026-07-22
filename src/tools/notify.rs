@@ -140,6 +140,7 @@ impl Tool for NotifyTool {
         let incident = Incident {
             id: Uuid::new_v4(),
             fingerprint,
+            fault_class: fault_class.to_string(),
             target,
             severity,
             state: IncidentState::Active,

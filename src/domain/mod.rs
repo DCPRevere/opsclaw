@@ -244,6 +244,13 @@ pub struct Incident {
     pub id: Uuid,
     /// Dedup identity: derived from (fq target, fault class, resource).
     pub fingerprint: String,
+    /// The fault-kind label the incident was opened for ("disk-fill",
+    /// "cpu_saturation", ...) — the same string hashed into `fingerprint`
+    /// (`incidents::fingerprint_for`), persisted in the clear so displays
+    /// and the sim harness's "named correctly" assertion don't have to
+    /// re-derive it from a hash. Empty on rows predating the column.
+    #[serde(default)]
+    pub fault_class: String,
     pub target: FqTarget,
     pub severity: Severity,
     pub state: IncidentState,

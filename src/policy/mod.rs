@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 pub use estop::EStop;
-pub use scrub::Scrubber;
+pub use scrub::{Scrubber, ScrubbingMakeWriter};
 
 use crate::Result;
 use crate::audit::{AuditOutcome, AuditWriter};

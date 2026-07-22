@@ -6,11 +6,18 @@ use opsclaw::http::server;
 
 #[tokio::main]
 async fn main() {
+    // The log sink writes through the GLOBAL scrubber (DoD #4: no secret in
+    // any log line) — the same instance `boot::daemon_state` registers every
+    // resolved credential with, so a secret formatted into any tracing call
+    // comes out `<redacted:NAME>`.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "opsclaw=info,info".into()),
         )
+        .with_writer(opsclaw::policy::ScrubbingMakeWriter::stdout(
+            opsclaw::policy::Scrubber::global().clone(),
+        ))
         .init();
 
     let config = match Config::load(None) {

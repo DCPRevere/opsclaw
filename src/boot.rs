@@ -42,8 +42,10 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     let repos = db.repos();
 
     // Executors + scrubber FIRST (see module doc: scrubber registration for
-    // resource credentials happens in build_executors).
-    let scrubber = Arc::new(Scrubber::new());
+    // resource credentials happens in build_executors). The GLOBAL instance,
+    // not a fresh one — main's tracing init wired the log sink to it before
+    // this ran, so every registration below also covers log lines (DoD #4).
+    let scrubber = Scrubber::global().clone();
     let (executors, wiring_warnings) =
         crate::targets::wiring::build_executors(&config, &secret_store, &scrubber)?;
     for w in &wiring_warnings {
@@ -68,6 +70,13 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     // — wrapped in the daily cost cap (`limits.max_cost_per_day_cents`).
     // The guard's notifier is installed further down, once the channel
     // fan-out exists (wiring order, not an optional feature).
+    // The LLM key is a resolved credential like any other: registered so an
+    // `env` dump on a kind=local target, or an error message formatting the
+    // key, comes back `<redacted:LLM_API_KEY>` (a real DoD #4 exposure —
+    // OPENROUTER_API_KEY sits in this process's environment).
+    if let Some(key_ref) = &config.llm.api_key {
+        scrubber.register("LLM_API_KEY", &key_ref.resolve(&secret_store)?);
+    }
     let base_llm = crate::llm::build_chain(&config.llm, &secret_store)?;
     let cost_guard = Arc::new(crate::llm::CostGuard::new(
         base_llm,
@@ -113,6 +122,13 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         estop,
         scheduler_handle,
     )?;
+    // The web-session and webhook signing secrets, resolved by
+    // `AppState::new` just above — registered for the same reason as the
+    // LLM key: no resolved secret stays scrub-invisible.
+    scrubber.register("HTTP_JWT_SECRET", &state.jwt_secret);
+    if let Some(ws) = &state.webhook_secret {
+        scrubber.register("HTTP_WEBHOOK_SECRET", ws);
+    }
 
     // Outbound channel fan-out: the web SSE hub always; Telegram when a bot
     // token is configured. The Telegram roster and poll offset are DB-backed

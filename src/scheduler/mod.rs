@@ -304,19 +304,41 @@ pub async fn tick(
     // Heartbeat: record liveness BEFORE any phase work (see SchedulerHandle
     // doc) — a slow phase must read as lag, not a stall.
     handle.mark_tick_start(now_utc);
+    // In production the two lanes run on INDEPENDENT supervised loops (see
+    // `spawn`); this all-phases form is the logical tick — tests drive it
+    // directly with a controlled clock.
+    tick_jobs(deps, now_utc).await;
+    tick_alerts(deps, handle, now_utc).await;
+    Ok(())
+}
 
-    // Each phase is independent: a failure in one must NOT skip the others,
-    // or one bad subsystem starves every other proactive behaviour. `phase!`
-    // awaits and logs (never propagates) a phase error.
-    macro_rules! phase {
-        ($name:literal, $fut:expr) => {
-            if let Err(e) = $fut.await {
-                tracing::error!(concat!("scheduler phase ", $name, " failed: {}"), e);
-            }
-        };
-    }
+// Each phase is independent: a failure in one must NOT skip the others, or
+// one bad subsystem starves every other proactive behaviour. `phase!` awaits
+// and logs (never propagates) a phase error.
+macro_rules! phase {
+    ($name:literal, $fut:expr) => {
+        if let Err(e) = $fut.await {
+            tracing::error!(concat!("scheduler phase ", $name, " failed: {}"), e);
+        }
+    };
+}
 
+/// The SLOW lane: firing due jobs means LLM turns — a real cluster sweep
+/// legitimately runs for minutes. Isolated on its own loop so it can only
+/// ever delay itself (gianna's v0.6.4 starvation regression: a long compose
+/// must never delay alert delivery).
+pub(crate) async fn tick_jobs(deps: &SchedulerDeps, now_utc: DateTime<Utc>) {
     phase!("run_due_jobs", jobs::run_due_jobs(deps, now_utc));
+}
+
+/// The FAST lane: everything an operator is WAITING on — escalation pages,
+/// approval expiry, the external dead-man ping, housekeeping. Must stay
+/// sub-second regardless of what the jobs lane is doing.
+pub(crate) async fn tick_alerts(
+    deps: &SchedulerDeps,
+    handle: &SchedulerHandle,
+    now_utc: DateTime<Utc>,
+) {
     phase!("drive_escalations", escalations::drive(deps, handle, now_utc));
     phase!("expire_approvals", escalations::expire_approvals(deps, now_utc));
     phase!("ping_deadman", ping_deadman(deps, now_utc));
@@ -326,8 +348,6 @@ pub async fn tick(
     {
         tracing::warn!("housekeeping prune failed: {e}");
     }
-
-    Ok(())
 }
 
 /// Fire-and-forget POST to the configured external dead-man receiver
@@ -374,6 +394,35 @@ pub fn spawn(
     tracker: &tokio_util::task::TaskTracker,
 ) {
     spawn_watchdog(deps.clone(), handle.clone(), shutdown.clone(), tracker);
+
+    // SLOW lane on its own supervised loop, with its OWN cadence state (the
+    // shared handle's `due` belongs to the alerts lane — two loops gating on
+    // one timestamp would steal each other's ticks). A jobs pass that runs
+    // for minutes delays only the next jobs pass; its duration is recorded
+    // on the handle so the LAG watchdog still surfaces chronically slow
+    // scans.
+    let last_jobs_ms = Arc::new(AtomicI64::new(0));
+    supervise(
+        "scheduler-jobs",
+        (deps.clone(), handle.clone(), last_jobs_ms),
+        shutdown.clone(),
+        tracker,
+        |(deps, handle, last_jobs_ms)| async move {
+            let now_ms = Utc::now().timestamp_millis();
+            let last = last_jobs_ms.load(Ordering::Relaxed);
+            if last != 0 && now_ms - last < handle.interval_ms() as i64 {
+                return;
+            }
+            last_jobs_ms.store(now_ms, Ordering::Relaxed);
+            let started = std::time::Instant::now();
+            tick_jobs(&deps, Utc::now()).await;
+            handle.mark_tick_duration(started.elapsed());
+        },
+    );
+
+    // FAST lane — the watchdog's heartbeat lives here: an operator page must
+    // go out on cadence even while a scan is mid-LLM-turn, and a stall of
+    // THIS loop (not a slow scan) is what "the scheduler is dead" means.
     supervise(
         "scheduler",
         (deps, handle.clone()),
@@ -388,12 +437,8 @@ pub fn spawn(
             if !handle.due(Utc::now().timestamp_millis()) {
                 return;
             }
-            let started = std::time::Instant::now();
-            let res = tick(&deps, &handle, Utc::now()).await;
-            handle.mark_tick_duration(started.elapsed());
-            if let Err(e) = res {
-                tracing::warn!("scheduler tick error: {e}");
-            }
+            handle.mark_tick_start(Utc::now());
+            tick_alerts(&deps, &handle, Utc::now()).await;
         },
     );
 }

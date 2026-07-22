@@ -196,6 +196,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect and edit the scheduler's job table. Editing a seeded scan
+    /// job's prompt converts it to operator-owned free text (kept forever;
+    /// re-seeding skips it) — unedited seeded jobs keep resolving their
+    /// prompt from code and improve with every release.
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
+    },
     /// Open the web UI in a browser ($BROWSER or the platform default);
     /// with --tunnel, first stand up an SSH port-forward to a remote
     /// daemon and open the local end.
@@ -220,6 +228,27 @@ enum AccountCommand {
     List {
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobsCommand {
+    /// List every scheduled job with its cadence and payload kind.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Edit a job by NAME. --prompt converts a seeded scan job to free
+    /// text; --every-minutes changes the cadence (next run recomputed from
+    /// now); --enabled true|false pauses/resumes it.
+    Edit {
+        name: String,
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long)]
+        every_minutes: Option<i64>,
+        #[arg(long)]
+        enabled: Option<bool>,
     },
 }
 
@@ -870,6 +899,56 @@ async fn dispatch(
             state.chat.drain(std::time::Duration::from_secs(20)).await;
         }
 
+        Command::Jobs { command } => {
+            let db = open_db(cfg_path).await?;
+            match command {
+                JobsCommand::List { json } => {
+                    let rows = opsclaw::cli::jobs_cmd::list(&*db.repos()).await?;
+                    if json {
+                        opsclaw::cli::output::print_json(&rows);
+                    } else if rows.is_empty() {
+                        println!("(no jobs — the daemon seeds one scan job per project at boot)");
+                    } else {
+                        for r in &rows {
+                            let flags = match (r.enabled, r.system) {
+                                (false, _) => " [disabled]",
+                                (true, true) => " [seeded]",
+                                (true, false) => "",
+                            };
+                            println!(
+                                "{}{}  {}  next {}\n    {}",
+                                r.name,
+                                flags,
+                                r.schedule,
+                                r.next_run_at.as_deref().unwrap_or("(never)"),
+                                r.payload
+                            );
+                        }
+                    }
+                }
+                JobsCommand::Edit { name, prompt, every_minutes, enabled } => {
+                    let job = opsclaw::cli::jobs_cmd::edit(
+                        &*db.repos(),
+                        &name,
+                        prompt,
+                        every_minutes,
+                        enabled,
+                    )
+                    .await?;
+                    println!(
+                        "updated {:?} — schedule {:?}, payload {}, next run {}",
+                        job.name,
+                        job.schedule,
+                        match &job.payload {
+                            opsclaw::domain::Payload::Prompt { .. } => "free-text prompt",
+                            opsclaw::domain::Payload::ScanRoutine { .. } => "code-resolved routine",
+                            opsclaw::domain::Payload::Text(_) => "fixed text",
+                        },
+                        job.next_run_at.map(|t| t.to_rfc3339()).unwrap_or("(never)".into())
+                    );
+                }
+            }
+        }
         Command::DryRunLog { limit, json } => {
             let db = open_db(cfg_path).await?;
             let entries = opsclaw::cli::audit_cmd::dry_run_log(&db, limit).await?;

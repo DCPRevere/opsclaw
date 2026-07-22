@@ -118,11 +118,11 @@ impl Payload {
 /// `AGENTS.md` — "Seeded scan-job prompts resolve from code constants at
 /// fire time"): `ScanRoutine` resolves its prompt text from a code constant
 /// keyed by `routine` at fire time, so editing the constant reaches every
-/// unedited seeded job on its very next tick, no migration required. This is
-/// a deliberate DIVERGENCE from gianna's `SystemPrompt`, whose seeded prompt
-/// a household could hand-edit back into a free-text row — opsclaw has no
-/// per-project override path for a scan routine's prompt, so there is no
-/// "hand-edited" variant to fall back to.
+/// unedited seeded job on its very next tick, no migration required. The
+/// hand-edited variant is gianna's, verbatim: `opsclaw-cli jobs edit
+/// --prompt` converts a `ScanRoutine` job to `Prompt { body }` — free text
+/// the operator owns forever, never re-resolved from the const — while
+/// re-seeding keeps skipping the row by name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "body")]
 pub enum Payload {

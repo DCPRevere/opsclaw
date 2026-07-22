@@ -32,6 +32,7 @@ pub mod config_cmd;
 pub mod doctor;
 pub mod estop;
 pub mod incidents_cmd;
+pub mod jobs_cmd;
 pub mod legacy;
 pub mod memory_cmd;
 pub mod onboard;

@@ -2,7 +2,7 @@
 name = "opsclaw"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "OpsClaw — an autonomous SRE agent"
 authors = ["D C P Revere <dcprevere@gmail.com>"]
 publish = false

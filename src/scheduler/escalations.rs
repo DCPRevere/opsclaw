@@ -58,8 +58,13 @@ pub(super) async fn drive(
     // when the board is clear.
     handle.set_incident_pressure(!open.is_empty());
 
-    let chain = deps.config.escalation.chain();
     for incident in open.iter().filter(|i| i.state == IncidentState::Active) {
+        // The chain is resolved PER INCIDENT from its target's project
+        // (the first `fq_target` segment): a project with its own
+        // `[project.escalation]` pages its chain, everything else the
+        // global one (or the built-in broadcast default) — see
+        // `Config::escalation_chain_for` for the inheritance rules.
+        let chain = deps.config.escalation_chain_for(&incident.target.project);
         if let Err(e) = drive_one(deps, &chain, incident, now).await {
             tracing::error!(
                 incident = %incident.id,

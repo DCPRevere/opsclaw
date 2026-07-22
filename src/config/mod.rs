@@ -60,6 +60,11 @@ pub struct Config {
 /// to a single broadcast step (every channel, 60m ack window, 20m
 /// re-notify) — a deployment with no chain configured must still page
 /// SOMEWHERE rather than sit silent on a corroborated fault.
+///
+/// The same shape also appears per-project as `[project.escalation]`
+/// ([`ProjectCfg::escalation`]): a project that declares its own steps
+/// routes its incidents there instead of the global chain — see
+/// [`Config::escalation_chain_for`] for the inheritance rules.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct EscalationCfg {
@@ -330,6 +335,15 @@ pub struct PolicyCfg {
 pub struct ProjectCfg {
     pub name: String,
     pub autonomy: Option<Autonomy>,
+    /// Per-project escalation override (`[project.escalation]` +
+    /// `[[project.escalation.step]]`, same shape as the global
+    /// `[escalation]`). `None` (the default — every pre-existing config
+    /// file parses unchanged) inherits the global chain; `Some` with steps
+    /// replaces it for THIS project's incidents only. `Some` with zero
+    /// steps is refused by `validate()` — a declared-but-empty override is
+    /// ambiguous (silence? inherit?) and either guess could unpage a
+    /// project someone believed was covered.
+    pub escalation: Option<EscalationCfg>,
     #[serde(rename = "env", default)]
     pub envs: Vec<EnvCfg>,
 }
@@ -953,6 +967,26 @@ impl Config {
         Ok(secret)
     }
 
+    /// The escalation chain for incidents in `project` — the per-project
+    /// inheritance resolver (mirrors [`Config::autonomy_for`]'s
+    /// most-specific-wins shape, collapsed to two levels):
+    ///
+    /// 1. the project's own `[project.escalation]` steps, when declared
+    ///    (`validate()` guarantees a declared override is non-empty and
+    ///    structurally sound, so "declared" always means "usable");
+    /// 2. else the global `[escalation]` chain;
+    /// 3. else (nothing declared anywhere) [`EscalationCfg::chain`]'s
+    ///    built-in single broadcast step — an unknown or unconfigured
+    ///    project must still page SOMEWHERE, never fall silent.
+    pub fn escalation_chain_for(&self, project: &str) -> crate::incidents::EscalationChain {
+        self.projects
+            .iter()
+            .find(|p| p.name == project)
+            .and_then(|p| p.escalation.as_ref())
+            .unwrap_or(&self.escalation)
+            .chain()
+    }
+
     /// Effective autonomy for a target, resolved down the tree
     /// (target > env > project); absent everywhere ⇒ `Suggest` (the default
     /// for new targets, brief §5).
@@ -1124,6 +1158,28 @@ impl Config {
         {
             errs.push(e.to_string());
         }
+        // Per-project overrides get the SAME structural checks as the
+        // global chain — plus one the global shape can't hit: `Some` with
+        // zero steps. Globally, "no steps" is indistinguishable from "no
+        // `[escalation]` at all" (serde default), so `chain()`'s broadcast
+        // fallback covers it; a project-level `[project.escalation]` with
+        // no `[[project.escalation.step]]` is a DECLARED override that
+        // says nothing, and guessing (inherit? silence?) either way could
+        // unpage a project an operator believed was covered.
+        for p in &self.projects {
+            if let Some(esc) = &p.escalation {
+                if esc.steps.is_empty() {
+                    errs.push(format!(
+                        "project {:?} declares [project.escalation] with no steps — add \
+                         [[project.escalation.step]] entries, or remove the table to inherit \
+                         the global chain",
+                        p.name
+                    ));
+                } else if let Err(e) = esc.chain().validate() {
+                    errs.push(format!("project {:?} escalation: {e}", p.name));
+                }
+            }
+        }
         match (&self.push.vapid_private_key, &self.push.vapid_public_key) {
             (Some(_), None) | (None, Some(_)) => {
                 errs.push("push: half-set VAPID keypair — set both vapid_private_key and vapid_public_key or neither".into())
@@ -1278,6 +1334,105 @@ mod tests {
         assert_eq!(cfg.autonomy_for("remundo", "prod", "cluster"), Autonomy::Observe);
         assert_eq!(cfg.autonomy_for("remundo", "dev", "cluster"), Autonomy::ActOnKnown);
         assert_eq!(cfg.autonomy_for("unknown", "x", "y"), Autonomy::Suggest);
+    }
+
+    #[test]
+    fn escalation_chain_for_resolves_project_then_global_then_default() {
+        // Project A declares its own chain; project B inherits the global
+        // one — parsed from the real TOML shape, not hand-built structs.
+        let cfg = parse(
+            r#"
+            [[escalation.step]]
+            contact = "telegram"
+            ack_timeout_minutes = 30
+            repeat_interval_minutes = 10
+
+            [[project]]
+            name = "a"
+            [[project.escalation.step]]
+            contact = "web"
+            ack_timeout_minutes = 15
+            repeat_interval_minutes = 5
+
+            [[project]]
+            name = "b"
+            "#,
+        );
+        cfg.validate().unwrap();
+
+        let a = cfg.escalation_chain_for("a");
+        assert_eq!(a.steps.len(), 1);
+        assert_eq!(a.steps[0].contact, "web");
+        assert_eq!(a.steps[0].ack_timeout, chrono::Duration::minutes(15));
+
+        let b = cfg.escalation_chain_for("b");
+        assert_eq!(b.steps[0].contact, "telegram");
+        // An UNKNOWN project also gets the global chain — never silence.
+        assert_eq!(cfg.escalation_chain_for("nope").steps[0].contact, "telegram");
+
+        // Neither project nor global declared: the built-in broadcast step.
+        let bare = Config::default();
+        let chain = bare.escalation_chain_for("anything");
+        assert_eq!(chain.steps.len(), 1);
+        assert_eq!(chain.steps[0].contact, ESCALATION_BROADCAST);
+    }
+
+    #[test]
+    fn declared_empty_project_escalation_refuses() {
+        // `[project.escalation]` with no steps is a declared override that
+        // says nothing — validate() must refuse rather than guess between
+        // "inherit" and "silence" (see the ProjectCfg field doc).
+        let cfg = parse(
+            r#"
+            [[project]]
+            name = "a"
+            [project.escalation]
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("[project.escalation] with no steps"), "{err}");
+    }
+
+    #[test]
+    fn project_escalation_gets_the_same_structural_checks_as_global() {
+        // repeat_interval >= ack_timeout could never re-notify — the same
+        // check the global chain gets, prefixed with the project name.
+        let cfg = parse(
+            r#"
+            [[project]]
+            name = "a"
+            [[project.escalation.step]]
+            contact = "web"
+            ack_timeout_minutes = 10
+            repeat_interval_minutes = 10
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("project \"a\" escalation"), "{err}");
+        assert!(err.contains("repeat_interval must be shorter"), "{err}");
+    }
+
+    #[test]
+    fn project_escalation_round_trips_and_absent_field_stays_absent() {
+        let cfg = parse(
+            r#"
+            [[project]]
+            name = "a"
+            [[project.escalation.step]]
+            contact = "web"
+            ack_timeout_minutes = 15
+            repeat_interval_minutes = 5
+
+            [[project]]
+            name = "b"
+            "#,
+        );
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let reparsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(reparsed.projects[0].escalation.as_ref().unwrap().steps[0].contact, "web");
+        // A project with no override must serialize WITHOUT the table —
+        // otherwise every save would materialize empty (invalid!) overrides.
+        assert!(reparsed.projects[1].escalation.is_none());
     }
 
     #[test]

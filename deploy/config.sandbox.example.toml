@@ -54,6 +54,21 @@ repeat_interval_minutes = 20
 name = "remundo"
 autonomy = "suggest"
 
+# Per-project escalation override: a project that declares its own
+# [[project.escalation.step]] chain routes ITS incidents there instead of
+# the global [[escalation.step]] chain above (projects without one inherit
+# the global chain; with neither declared, opsclaw broadcasts on every
+# channel). Declaring [project.escalation] with no steps is refused at
+# boot — remove the table entirely to inherit.
+#   [[project.escalation.step]]
+#   contact = "telegram"       # page the remundo on-call bot first
+#   ack_timeout_minutes = 30
+#   repeat_interval_minutes = 10
+#   [[project.escalation.step]]
+#   contact = "*"              # then everyone, everywhere
+#   ack_timeout_minutes = 60
+#   repeat_interval_minutes = 20
+
 [[project.env]]
 name = "sandbox"
 # Pinned to observe for the first soak: the agent reads, notifies, and

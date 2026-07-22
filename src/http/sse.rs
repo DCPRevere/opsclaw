@@ -72,24 +72,39 @@ pub async fn stream(
         }
     }
 
+    Ok(Sse::new(event_stream(&state)).keep_alive(KeepAlive::default()))
+}
+
+/// The event stream itself, separated from the auth handler so termination
+/// is testable without a bound socket. The stream must END on daemon
+/// shutdown: axum's graceful drain waits for every open connection, and a
+/// stream blocked on `rx.recv()` never closes on its own (the hub's sender
+/// lives in AppState, so `Closed` can't fire) — one open browser tab held
+/// Ctrl+C hostage forever until the shutdown select was added.
+fn event_stream(
+    state: &AppState,
+) -> impl Stream<Item = std::result::Result<Event, std::convert::Infallible>> + use<> {
     let mut rx = state.web.subscribe();
-    let stream = async_stream::stream! {
+    let shutdown = state.shutdown.clone();
+    async_stream::stream! {
         yield Ok(Event::default().event("ready").data("connected"));
         loop {
-            match rx.recv().await {
-                Ok(ev) => {
-                    let data = serde_json::to_string(&ev).unwrap_or_else(|_| "{}".into());
-                    yield Ok(Event::default().event(ev.kind).data(data));
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                recv = rx.recv() => match recv {
+                    Ok(ev) => {
+                        let data = serde_json::to_string(&ev).unwrap_or_else(|_| "{}".into());
+                        yield Ok(Event::default().event(ev.kind).data(data));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(dropped = n, "SSE receiver lagged; events dropped");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(dropped = n, "SSE receiver lagged; events dropped");
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    };
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    }
 }
 
 #[cfg(test)]
@@ -143,5 +158,26 @@ mod tests {
         // Same ticket again: rejected as already used.
         let err = stream(State(state), Query(q)).await.unwrap_err();
         assert!(matches!(err, Error::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn stream_terminates_when_the_shutdown_token_fires() {
+        use futures::StreamExt;
+        let state = AppState::fake();
+        let mut s = Box::pin(event_stream(&state));
+
+        // The greeting arrives; the stream is then parked on the hub.
+        let first = s.next().await.expect("ready event");
+        assert!(first.is_ok());
+
+        // Cancelling the daemon's token must END the stream — not leave it
+        // blocked (the exact hang: graceful shutdown waiting on an open
+        // tab's SSE connection forever).
+        state.shutdown.cancel();
+        let end = tokio::time::timeout(std::time::Duration::from_secs(2), s.next()).await;
+        assert!(
+            matches!(end, Ok(None)),
+            "stream must terminate on shutdown, got a timeout or another event"
+        );
     }
 }

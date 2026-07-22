@@ -160,6 +160,15 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     tracing::info!("shutdown signal received; draining");
+    // A SECOND signal during the drain force-exits: an operator hammering
+    // Ctrl+C at a wedged drain means "stop NOW", and before this existed a
+    // repeat press was silently swallowed (nothing was listening any more).
+    // 130 = 128 + SIGINT, the conventional interrupted-exit code.
+    tokio::spawn(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::warn!("second interrupt during drain — exiting immediately");
+        std::process::exit(130);
+    });
 }
 
 #[cfg(test)]

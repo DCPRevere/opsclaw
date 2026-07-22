@@ -26,7 +26,7 @@
 //! the CLI twin; the web client renders exclusively from the SSE stream
 //! (see `static/app/chat.js`'s module comment).
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -86,21 +86,43 @@ async fn send(
     Ok(Json(json!({ "reply": reply })))
 }
 
-/// GET /api/chat/history — the shared transcript for render-on-load, as
-/// `{"history": [{"role", "speaker", "content", "at"}, ...]}` in render
-/// order. Reads the DURABLE log (migration 0007) rather than the in-memory
-/// replay transcript, so history survives a daemon restart and includes
-/// the agent's tool-call rows (`role: "tool"`) the replay transcript never
-/// holds. Empty is "nothing said yet", not a failure.
-async fn history(State(state): State<AppState>, Authed(_ctx): Authed) -> Result<Json<Value>> {
-    const PAGE: i64 = 200;
-    let rows = state.repos.recent_chat(PAGE).await?;
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    /// When present, page BACKWARD: the newest `PAGE` rows strictly before
+    /// this seq (the client hands back the oldest seq it has rendered).
+    pub before: Option<i64>,
+}
+
+/// GET /api/chat/history[?before=<seq>] — the shared transcript for
+/// render-on-load, as `{"history": [{"seq", "role", "speaker", "content",
+/// "at"}, ...], "has_more": bool}` in render order. Reads the DURABLE log
+/// (migration 0007) rather than the in-memory replay transcript, so
+/// history survives a daemon restart and includes the agent's tool-call
+/// rows (`role: "tool"`) the replay transcript never holds. `has_more` is
+/// gianna's full-page heuristic (`msgs.len() == PAGE`): a full page means
+/// there is plausibly an earlier one, so the client offers "Show earlier";
+/// the one false positive (an archive of exactly a page multiple) costs a
+/// single empty fetch, never a wrong render. Empty is "nothing said yet",
+/// not a failure.
+async fn history(
+    State(state): State<AppState>,
+    Authed(_ctx): Authed,
+    Query(q): Query<HistoryQuery>,
+) -> Result<Json<Value>> {
+    const PAGE: i64 = 100;
+    let rows = match q.before {
+        Some(before) => state.repos.before_chat(before, PAGE).await?,
+        None => state.repos.recent_chat(PAGE).await?,
+    };
+    let has_more = rows.len() as i64 == PAGE;
     Ok(Json(json!({
         "history": rows.into_iter().map(|m| json!({
+            "seq": m.seq,
             "role": m.role,
             "speaker": m.speaker,
             "content": m.content,
             "at": m.at.to_rfc3339(),
-        })).collect::<Vec<_>>()
+        })).collect::<Vec<_>>(),
+        "has_more": has_more,
     })))
 }

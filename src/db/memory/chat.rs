@@ -35,4 +35,12 @@ impl crate::db::ChatRepo for InMemoryDb {
         let start = n.saturating_sub(limit.max(0) as usize);
         Ok(store.chat_messages[start..].to_vec())
     }
+
+    async fn before_chat(&self, before_seq: i64, limit: i64) -> Result<Vec<ChatMessage>> {
+        let store = self.store.lock().unwrap();
+        let earlier: Vec<ChatMessage> =
+            store.chat_messages.iter().filter(|m| m.seq < before_seq).cloned().collect();
+        let start = earlier.len().saturating_sub(limit.max(0) as usize);
+        Ok(earlier[start..].to_vec())
+    }
 }

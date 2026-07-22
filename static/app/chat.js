@@ -20,13 +20,19 @@
 // escape-first markdown (never raw model HTML); user text stays plain.
 import { api, escapeHtml } from './api.js';
 import { state } from './state.js';
-import { renderMarkdown, asDate, fmtTime } from './format.js';
+import { renderMarkdown, asDate, fmtTime, dayKey, dayLabel } from './format.js';
 
 let evtSource = null;
 let streamConnecting = false;
 let streamBackoff = 2000;
 let streamRetryTimer = null;
 let pendingRow = null;
+// Day-separator tracking (gianna's WhatsApp-style pills): the local
+// calendar day of the last rendered row; reset whenever the log reloads.
+let lastMsgDay = null;
+// The `seq` of the oldest history row on screen — the anchor "Show
+// earlier" pages backward from (null until history loads, or when empty).
+let oldestSeq = null;
 
 function scheduleReconnect() {
   if (streamRetryTimer) return;
@@ -59,6 +65,9 @@ export async function openStream() {
     let ev = {};
     try { ev = JSON.parse(e.data); } catch (_) { return; }
     const body = ev.body || {};
+    // A tool's result landing annotates the ⚙ row already on screen — it
+    // is not a new row of its own.
+    if (body.role === 'tool_status') { annotateToolStatus(body.speaker, body.text === 'ok'); return; }
     if (body.role === 'assistant') clearPending();
     addMsg({ role: body.role || 'assistant', speaker: body.speaker, content: body.text || '' });
     if (body.role !== 'assistant' && pendingRow) {
@@ -107,24 +116,71 @@ function metaButton(label, title, onClick) {
   return b;
 }
 
+// Insert a centered date pill into `host` when `d` falls on a new local
+// calendar day relative to the last rendered row (gianna's maybeDaySep).
+function maybeDaySep(d, host) {
+  const key = dayKey(d);
+  if (key === lastMsgDay) return;
+  lastMsgDay = key;
+  const sep = document.createElement('div');
+  sep.className = 'daysep';
+  sep.textContent = dayLabel(d);
+  sep.setAttribute('role', 'separator');
+  host.appendChild(sep);
+}
+
+// Append a ✓/✗ outcome glyph to a ⚙ row's summary line, at most once.
+function markToolRow(row, ok) {
+  row.dataset.status = ok ? 'ok' : 'error';
+  const glyph = document.createElement('span');
+  glyph.className = 'toolstatus ' + row.dataset.status;
+  glyph.textContent = ok ? ' ✓' : ' ✗';
+  row.querySelector('summary').appendChild(glyph);
+}
+
+// A live `tool_status` event: annotate the LAST un-annotated ⚙ row for
+// this tool name (calls run sequentially inside a turn, so that row is the
+// one whose result just landed).
+function annotateToolStatus(name, ok) {
+  const rows = document.querySelectorAll('#chat-log .toolrow');
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].dataset.tool === name && !rows[i].dataset.status) {
+      markToolRow(rows[i], ok);
+      return;
+    }
+  }
+}
+
 // One message row. `m`: { role: 'user'|'assistant'|'tool', speaker, content, at }.
 // Tool rows render as a single collapsed activity line (name + args,
 // expandable); user/assistant get bubbles with meta (speaker, time, Copy,
 // Reply). Assistant content goes through renderMarkdown (escape-first —
-// never raw model HTML); user content is escaped plain text.
-function addMsg(m) {
-  const log = document.getElementById('chat-log');
+// never raw model HTML); user content is escaped plain text. `into` lets
+// the older-page loader build into a DocumentFragment — that path owns its
+// own scroll handling, so appends there never touch scrollTop.
+function addMsg(m, into) {
+  const log = into || document.getElementById('chat-log');
+  maybeDaySep(asDate(m.at), log);
   if (m.role === 'tool') {
     const row = document.createElement('details');
     row.className = 'toolrow';
+    row.dataset.tool = m.speaker || 'tool';
+    // Persisted rows carry their outcome as a content suffix (ChatTurn
+    // folds it in after the turn); a live row arrives un-suffixed and gets
+    // its glyph from the later tool_status event instead.
+    let args = m.content;
+    let done = null;
+    if (args.endsWith(' → ok')) { done = true; args = args.slice(0, -' → ok'.length); }
+    else if (args.endsWith(' → error')) { done = false; args = args.slice(0, -' → error'.length); }
     const sum = document.createElement('summary');
     sum.innerHTML = `<span class="toolglyph">⚙</span> <code>${escapeHtml(m.speaker || 'tool')}</code>`;
-    const args = document.createElement('pre');
-    args.textContent = m.content;
+    const pre = document.createElement('pre');
+    pre.textContent = args;
     row.appendChild(sum);
-    row.appendChild(args);
+    row.appendChild(pre);
+    if (done !== null) markToolRow(row, done);
     log.appendChild(row);
-    log.scrollTop = log.scrollHeight;
+    if (!into) log.scrollTop = log.scrollHeight;
     return;
   }
 
@@ -161,7 +217,7 @@ function addMsg(m) {
   wrap.appendChild(bubble);
   wrap.appendChild(meta);
   log.appendChild(wrap);
-  log.scrollTop = log.scrollHeight;
+  if (!into) log.scrollTop = log.scrollHeight;
 }
 
 function showPending() {
@@ -197,7 +253,49 @@ export async function loadHistory() {
   if (!r.ok) return;
   const log = document.getElementById('chat-log');
   log.innerHTML = '';
-  for (const m of r.data.history || []) addMsg(m);
+  lastMsgDay = null;
+  const rows = r.data.history || [];
+  oldestSeq = rows.length ? rows[0].seq : null;
+  earlierButton(!!r.data.has_more);
+  for (const m of rows) addMsg(m);
+}
+
+// Paged history (gianna's "show earlier"): a button above the log that
+// prepends the previous page — the whole archive is reachable, page by page.
+function earlierButton(show) {
+  const old = document.getElementById('chat-earlier');
+  if (old) old.remove();
+  if (!show) return;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.id = 'chat-earlier';
+  b.className = 'ghost';
+  b.textContent = 'Show earlier';
+  b.addEventListener('click', loadEarlier);
+  document.getElementById('chat-log').prepend(b);
+}
+
+async function loadEarlier() {
+  if (oldestSeq == null) return;
+  const r = await api('/api/chat/history?before=' + encodeURIComponent(oldestSeq));
+  if (!r.ok || !Array.isArray(r.data.history)) return;
+  const ms = r.data.history;
+  if (ms.length) oldestSeq = ms[0].seq;
+  const log = document.getElementById('chat-log');
+  const anchor = log.children[1]; // first real row (after the button)
+  earlierButton(!!r.data.has_more);
+  // The older page is EARLIER than what's on screen, so it gets its own
+  // day tracking (oldest→newest within the page); save/restore the live
+  // tracker so the prepend doesn't disturb separators already rendered.
+  const frag = document.createDocumentFragment();
+  const liveDay = lastMsgDay;
+  lastMsgDay = null;
+  for (const m of ms) addMsg(m, frag);
+  lastMsgDay = liveDay;
+  const btn = document.getElementById('chat-earlier');
+  if (btn) btn.after(frag); else log.prepend(frag);
+  // Restore the viewport to the row that was at the top before the prepend.
+  if (anchor) anchor.scrollIntoView({ block: 'start' });
 }
 
 export function initChat() {

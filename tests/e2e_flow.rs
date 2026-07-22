@@ -888,71 +888,50 @@ async fn settings_surface_backing_routes_round_trip_invites_and_cli_tokens() {
     assert!(tokens["tokens"].as_array().unwrap().is_empty());
 }
 
-/// `POST /api/config` writes to `config::default_dir()` (honours
-/// `$OPSCLAW_HOME`) — there is no `AppState`-level seam to redirect it
-/// (see `routes::config_ui::update_config`'s doc comment for why, and the
-/// contract gap flagged in this task's report). `$OPSCLAW_HOME` is a
-/// process-global env var, so any test that sets it to actually exercise
-/// the write path MUST serialize against every other such test — this
-/// mutex is that guard. Found the hard way: an earlier version of this
-/// test suite exercised the write path against the REAL, UNGUARDED
-/// `~/.opsclaw/config.toml` on the dev machine running the suite, which
-/// turned out to hold a legacy zeroclaw-fork config containing unencrypted
-/// SSH private keys — this guard plus an isolated tempdir is what stops
-/// that from ever happening again, in this suite or a future one that
-/// copies this pattern.
-static CONFIG_WRITE_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Point `$OPSCLAW_HOME` at a fresh, isolated tempdir for the duration of
-/// the returned guard (which also holds `CONFIG_WRITE_TEST_GUARD` so no
-/// other config-writing test can interleave). Restores the previous value
-/// (or removes the var if it was unset) on drop.
-struct IsolatedOpsclawHome {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    _dir: tempfile::TempDir,
-    previous: Option<std::ffi::OsString>,
+/// A fake state whose `config_path` points inside a caller-held tempdir —
+/// the seam every config-writing route goes through (`AppState.config_path`,
+/// injected at boot; see that field's doc for the incident that made it a
+/// hard rule: an earlier version of the write route resolved
+/// `config::default_dir()` itself and a test run overwrote the developer's
+/// real `~/.opsclaw/config.toml`, which held unencrypted SSH keys). With
+/// the path injected per-test there is no process-global `$OPSCLAW_HOME`
+/// to serialize on, so these tests run fully parallel like the rest of the
+/// suite.
+fn state_with_config_dir(config: Config) -> (AppState, tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir for config writes");
+    let path = dir.path().join("config.toml");
+    let mut state = AppState::fake_with_config(config);
+    state.config_path = path.clone();
+    (state, dir, path)
 }
 
-impl IsolatedOpsclawHome {
-    fn set() -> Self {
-        let lock = CONFIG_WRITE_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var_os("OPSCLAW_HOME");
-        let dir = tempfile::tempdir().expect("tempdir for isolated OPSCLAW_HOME");
-        unsafe { std::env::set_var("OPSCLAW_HOME", dir.path()) };
-        IsolatedOpsclawHome { _lock: lock, _dir: dir, previous }
-    }
-}
-
-impl Drop for IsolatedOpsclawHome {
-    fn drop(&mut self) {
-        match self.previous.take() {
-            Some(v) => unsafe { std::env::set_var("OPSCLAW_HOME", v) },
-            None => unsafe { std::env::remove_var("OPSCLAW_HOME") },
-        }
-    }
-}
-
-#[tokio::test]
-async fn config_surface_round_trips_read_then_validated_write() {
-    let _home = IsolatedOpsclawHome::set();
-    let state = AppState::fake();
-    seed_account(&state, "config@example.com", "some-password-123").await;
-    let base = spawn_server(state).await;
+async fn login(base: &str, email: &str) -> SessionClient {
     let client = SessionClient::new();
     client
         .post_json(
             &format!("{base}/api/login"),
-            &serde_json::json!({ "email": "config@example.com", "password": "some-password-123" }),
+            &serde_json::json!({ "email": email, "password": "some-password-123" }),
         )
         .await;
+    client
+}
+
+#[tokio::test]
+async fn config_surface_round_trips_read_then_validated_write() {
+    let (state, _dir, path) = state_with_config_dir(Config::default());
+    seed_account(&state, "config@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = login(&base, "config@example.com").await;
 
     let got: serde_json::Value =
         client.get(&format!("{base}/api/config")).await.json().await.unwrap();
     let toml_text = got["toml"].as_str().expect("toml field").to_string();
     // The read-back text must itself parse as valid opsclaw config — the
-    // settings tab's textarea is seeded with exactly this.
+    // settings tab's textarea is seeded with exactly this. The structured
+    // JSON view rides alongside for the escalation/policy/autonomy editors.
     let _: opsclaw::config::Config =
         toml::from_str(&toml_text).expect("round-tripped config must parse");
+    assert!(got["config"].is_object(), "structured JSON view present");
 
     let saved = client
         .post_json(&format!("{base}/api/config"), &serde_json::json!({ "toml": toml_text }))
@@ -961,22 +940,30 @@ async fn config_surface_round_trips_read_then_validated_write() {
     let saved_body: serde_json::Value = saved.json().await.unwrap();
     assert_eq!(saved_body["ok"], true);
 
-    // The write actually landed at the isolated path — never the real
-    // machine's ~/.opsclaw regardless of what this assertion finds.
-    let written =
-        std::fs::read_to_string(opsclaw::config::default_dir().join("config.toml")).unwrap();
-    assert_eq!(written, toml_text);
+    // The write landed at the INJECTED path (never a real ~/.opsclaw)…
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), toml_text);
+
+    // …and a second save keeps a .bak of what it replaced — the recovery
+    // path for a valid-but-wrong save.
+    let edited = format!("{toml_text}\n# an operator comment\n");
+    let resaved = client
+        .post_json(&format!("{base}/api/config"), &serde_json::json!({ "toml": edited }))
+        .await;
+    assert_eq!(resaved.status(), reqwest::StatusCode::OK);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+    assert_eq!(
+        std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+        toml_text,
+        "the previous contents survive as config.toml.bak"
+    );
 }
 
 #[tokio::test]
 async fn config_surface_rejects_invalid_toml_and_invalid_config() {
-    let state = AppState::fake();
+    let (state, _dir, path) = state_with_config_dir(Config::default());
     seed_account(&state, "badconfig@example.com", "some-password-123").await;
     let base = spawn_server(state).await;
-    let client = SessionClient::new();
-    client
-        .post_json(&format!("{base}/api/login"), &serde_json::json!({ "email": "badconfig@example.com", "password": "some-password-123" }))
-        .await;
+    let client = login(&base, "badconfig@example.com").await;
 
     let garbage = client
         .post_json(
@@ -1005,6 +992,229 @@ hindsight_url = "http://localhost:1"
         )
         .await;
     assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
+    // Refusal means untouched: neither rejected body ever reached disk.
+    assert!(!path.exists(), "no config file may appear from a refused write");
+}
+
+#[tokio::test]
+async fn config_read_never_contains_secret_values() {
+    // The config holds SecretRefs (names) by construction, so no resolved
+    // value can appear in either the TOML or JSON view — this pins that
+    // property at the HTTP boundary, where a regression would actually
+    // leak to a browser.
+    let sentinel = "s3cr3t-value-e2e-xyzzy";
+    unsafe { std::env::set_var("OPSCLAW_E2E_SECRET_XYZZY", sentinel) };
+    let mut cfg = Config::default();
+    cfg.llm.api_key = Some(opsclaw::config::SecretRef::env("OPSCLAW_E2E_SECRET_XYZZY"));
+    cfg.llm.models = vec!["some/model".into()];
+    cfg.telegram.bot_token = Some(opsclaw::config::SecretRef::store("tg-bot-token"));
+    let (state, _dir, _path) = state_with_config_dir(cfg);
+    seed_account(&state, "redact@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = login(&base, "redact@example.com").await;
+
+    let resp = client.get(&format!("{base}/api/config")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains(sentinel), "secret VALUE must never appear in a config response");
+    // The reference NAMES are the point of the surface — they must appear.
+    assert!(body.contains("OPSCLAW_E2E_SECRET_XYZZY"), "env ref name shown");
+    assert!(body.contains("store:tg-bot-token"), "store ref shown in reference form");
+}
+
+/// Seed an on-disk config the structured-edit routes can mutate: one
+/// project with one env and one local target (local needs no credential,
+/// so the whole thing passes `validate()`).
+const EDITABLE_SEED: &str = r#"
+[[project]]
+name = "remundo"
+[[project.env]]
+name = "prod"
+[[project.env.target]]
+name = "web-1"
+kind = "local"
+"#;
+
+#[tokio::test]
+async fn config_edit_rejects_invalid_and_leaves_the_file_untouched() {
+    let (state, _dir, path) = state_with_config_dir(Config::default());
+    std::fs::write(&path, EDITABLE_SEED).unwrap();
+    seed_account(&state, "editreject@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = login(&base, "editreject@example.com").await;
+    let cookie = client.cookie.lock().unwrap().clone().unwrap();
+
+    // An empty policy entry matches EVERYTHING — `Config::validate()`
+    // refuses it, and the refusal must carry the message and leave the
+    // file byte-identical.
+    let resp = client
+        .client
+        .put(format!("{base}/api/config/policy"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "auto_approve": [""] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap().contains("empty entry"),
+        "the validation message reaches the caller: {body}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), EDITABLE_SEED, "file untouched");
+
+    // A structurally-bad escalation chain is refused the same way.
+    let resp = client
+        .client
+        .put(format!("{base}/api/config/escalation"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({
+            "project": "remundo",
+            "steps": [{ "contact": "web", "ack_timeout_minutes": 10, "repeat_interval_minutes": 10 }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), EDITABLE_SEED, "file untouched");
+}
+
+#[tokio::test]
+async fn config_edit_autonomy_requires_confirm_auto() {
+    let (state, _dir, path) = state_with_config_dir(Config::default());
+    std::fs::write(&path, EDITABLE_SEED).unwrap();
+    seed_account(&state, "autonomy@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = login(&base, "autonomy@example.com").await;
+    let cookie = client.cookie.lock().unwrap().clone().unwrap();
+
+    // Promotion to "auto" without the explicit confirmation: refused, file
+    // untouched — the fat-finger guard.
+    let resp = client
+        .client
+        .put(format!("{base}/api/config/autonomy"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "project": "remundo", "env": "prod", "autonomy": "auto" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("confirm_auto"), "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), EDITABLE_SEED);
+
+    // With confirm_auto: true the same edit lands.
+    let resp = client
+        .client
+        .put(format!("{base}/api/config/autonomy"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({
+            "project": "remundo", "env": "prod", "autonomy": "auto", "confirm_auto": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let written: opsclaw::config::Config =
+        toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(written.autonomy_for("remundo", "prod", "web-1"), opsclaw::domain::Autonomy::Auto);
+
+    // A NON-auto edit needs no confirmation; an unknown node is a 400.
+    let resp = client
+        .client
+        .put(format!("{base}/api/config/autonomy"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "project": "remundo", "autonomy": "observe" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client
+        .client
+        .put(format!("{base}/api/config/autonomy"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "project": "nope", "autonomy": "observe" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn config_edit_escalation_chain_round_trips() {
+    let (state, _dir, path) = state_with_config_dir(Config::default());
+    std::fs::write(&path, EDITABLE_SEED).unwrap();
+    seed_account(&state, "escedit@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = login(&base, "escedit@example.com").await;
+    let cookie = client.cookie.lock().unwrap().clone().unwrap();
+
+    // Set the GLOBAL chain (project absent)…
+    let resp = client
+        .client
+        .put(format!("{base}/api/config/escalation"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({
+            "steps": [{ "contact": "telegram", "ack_timeout_minutes": 30, "repeat_interval_minutes": 10 }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // …then a per-project override for "remundo".
+    let resp = client
+        .client
+        .put(format!("{base}/api/config/escalation"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({
+            "project": "remundo",
+            "steps": [{ "contact": "web", "ack_timeout_minutes": 15, "repeat_interval_minutes": 5 }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // The file round-trips both, and the resolver honours the inheritance:
+    // remundo pages its own chain, an undeclared project the global one.
+    let written: opsclaw::config::Config =
+        toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    written.validate().unwrap();
+    assert_eq!(written.escalation_chain_for("remundo").steps[0].contact, "web");
+    assert_eq!(written.escalation_chain_for("other").steps[0].contact, "telegram");
+
+    // An empty steps list for a project REMOVES the override (back to
+    // inheriting) — never persists the declared-empty shape validate()
+    // refuses.
+    let resp = client
+        .client
+        .put(format!("{base}/api/config/escalation"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "project": "remundo", "steps": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let written: opsclaw::config::Config =
+        toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(written.projects[0].escalation.is_none());
+    assert_eq!(written.escalation_chain_for("remundo").steps[0].contact, "telegram");
+
+    // Editing an unknown project's chain is a 400, not a silent create —
+    // project intake stays wizard-only.
+    let resp = client
+        .client
+        .put(format!("{base}/api/config/escalation"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({
+            "project": "ghost",
+            "steps": [{ "contact": "web", "ack_timeout_minutes": 15, "repeat_interval_minutes": 5 }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
 // ---- web push ----

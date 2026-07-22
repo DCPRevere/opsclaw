@@ -20,22 +20,16 @@ use crate::config::{
 use crate::domain::{Autonomy, CloudProvider, ExpectedState};
 
 /// Serialize `cfg` and write it to `path`, creating parent directories if
-/// needed. There is no `Config::save()` in `config/mod.rs` (only `load`) —
-/// this is the CLI's own write path, used by every command that persists a
-/// config edit (onboard, config project add). Writes via a temp file +
-/// rename in the same directory so a crash mid-write can never leave a
-/// half-written `config.toml` (the file `Config::load` reads on every
-/// daemon boot).
+/// needed — the CLI's write path, used by every command that persists a
+/// config edit (onboard, config project add). The actual disk mechanics
+/// (atomic temp-file+rename, `.bak` of the previous contents) live in
+/// [`crate::config::persist_config_text`], shared with the gateway's
+/// config routes, so every writer carries the same crash-safety and
+/// recover-the-old-file guarantees.
 pub fn write_config(path: &Path, cfg: &Config) -> Result<()> {
     let body = toml::to_string_pretty(cfg)
         .map_err(|e| crate::Error::Config(format!("serializing config: {e}")))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp_path = path.with_extension("toml.tmp");
-    std::fs::write(&tmp_path, body)?;
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    crate::config::persist_config_text(path, &body)
 }
 
 /// Ask for one of a fixed set of options by exact string match, re-asking
@@ -205,7 +199,7 @@ pub fn wizard_project(p: &mut dyn Prompter) -> Result<ProjectCfg> {
         }
     }
 
-    Ok(ProjectCfg { name, autonomy, envs })
+    Ok(ProjectCfg { name, autonomy, escalation: None, envs })
 }
 
 /// Prompt for one new resource, TYPE-AWARE: each resource kind asks only

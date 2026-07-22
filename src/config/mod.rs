@@ -35,6 +35,31 @@ pub fn default_config_path() -> PathBuf {
     default_dir().join("config.toml")
 }
 
+/// Persist already-serialized config text to `path` — THE write path for
+/// every config edit (CLI wizards via `cli::config_cmd::write_config`, the
+/// gateway's `/api/config*` routes). Two safety properties, both learned
+/// the hard way:
+///
+/// - atomic (sibling temp file + rename): a crash mid-write must never
+///   leave `config.toml` half-written — it's the file every future boot
+///   reads;
+/// - `.bak` before overwrite: the previous contents are copied to
+///   `config.toml.bak` first, so a syntactically-valid-but-wrong save (an
+///   earlier incident overwrote an operator's hand-maintained config) is
+///   recoverable with one `mv` instead of lost.
+pub fn persist_config_text(path: &Path, body: &str) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if path.exists() {
+        std::fs::copy(path, path.with_extension("toml.bak"))?;
+    }
+    let tmp_path = path.with_extension("toml.tmp");
+    std::fs::write(&tmp_path, body)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
@@ -1433,6 +1458,23 @@ mod tests {
         // A project with no override must serialize WITHOUT the table —
         // otherwise every save would materialize empty (invalid!) overrides.
         assert!(reparsed.projects[1].escalation.is_none());
+    }
+
+    #[test]
+    fn persist_config_text_is_atomic_and_keeps_a_bak() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // First write: no previous file, so no .bak yet.
+        persist_config_text(&path, "a = 1\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 1\n");
+        assert!(!path.with_extension("toml.bak").exists());
+
+        // Overwrite: the PREVIOUS contents land in config.toml.bak — the
+        // one-`mv` recovery path for a valid-but-wrong save.
+        persist_config_text(&path, "a = 2\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 2\n");
+        assert_eq!(std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(), "a = 1\n");
     }
 
     #[test]

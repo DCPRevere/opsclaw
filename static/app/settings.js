@@ -46,6 +46,52 @@ async function loadConfig() {
   err.textContent = '';
   if (!r.ok) { err.textContent = r.data.error || 'Could not load config.'; return; }
   box.value = r.data.toml;
+  seedStructuredEditors(r.data.config);
+}
+
+// ---- Structured config edits (escalation / policy / autonomy) ----
+//
+// Deliberately plain JSON textareas over PUT /api/config/{escalation,
+// policy,autonomy}: the server runs the full Config::validate() and the
+// 400 message is surfaced verbatim, so correctness lives server-side and
+// this stays a thin, honest editor rather than a half-validated form.
+// Secrets never appear here — the config JSON carries reference strings
+// only (env:VAR / store:KEY), never resolved values.
+
+function seedStructuredEditors(cfg) {
+  if (!cfg) return;
+  const esc = document.getElementById('config-escalation');
+  const pol = document.getElementById('config-policy');
+  const aut = document.getElementById('config-autonomy');
+  // Only seed untouched editors — don't clobber an in-progress edit on a
+  // background reload.
+  if (esc && !esc.value) {
+    esc.value = JSON.stringify({ project: null, steps: (cfg.escalation && cfg.escalation.step) || [] }, null, 1);
+  }
+  if (pol && !pol.value) pol.value = JSON.stringify(cfg.policy || {}, null, 1);
+  if (aut && !aut.value) {
+    const first = (cfg.project && cfg.project[0]) || {};
+    aut.value = JSON.stringify({ project: first.name || '', env: undefined, target: undefined, autonomy: 'suggest' }, null, 1);
+  }
+}
+
+async function applyStructuredEdit(textareaId, path) {
+  const err = document.getElementById('config-edit-err');
+  err.textContent = '';
+  let body;
+  try {
+    body = JSON.parse(document.getElementById(textareaId).value);
+  } catch (e) {
+    err.textContent = `Not valid JSON: ${e.message}`;
+    return;
+  }
+  const r = await api(path, 'PUT', body);
+  if (!r.ok) { err.textContent = r.data.error || 'The daemon refused the edit.'; return; }
+  err.textContent = r.data.note || 'Saved.';
+  // Refresh the raw-TOML view so the two editors can't drift apart —
+  // clearing the structured boxes lets seedStructuredEditors re-seed them
+  // from the (still boot-time) running config's shape.
+  await loadConfig();
 }
 
 async function saveConfig() {
@@ -152,6 +198,12 @@ export function initSettings() {
   });
   document.getElementById('config-save-btn').addEventListener('click', saveConfig);
   document.getElementById('config-reload-btn').addEventListener('click', loadConfig);
+  document.getElementById('config-escalation-save-btn').addEventListener('click',
+    () => applyStructuredEdit('config-escalation', '/api/config/escalation'));
+  document.getElementById('config-policy-save-btn').addEventListener('click',
+    () => applyStructuredEdit('config-policy', '/api/config/policy'));
+  document.getElementById('config-autonomy-save-btn').addEventListener('click',
+    () => applyStructuredEdit('config-autonomy', '/api/config/autonomy'));
   document.getElementById('push-enable-btn').addEventListener('click', enablePush);
   document.getElementById('push-disable-btn').addEventListener('click', disablePush);
   document.addEventListener('opsclaw:view', (e) => {

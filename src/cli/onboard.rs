@@ -18,6 +18,8 @@
 
 use std::path::Path;
 
+use base64::Engine;
+use rand::Rng;
 use serde::Serialize;
 
 use crate::Result;
@@ -32,6 +34,7 @@ pub struct OnboardOutcome {
     pub config_created: bool,
     pub secret_store_path: String,
     pub vapid_generated: bool,
+    pub jwt_generated: bool,
     pub summary: Vec<String>,
 }
 
@@ -108,6 +111,30 @@ fn ensure_vapid(cfg: &mut Config, store: &SecretStore) -> Result<bool> {
     Ok(true)
 }
 
+/// Wire the gateway JWT secret on first run. Live mode's `validate()`
+/// refuses an unset `http.jwt_secret` (the dev-default fallback would let
+/// anyone forge an operator session), and unlike a provider key there is
+/// nothing to ask the operator for — a strong random value is the only
+/// right answer, so both wizard paths supply one. An already-referenced
+/// secret is kept, and a pre-seeded `store:jwt-secret` value is adopted
+/// rather than overwritten: rotating this secret invalidates every
+/// signed-in session and CLI token, so onboard must never do it implicitly
+/// (the same never-rotate contract as [`ensure_vapid`]).
+fn ensure_jwt(cfg: &mut Config, store: &SecretStore) -> Result<bool> {
+    if cfg.http.jwt_secret.is_some() {
+        return Ok(false);
+    }
+    const SECRET_NAME: &str = "jwt-secret";
+    let generated = store.get(SECRET_NAME)?.is_none();
+    if generated {
+        let mut buf = [0u8; 48];
+        rand::rng().fill_bytes(&mut buf);
+        store.set(SECRET_NAME, &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf))?;
+    }
+    cfg.http.jwt_secret = Some(SecretRef::store(SECRET_NAME));
+    Ok(generated)
+}
+
 /// Interactive path: ask, don't assume. Every question has a sensible
 /// default (empty = skip that integration, matching fakes mode) so an
 /// operator can hit enter through the whole thing and land on a fully-faked,
@@ -171,6 +198,13 @@ pub async fn run(
         "Push: existing VAPID keypair kept (never rotated)".to_string()
     });
 
+    let jwt_generated = ensure_jwt(&mut cfg, &store)?;
+    summary.push(if jwt_generated {
+        "Gateway: generated http.jwt_secret (store:jwt-secret)".to_string()
+    } else {
+        "Gateway: existing JWT secret kept (never rotated)".to_string()
+    });
+
     cfg.validate()?;
     write_config(config_path, &cfg)?;
 
@@ -182,6 +216,7 @@ pub async fn run(
         config_created: !config_existed,
         secret_store_path: opsclaw_home.display().to_string(),
         vapid_generated,
+        jwt_generated,
         summary,
     })
 }
@@ -232,6 +267,13 @@ pub async fn run_non_interactive(
         "Push: existing VAPID keypair kept (never rotated)".to_string()
     });
 
+    let jwt_generated = ensure_jwt(&mut cfg, &store)?;
+    summary.push(if jwt_generated {
+        "Gateway: generated http.jwt_secret (store:jwt-secret)".to_string()
+    } else {
+        "Gateway: existing JWT secret kept (never rotated)".to_string()
+    });
+
     cfg.validate()?;
     write_config(config_path, &cfg)?;
 
@@ -240,6 +282,7 @@ pub async fn run_non_interactive(
         config_created: !config_existed,
         secret_store_path: opsclaw_home.display().to_string(),
         vapid_generated,
+        jwt_generated,
         summary,
     })
 }
@@ -300,6 +343,66 @@ mod tests {
         let cfg2 = Config::load(Some(&config_path)).unwrap();
 
         assert_eq!(cfg1.push.vapid_public_key, cfg2.push.vapid_public_key);
+    }
+
+    #[tokio::test]
+    async fn non_interactive_live_mode_succeeds_and_wires_a_generated_jwt_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        unsafe { std::env::set_var("OPSCLAW_ONBOARD_JWT_TEST_KEY", "sk-test") };
+        let opts = NonInteractiveOptions {
+            openrouter_api_key_env: Some("OPSCLAW_ONBOARD_JWT_TEST_KEY".into()),
+            models: vec!["some/model".into()],
+            hindsight_url: Some("http://localhost:8888".into()),
+            ..Default::default()
+        };
+
+        let outcome = run_non_interactive(&opts, &config_path, dir.path()).await.unwrap();
+        assert!(outcome.jwt_generated);
+
+        let cfg = Config::load(Some(&config_path)).unwrap();
+        cfg.validate().unwrap();
+        let store = SecretStore::open(dir.path()).unwrap();
+        let stored = store.get("jwt-secret").unwrap().expect("secret must be in the store");
+        assert!(stored.len() >= 32, "must satisfy resolve_jwt_secret's minimum length");
+        assert_eq!(cfg.resolve_jwt_secret(&store).unwrap(), stored);
+        unsafe { std::env::remove_var("OPSCLAW_ONBOARD_JWT_TEST_KEY") };
+    }
+
+    #[tokio::test]
+    async fn rerun_does_not_rotate_the_jwt_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let opts = NonInteractiveOptions::default();
+
+        let first = run_non_interactive(&opts, &config_path, dir.path()).await.unwrap();
+        assert!(first.jwt_generated);
+        let store = SecretStore::open(dir.path()).unwrap();
+        let v1 = store.get("jwt-secret").unwrap().unwrap();
+
+        let second = run_non_interactive(&opts, &config_path, dir.path()).await.unwrap();
+        assert!(!second.jwt_generated);
+        assert_eq!(store.get("jwt-secret").unwrap().unwrap(), v1);
+    }
+
+    #[tokio::test]
+    async fn preseeded_store_jwt_secret_is_adopted_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let store = SecretStore::open(dir.path()).unwrap();
+        store.set("jwt-secret", "operator-chose-this-value-before-onboarding").unwrap();
+
+        let outcome =
+            run_non_interactive(&NonInteractiveOptions::default(), &config_path, dir.path())
+                .await
+                .unwrap();
+        assert!(!outcome.jwt_generated, "a pre-seeded value is adopted, not regenerated");
+        assert_eq!(
+            store.get("jwt-secret").unwrap().unwrap(),
+            "operator-chose-this-value-before-onboarding"
+        );
+        let cfg = Config::load(Some(&config_path)).unwrap();
+        assert!(cfg.http.jwt_secret.is_some(), "config must reference the adopted secret");
     }
 
     #[tokio::test]

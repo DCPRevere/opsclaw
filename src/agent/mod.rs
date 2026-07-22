@@ -85,18 +85,33 @@ pub struct AgentDeps {
     /// wall-clock deadline (an unattended scan may legitimately run a slow
     /// diagnostic chain with no impatient human on the other end).
     pub heartbeat: bool,
-    /// Observer fired once per tool call the model makes, as it happens —
-    /// (tool name, compact args JSON). The chat surface uses this to render
-    /// the agent's tool activity live in the shared log (the same
-    /// transparency stance as the audit chain, surfaced where the operator
-    /// is looking). `None` (scans, webhook ingest, tests) observes nothing.
+    /// Observer fired twice per tool call the model makes, as it happens —
+    /// [`ToolEvent::Called`] before execution, [`ToolEvent::Finished`] once
+    /// the result is known. The chat surface uses this to render the
+    /// agent's tool activity live in the shared log (the same transparency
+    /// stance as the audit chain, surfaced where the operator is looking).
+    /// `None` (scans, webhook ingest, tests) observes nothing.
     pub on_tool: Option<ToolObserver>,
+}
+
+/// One notification in a tool call's lifecycle (see [`AgentDeps::on_tool`]).
+/// Borrowed on purpose: the observer runs inline in the turn loop and must
+/// hand off immediately, so it copies only what it keeps.
+pub enum ToolEvent<'a> {
+    /// The model asked for this call — fired BEFORE execution, so a slow
+    /// tool is visible while it runs. `args` is the compact single-line
+    /// JSON of what was actually requested.
+    Called { name: &'a str, args: &'a str },
+    /// The result is known. `ok` is false for a failed call AND for an
+    /// unknown tool name; the duplicate-action short-circuit reports the
+    /// PRIOR result, which succeeded, so it counts as ok.
+    Finished { name: &'a str, ok: bool },
 }
 
 /// See [`AgentDeps::on_tool`]. Sync + cheap by contract: called from inside
 /// the turn loop, so an implementation must hand off (publish to a
 /// broadcast hub, push into a Vec) — never block on I/O.
-pub type ToolObserver = Arc<dyn Fn(&str, &str) + Send + Sync>;
+pub type ToolObserver = Arc<dyn Fn(ToolEvent<'_>) + Send + Sync>;
 
 /// Run one full tool-calling turn: assemble the system prompt, give the
 /// model the tool registry, execute what it calls, feed results back,
@@ -198,7 +213,8 @@ pub async fn run_turn_with_history(
                     // Compact single-line args (the model's own JSON can be
                     // multi-line); truncation is the OBSERVER's concern —
                     // this reports what was actually called.
-                    observe(&call.name, &call.args.to_string());
+                    let args = call.args.to_string();
+                    observe(ToolEvent::Called { name: &call.name, args: &args });
                 }
                 history.push(Turn::Assistant {
                     content: step.text.clone().unwrap_or_default(),
@@ -212,6 +228,12 @@ pub async fn run_turn_with_history(
                         call.name,
                         valid.join(", ")
                     );
+                    // A `Called` was already emitted for this name, so the
+                    // observer still needs its close — a hallucinated tool
+                    // is a failed call from the operator's point of view.
+                    if let Some(observe) = &deps.on_tool {
+                        observe(ToolEvent::Finished { name: &call.name, ok: false });
+                    }
                     history.push(Turn::ToolResult {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
@@ -224,18 +246,21 @@ pub async fn run_turn_with_history(
                     .is_action()
                     .then(|| format!("{}::{}", call.name, canonical_args(&call.args)));
 
-                let output = if let Some(key) = &action_key
+                let (output, ok) = if let Some(key) = &action_key
                     && let Some(prev) = executed_actions.get(key)
                 {
                     tracing::warn!(
                         tool = %call.name,
                         "duplicate action call this turn — short-circuiting to prior result"
                     );
-                    format!(
+                    let out = format!(
                         "You already called {} with these exact arguments this turn — \
                          result: {prev}. Do NOT repeat it; move on or reply to the user.",
                         call.name
-                    )
+                    );
+                    // The short-circuit re-serves a result that DID succeed
+                    // (only Ok outputs enter `executed_actions`) — ok.
+                    (out, true)
                 } else {
                     match tool.call(ctx, call.args.clone()).await {
                         Ok(r) => {
@@ -245,14 +270,17 @@ pub async fn run_turn_with_history(
                             if let Some(key) = action_key {
                                 executed_actions.insert(key, r.output.clone());
                             }
-                            r.output
+                            (r.output, true)
                         }
                         Err(e) => {
                             tracing::warn!(tool = %call.name, "tool call failed: {e}");
-                            tool_error_for_model(&call.name, &e)
+                            (tool_error_for_model(&call.name, &e), false)
                         }
                     }
                 };
+                if let Some(observe) = &deps.on_tool {
+                    observe(ToolEvent::Finished { name: &call.name, ok });
+                }
 
                 history.push(Turn::ToolResult {
                     call_id: call.id.clone(),

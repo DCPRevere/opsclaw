@@ -506,29 +506,54 @@ impl ChatHandler for ChatTurn {
         let team_context = team_context_line(&ctx.known_targets, &self.deps.config);
 
         // Live tool visibility: each tool call the model makes is published
-        // to the SSE hub as it happens (role "tool") and collected for the
-        // durable log after the turn. Args are scrubbed (they pass through
-        // the model, not the audit sink, so the log-layer scrubber never
-        // saw them) and display-truncated.
-        let tool_rows: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+        // to the SSE hub as it happens (role "tool" on Called, role
+        // "tool_status" with "ok"/"error" on Finished) and collected for
+        // the durable log after the turn. Args are scrubbed (they pass
+        // through the model, not the audit sink, so the log-layer scrubber
+        // never saw them) and display-truncated. A row's third field is
+        // its outcome — `None` until Finished lands, matched to the LAST
+        // open row for the name (calls run sequentially inside a turn, so
+        // the last open row IS the one that just finished).
+        let tool_rows: Arc<std::sync::Mutex<Vec<(String, String, Option<bool>)>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let on_tool: Option<crate::agent::ToolObserver> = {
             let rows = tool_rows.clone();
             let web = self.web.clone();
-            Some(Arc::new(move |name: &str, args: &str| {
-                let mut shown = crate::policy::Scrubber::global().scrub(args);
-                if shown.len() > TOOL_EVENT_ARGS_MAX {
-                    let mut cut = TOOL_EVENT_ARGS_MAX;
-                    while !shown.is_char_boundary(cut) {
-                        cut -= 1;
+            Some(Arc::new(move |event: crate::agent::ToolEvent<'_>| match event {
+                crate::agent::ToolEvent::Called { name, args } => {
+                    let mut shown = crate::policy::Scrubber::global().scrub(args);
+                    if shown.len() > TOOL_EVENT_ARGS_MAX {
+                        let mut cut = TOOL_EVENT_ARGS_MAX;
+                        while !shown.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        shown.truncate(cut);
+                        shown.push('…');
                     }
-                    shown.truncate(cut);
-                    shown.push('…');
+                    if let Some(web) = &web {
+                        web.publish(crate::channels::web::WebEvent::chat("tool", name, &shown));
+                    }
+                    rows.lock().expect("tool rows lock poisoned").push((
+                        name.to_string(),
+                        shown,
+                        None,
+                    ));
                 }
-                if let Some(web) = &web {
-                    web.publish(crate::channels::web::WebEvent::chat("tool", name, &shown));
+                crate::agent::ToolEvent::Finished { name, ok } => {
+                    let status = if ok { "ok" } else { "error" };
+                    if let Some(web) = &web {
+                        web.publish(crate::channels::web::WebEvent::chat(
+                            "tool_status",
+                            name,
+                            status,
+                        ));
+                    }
+                    let mut rows = rows.lock().expect("tool rows lock poisoned");
+                    if let Some(row) = rows.iter_mut().rev().find(|r| r.0 == name && r.2.is_none())
+                    {
+                        row.2 = Some(ok);
+                    }
                 }
-                rows.lock().expect("tool rows lock poisoned").push((name.to_string(), shown));
             }))
         };
 
@@ -571,11 +596,21 @@ impl ChatHandler for ChatTurn {
 
         // Durable log: the tool calls in order, then the reply; broadcast
         // the reply to every tab (the tool events already streamed live).
+        // Each row's outcome is folded into its content as a ` → ok`/
+        // ` → error` suffix — one row per call, so a history render can
+        // show the same glyph the live tab saw without a second row kind.
         // Guard dropped before the awaits (std MutexGuard is not Send).
-        let rows: Vec<(String, String)> =
+        let rows: Vec<(String, String, Option<bool>)> =
             std::mem::take(&mut *tool_rows.lock().expect("tool rows lock poisoned"));
-        for (name, args) in rows {
-            self.log_row("tool", &name, &args).await;
+        for (name, args, outcome) in rows {
+            let content = match outcome {
+                Some(true) => format!("{args} → ok"),
+                Some(false) => format!("{args} → error"),
+                // Defensive: a Called with no Finished (a turn that errored
+                // mid-call) persists un-annotated rather than guessed.
+                None => args,
+            };
+            self.log_row("tool", &name, &content).await;
         }
         self.log_row("assistant", "assistant", &reply.reply).await;
         if let Some(web) = &self.web {
@@ -1304,9 +1339,16 @@ mod tests {
         use crate::db::ChatRepo;
 
         let mut scripted = ScriptedLlm::new();
-        // A tool call mid-turn (the name needn't resolve — the observer
-        // fires for what the model CALLS, resolution comes after), then the
-        // final reply.
+        // Two tool calls mid-turn: one that resolves and succeeds (monitor
+        // — the RecordingPolicy's NeedsApproval outcome is still an Ok
+        // ToolResult), and one that doesn't resolve at all (the observer
+        // fires Called for what the model CALLS; the unknown-tool branch
+        // then closes it as an error), then the final reply — so both
+        // Finished outcomes are pinned end-to-end.
+        scripted.push_tool_call(
+            "monitor",
+            serde_json::json!({"target": "remundo::prod::web-1", "view": "disk"}),
+        );
         scripted.push_tool_call("probe_pods", serde_json::json!({"ns": "monitoring"}));
         scripted.push_text("all quiet");
         let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
@@ -1320,25 +1362,41 @@ mod tests {
         let reply = chat.chat(op, "alice", "check the cluster").await.unwrap();
         assert_eq!(reply, "all quiet");
 
-        // Durable log: user, tool, assistant — in order, with attribution
+        // Durable log: user, tools, assistant — in order, with attribution
         // (the user row stores the RAW message; framing is replay-only).
+        // Each tool row carries its outcome as a content suffix.
         let rows = db.recent_chat(10).await.unwrap();
         let brief: Vec<(&str, &str)> =
             rows.iter().map(|r| (r.role.as_str(), r.speaker.as_str())).collect();
         assert_eq!(
             brief,
-            vec![("user", "alice"), ("tool", "probe_pods"), ("assistant", "assistant")]
+            vec![
+                ("user", "alice"),
+                ("tool", "monitor"),
+                ("tool", "probe_pods"),
+                ("assistant", "assistant")
+            ]
         );
         assert_eq!(rows[0].content, "check the cluster");
-        assert!(rows[1].content.contains("monitoring"), "{}", rows[1].content);
+        assert!(rows[1].content.ends_with(" → ok"), "{}", rows[1].content);
+        assert!(rows[2].content.contains("monitoring"), "{}", rows[2].content);
+        assert!(rows[2].content.ends_with(" → error"), "{}", rows[2].content);
 
-        // Live stream saw all three as chat-kind events, tool included.
-        let mut roles = Vec::new();
+        // Live stream: each tool call is a "tool" event when CALLED and a
+        // "tool_status" event when its result lands, bracketed by the
+        // user's message and the reply — the order a watching tab renders.
+        let mut events = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             assert_eq!(ev.kind, "chat");
-            roles.push(ev.body["role"].as_str().unwrap().to_string());
+            events.push((
+                ev.body["role"].as_str().unwrap().to_string(),
+                ev.body["text"].as_str().unwrap_or_default().to_string(),
+            ));
         }
-        assert_eq!(roles, vec!["user", "tool", "assistant"]);
+        let roles: Vec<&str> = events.iter().map(|(r, _)| r.as_str()).collect();
+        assert_eq!(roles, vec!["user", "tool", "tool_status", "tool", "tool_status", "assistant"]);
+        assert_eq!(events[2].1, "ok", "monitor resolved and returned Ok");
+        assert_eq!(events[4].1, "error", "an unknown tool closes as an error");
 
         // A fresh ChatTurn over the same store (a daemon restart) hydrates
         // the REPLAY transcript: user/assistant only, re-framed.

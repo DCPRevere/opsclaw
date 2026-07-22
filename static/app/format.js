@@ -104,3 +104,19 @@ export function fmtTime(d){
   try{return d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});}
   catch(_){return '';}
 }
+
+// A stable per-day key (local time) for detecting a day change.
+export function dayKey(d){return d.getFullYear()+'-'+d.getMonth()+'-'+d.getDate();}
+
+// "Today" / "Yesterday" / a written date for the day-separator pill.
+export function dayLabel(d){
+  const now=new Date();
+  if(dayKey(d)===dayKey(now))return 'Today';
+  const y=new Date(now);y.setDate(now.getDate()-1);
+  if(dayKey(d)===dayKey(y))return 'Yesterday';
+  // Drop the year when it's the current one, to keep the pill compact.
+  const opts=d.getFullYear()===now.getFullYear()
+    ?{weekday:'long',day:'numeric',month:'long'}
+    :{day:'numeric',month:'long',year:'numeric'};
+  try{return d.toLocaleDateString([],opts);}catch(_){return d.toDateString();}
+}

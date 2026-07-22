@@ -452,7 +452,8 @@ pub const RECORD_SCAN_PROMPT: &str = "record_scan";
 const DEFAULT_SCAN_PROMPT: &str = "Run a full health scan of this target. The following checks are MANDATORY every scan, in \
      this order, before any deeper digging:\n\
      1. WORKLOAD SWEEP — enumerate workload state across the WHOLE target (for kubernetes: \
-     pods across ALL namespaces), and flag anything crash-looping, restarting excessively, \
+     pods across ALL namespaces in one call — get pods with all_namespaces: true, NOT one \
+     call per namespace), and flag anything crash-looping, restarting excessively, \
      failing to pull images, stuck initializing/terminating, or not ready. Aggregate metrics \
      and log searches do NOT substitute for this sweep — a crash-looping pod can look healthy \
      in both.\n\

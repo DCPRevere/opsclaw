@@ -31,15 +31,43 @@ fn compose(
     resource: Option<&str>,
     name: Option<&str>,
     namespace: Option<&str>,
+    all_namespaces: bool,
 ) -> Result<String, ToolError> {
-    let ns_flag = match namespace {
-        Some(ns) if !ns.is_empty() => {
-            if !valid_k8s_name(ns) {
-                return Err(ToolError::UserFacing(format!("invalid namespace {ns:?}")));
-            }
-            format!(" -n {ns}")
+    // "all-namespaces"/"all" pass valid_k8s_name and kubectl treats them as a
+    // LITERAL namespace — empty output, exit 0, and the model concludes the
+    // cluster is quiet (observed live: a scan swept 12 namespaces one call at
+    // a time after this silent miss). Catch the intent and redirect it.
+    if let Some(ns) = namespace
+        && matches!(ns, "all" | "all-namespaces" | "*")
+    {
+        return Err(ToolError::UserFacing(format!(
+            "{ns:?} is not a namespace — pass all_namespaces: true to sweep every namespace \
+             in one call"
+        )));
+    }
+    let ns_flag = if all_namespaces {
+        if !matches!(action, "get" | "describe") {
+            return Err(ToolError::UserFacing(format!(
+                "all_namespaces only applies to get/describe, not {action:?} — pass the pod's \
+                 own namespace"
+            )));
         }
-        _ => String::new(),
+        if namespace.is_some_and(|ns| !ns.is_empty()) {
+            return Err(ToolError::UserFacing(
+                "pass either \"namespace\" or all_namespaces: true, not both".to_string(),
+            ));
+        }
+        " -A".to_string()
+    } else {
+        match namespace {
+            Some(ns) if !ns.is_empty() => {
+                if !valid_k8s_name(ns) {
+                    return Err(ToolError::UserFacing(format!("invalid namespace {ns:?}")));
+                }
+                format!(" -n {ns}")
+            }
+            _ => String::new(),
+        }
     };
 
     match action {
@@ -123,7 +151,8 @@ impl Tool for KubernetesTool {
     }
 
     fn description(&self) -> &str {
-        "Inspect or act on kubernetes resources via kubectl: get/describe (read-only), logs \
+        "Inspect or act on kubernetes resources via kubectl: get/describe (read-only; \
+         all_namespaces: true sweeps every namespace in one call), logs \
          (read-only, last 200 lines), rollout_restart (restart a deployment/statefulset — \
          resource as kind/name, e.g. deploy/api), delete_pod (force a pod to reschedule; \
          prefer rollout_restart for a whole deployment). A namespace-scoped ServiceAccount \
@@ -141,6 +170,7 @@ impl Tool for KubernetesTool {
                 "resource": {"type": "string", "description": "resource type for get/describe (e.g. pods), or kind/name for rollout_restart (e.g. deploy/api)"},
                 "name": {"type": "string", "description": "resource name (pod name for logs/delete_pod, or a specific resource for get/describe)"},
                 "namespace": {"type": "string", "description": "kubernetes namespace, if not the target's default"},
+                "all_namespaces": {"type": "boolean", "description": "get/describe across every namespace in one call (kubectl -A) — use this for cluster-wide sweeps instead of iterating namespaces"},
                 "hypothesis": {"type": "string", "description": "why you're taking this action (required for mutations)"}
             },
             "required": ["target", "action"]
@@ -169,8 +199,9 @@ impl Tool for KubernetesTool {
         let resource = args["resource"].as_str();
         let name = args["name"].as_str();
         let namespace = args["namespace"].as_str();
+        let all_namespaces = args["all_namespaces"].as_bool().unwrap_or(false);
         let hypothesis = args["hypothesis"].as_str().map(str::to_string);
-        let command = compose(action, resource, name, namespace)?;
+        let command = compose(action, resource, name, namespace, all_namespaces)?;
         let target = ctx.resolve_target(target_str)?;
         run_command(ctx, self.name(), target, command, risk_for(action), hypothesis).await
     }
@@ -262,6 +293,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(policy.seen.lock().unwrap()[0].declared_risk, RiskClass::High);
+    }
+
+    #[tokio::test]
+    async fn all_namespaces_composes_dash_a_for_get() {
+        let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
+        let ctx = ctx_with(policy.clone());
+        KubernetesTool
+            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "get", "resource": "pods", "all_namespaces": true}))
+            .await
+            .unwrap();
+        let seen = policy.seen.lock().unwrap();
+        assert_eq!(seen[0].command, "get pods -A");
+        assert_eq!(seen[0].declared_risk, RiskClass::Read);
+    }
+
+    #[tokio::test]
+    async fn all_namespaces_rejects_non_read_actions_and_a_namespace_combo() {
+        let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
+        let ctx = ctx_with(policy.clone());
+        // logs -A is not a kubectl thing; the pod's namespace is required.
+        let err = KubernetesTool
+            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "logs", "name": "api-7d8f", "all_namespaces": true}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::UserFacing(_)));
+        // Both a namespace and -A is a contradiction, not a preference.
+        let err = KubernetesTool
+            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "get", "resource": "pods", "namespace": "prod", "all_namespaces": true}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::UserFacing(_)));
+        assert!(policy.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn literal_all_namespaces_namespace_redirects_to_the_flag() {
+        // Observed live: the model passed namespace "all-namespaces", kubectl
+        // returned empty output with exit 0, and the scan concluded quiet. The
+        // error must teach the flag, not just refuse.
+        let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
+        let ctx = ctx_with(policy.clone());
+        let err = KubernetesTool
+            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "get", "resource": "pods", "namespace": "all-namespaces"}))
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::UserFacing(msg) => assert!(msg.contains("all_namespaces: true")),
+            other => panic!("expected UserFacing, got {other:?}"),
+        }
+        assert!(policy.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

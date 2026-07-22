@@ -1,0 +1,19 @@
+# OpsClaw daemon as a user service — survives terminal closes and (with
+# lingering enabled) starts at boot. TimeoutStopSec must exceed the
+# daemon's internal 20s drain budget so systemd never SIGKILLs a clean
+# shutdown mid-drain.
+[Unit]
+Description=OpsClaw — autonomous SRE agent daemon
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=OPSCLAW_HOME=%h/.opsclaw/2026-07-22-17-01
+EnvironmentFile=%h/src/dcprevere/opsclaw/.env
+ExecStart=%h/.cache/cargo-target/release/opsclaw
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

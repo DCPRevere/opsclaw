@@ -162,3 +162,11 @@ build:
 # Remove build artifacts.
 clean:
     cargo clean
+
+# Full-repo git bundle to the secondary disk — the local backstop until a
+# real remote exists. Verifies the bundle before reporting success.
+backup:
+    mkdir -p /mnt/neutron/backups/opsclaw
+    git bundle create /mnt/neutron/backups/opsclaw/opsclaw-$(date +%Y%m%d-%H%M)-$(git rev-parse --short HEAD).bundle --all
+    git bundle verify /mnt/neutron/backups/opsclaw/opsclaw-$(date +%Y%m%d-%H%M)-$(git rev-parse --short HEAD).bundle
+    ls -lh /mnt/neutron/backups/opsclaw/ | tail -3

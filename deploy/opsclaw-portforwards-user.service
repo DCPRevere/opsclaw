@@ -1,0 +1,15 @@
+# Sandbox port-forwards (ES localhost:9201, Prometheus localhost:9202)
+# via opsclaw's read-only kubeconfig. The script self-supervises each
+# forward (restarts on drop); systemd restarts the script itself.
+[Unit]
+Description=OpsClaw sandbox port-forwards (ES 9201, Prometheus 9202)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/src/dcprevere/opsclaw/deploy/sandbox-portforwards.sh %h/.opsclaw/old/sandbox-kubeconfig.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

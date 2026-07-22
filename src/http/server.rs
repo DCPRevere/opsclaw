@@ -17,7 +17,9 @@ pub async fn run(state: AppState) -> Result<()> {
 
     // The token lives on `state` (created at boot) so boot-time wiring can
     // hand it to components that take it at construction (Telegram's
-    // long-poll) — this function is still the ONLY place it gets cancelled.
+    // long-poll). This function cancels it on SIGINT/SIGTERM; a holder of
+    // `state` cancelling it externally drains the server the same way — the
+    // SIGTERM-equivalent seam the daemon-lifecycle e2e shuts down through.
     let shutdown = state.shutdown.clone();
     let tracker = tokio_util::task::TaskTracker::new();
 
@@ -49,9 +51,16 @@ pub async fn run(state: AppState) -> Result<()> {
     let bg_shutdown = shutdown.clone();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            shutdown_signal().await;
+            // Either a process signal or an external cancel of the state's
+            // token (in-process supervisors and the lifecycle e2e stop the
+            // daemon this way — no signal a test could safely raise reaches
+            // only ONE tokio test's server).
+            tokio::select! {
+                _ = shutdown_signal() => {}
+                _ = bg_shutdown.cancelled() => {}
+            }
             // HTTP is draining; tell background work to stop starting new
-            // work too.
+            // work too (a no-op when the token itself triggered this).
             bg_shutdown.cancel();
         })
         .await

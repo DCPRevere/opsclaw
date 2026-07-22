@@ -11,6 +11,7 @@ const SHELL = '/app';
 const PRECACHE = [
   SHELL,
   '/app/state.js',
+  '/app/format.js',
   '/app/api.js',
   '/app/auth.js',
   '/app/chat.js',

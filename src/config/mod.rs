@@ -933,23 +933,23 @@ impl Config {
         if std::env::var_os("OPENROUTER_API_KEY").is_some() && self.llm.api_key.is_none() {
             self.llm.api_key = Some(SecretRef::env("OPENROUTER_API_KEY"));
         }
-        if let Ok(models) = std::env::var("OPSCLAW_MODELS") {
-            if !models.trim().is_empty() {
-                self.llm.models = models.split(',').map(|m| m.trim().to_string()).collect();
-            }
+        if let Ok(models) = std::env::var("OPSCLAW_MODELS")
+            && !models.trim().is_empty()
+        {
+            self.llm.models = models.split(',').map(|m| m.trim().to_string()).collect();
         }
-        if let Ok(url) = std::env::var("HINDSIGHT_URL") {
-            if !url.trim().is_empty() {
-                self.memory.hindsight_url = Some(url);
-            }
+        if let Ok(url) = std::env::var("HINDSIGHT_URL")
+            && !url.trim().is_empty()
+        {
+            self.memory.hindsight_url = Some(url);
         }
         if std::env::var_os("TELEGRAM_BOT_TOKEN").is_some() && self.telegram.bot_token.is_none() {
             self.telegram.bot_token = Some(SecretRef::env("TELEGRAM_BOT_TOKEN"));
         }
-        if let Ok(listen) = std::env::var("OPSCLAW_LISTEN") {
-            if !listen.trim().is_empty() {
-                self.daemon.listen = listen;
-            }
+        if let Ok(listen) = std::env::var("OPSCLAW_LISTEN")
+            && !listen.trim().is_empty()
+        {
+            self.daemon.listen = listen;
         }
     }
 

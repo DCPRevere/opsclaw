@@ -49,7 +49,9 @@ const SHELL_TEMPLATE: &str = include_str!("index.html");
 /// stale-shell deploy can't linger in a browser's heuristic cache.
 pub async fn app_shell() -> Response {
     static HTML: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    html_no_cache(HTML.get_or_init(|| SHELL_TEMPLATE.replace("__VERSION__", crate::version())))
+    html_no_cache(
+        HTML.get_or_init(|| SHELL_TEMPLATE.replace("__VERSION__", crate::build_version())),
+    )
 }
 
 const APP_STATE_JS: &str = include_str!("../../static/app/state.js");
@@ -102,7 +104,9 @@ const SW_TEMPLATE: &str = include_str!("../../static/sw.js");
 /// (see `static/sw.js`'s own doc comment).
 pub async fn service_worker() -> Response {
     static SW: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    js_no_cache(SW.get_or_init(|| SW_TEMPLATE.replace("__SW_VERSION__", crate::version())).as_str())
+    js_no_cache(
+        SW.get_or_init(|| SW_TEMPLATE.replace("__SW_VERSION__", crate::build_version())).as_str(),
+    )
 }
 
 const MANIFEST_JSON: &str = include_str!("../../static/manifest.json");

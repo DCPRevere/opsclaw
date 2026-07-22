@@ -110,14 +110,12 @@ async fn fetch(url_str: &str, allow_private: bool) -> Result<ToolResult, ToolErr
     if addrs.is_empty() {
         return Err(ToolError::UserFacing(format!("host {host:?} resolved to no addresses")));
     }
-    if !allow_private {
-        if let Some(bad) = addrs.iter().find(|a| is_private(a.ip())) {
-            return Err(ToolError::UserFacing(format!(
-                "refusing to fetch {host:?}: it resolves to a private/loopback/link-local \
+    if !allow_private && let Some(bad) = addrs.iter().find(|a| is_private(a.ip())) {
+        return Err(ToolError::UserFacing(format!(
+            "refusing to fetch {host:?}: it resolves to a private/loopback/link-local \
                  address ({}) — web_fetch reaches PUBLIC URLs only",
-                bad.ip()
-            )));
-        }
+            bad.ip()
+        )));
     }
 
     let client = reqwest::Client::builder()

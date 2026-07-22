@@ -52,22 +52,22 @@ fn score(runbook: &Runbook, ctx: &MatchContext) -> Option<u32> {
     let mut total = 0u32;
     let mut hit = false;
 
-    if let Some(glob) = &trigger.target_glob {
-        if let Some(target) = &ctx.target {
-            if glob_matches(glob, &target_path(target)) {
-                hit = true;
-                // Reward specificity: fewer wildcard segments = a tighter
-                // match, so `remundo::prod::web-1` outranks `remundo::*::*`.
-                let wildcard_segments = glob.split("::").filter(|seg| *seg == "*").count() as u32;
-                let segments = glob.split("::").count() as u32;
-                total += 100 + (segments.saturating_sub(wildcard_segments)) * 10;
-            } else {
-                // An explicit glob that does NOT match the target is a hard
-                // miss for this runbook regardless of keyword/category hits —
-                // a DLQ runbook scoped to `remundo::*::*` must not fire for
-                // `other-project::prod::db`.
-                return None;
-            }
+    if let Some(glob) = &trigger.target_glob
+        && let Some(target) = &ctx.target
+    {
+        if glob_matches(glob, &target_path(target)) {
+            hit = true;
+            // Reward specificity: fewer wildcard segments = a tighter
+            // match, so `remundo::prod::web-1` outranks `remundo::*::*`.
+            let wildcard_segments = glob.split("::").filter(|seg| *seg == "*").count() as u32;
+            let segments = glob.split("::").count() as u32;
+            total += 100 + (segments.saturating_sub(wildcard_segments)) * 10;
+        } else {
+            // An explicit glob that does NOT match the target is a hard
+            // miss for this runbook regardless of keyword/category hits —
+            // a DLQ runbook scoped to `remundo::*::*` must not fire for
+            // `other-project::prod::db`.
+            return None;
         }
     }
 

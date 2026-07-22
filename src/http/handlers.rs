@@ -99,16 +99,17 @@ pub(crate) async fn authenticate(state: &AppState, headers: &HeaderMap) -> Resul
         return Ok(Ctx { account_id });
     }
 
-    if let Ok(token) = bearer(headers) {
-        if token.starts_with(super::cli_auth::TOKEN_PREFIX) {
-            let (account_id, _token_id) =
-                state.repos.find_cli_token(&super::cli_auth::token_hash(token)).await?.ok_or_else(
-                    || Error::unauthorized("token revoked — run `opsclaw-cli login`"),
-                )?;
-            let span = tracing::Span::current();
-            span.record("account", tracing::field::display(&account_id));
-            return Ok(Ctx { account_id });
-        }
+    if let Ok(token) = bearer(headers)
+        && token.starts_with(super::cli_auth::TOKEN_PREFIX)
+    {
+        let (account_id, _token_id) = state
+            .repos
+            .find_cli_token(&super::cli_auth::token_hash(token))
+            .await?
+            .ok_or_else(|| Error::unauthorized("token revoked — run `opsclaw-cli login`"))?;
+        let span = tracing::Span::current();
+        span.record("account", tracing::field::display(&account_id));
+        return Ok(Ctx { account_id });
     }
 
     Err(Error::unauthorized("not signed in"))

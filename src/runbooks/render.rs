@@ -41,24 +41,24 @@ pub fn render(command: &str, vars: &BTreeMap<String, String>) -> Result<String> 
     let bytes = command.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'{' {
-            if let Some(close) = command[i..].find('}') {
-                let name = &command[i + 1..i + close];
-                let is_ident = !name.is_empty()
-                    && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-                    && name.chars().all(|c| c.is_alphanumeric() || c == '_');
-                if is_ident {
-                    match vars.get(name) {
-                        Some(v) => {
-                            out.push_str(v);
-                            i += close + 1;
-                            continue;
-                        }
-                        None => {
-                            return Err(Error::Config(format!(
-                                "missing value for placeholder {{{name}}} — pass --var {name}=<value>"
-                            )));
-                        }
+        if bytes[i] == b'{'
+            && let Some(close) = command[i..].find('}')
+        {
+            let name = &command[i + 1..i + close];
+            let is_ident = !name.is_empty()
+                && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+            if is_ident {
+                match vars.get(name) {
+                    Some(v) => {
+                        out.push_str(v);
+                        i += close + 1;
+                        continue;
+                    }
+                    None => {
+                        return Err(Error::Config(format!(
+                            "missing value for placeholder {{{name}}} — pass --var {name}=<value>"
+                        )));
                     }
                 }
             }

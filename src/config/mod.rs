@@ -46,6 +46,7 @@ pub struct Config {
     pub push: PushCfg,
     pub webhook_out: WebhookOutCfg,
     pub limits: LimitsCfg,
+    pub policy: PolicyCfg,
     pub escalation: EscalationCfg,
     #[serde(rename = "project")]
     pub projects: Vec<ProjectCfg>,
@@ -254,6 +255,42 @@ impl Default for LimitsCfg {
         // 0 means "no actions"/"no spend" (failing closed, not open).
         LimitsCfg { max_actions_per_hour: 30, max_cost_per_day_cents: 500 }
     }
+}
+
+/// Policy bounds beyond autonomy levels (brief §5: "forbidden paths, command
+/// allowlists ... per-tool/per-runbook auto_approve and always_ask lists tune
+/// the middle levels"). All lists default EMPTY — an empty list changes
+/// nothing (except `command_allowlist`, whose non-empty form is the
+/// fail-closed switch: once anything is listed, only listed mutations run).
+///
+/// `auto_approve`/`always_ask` entries match a command by one of three forms:
+/// - `"<tool>"` — every command composed by that tool;
+/// - `"<tool>:<needle>"` — that tool's commands containing `<needle>`;
+/// - `"runbook:<title>"` — commands the code-side matcher attributed to that
+///   runbook (`CommandRequest.runbook`, never model-supplied).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct PolicyCfg {
+    /// Pre-approvals: a matching MEDIUM-risk command executes at `suggest`/
+    /// `act_on_known` without queueing a human. Deliberately capped at
+    /// Medium — High/Destructive never ride a config list past a human
+    /// (the same "never silently toward more autonomy" direction as the
+    /// rest of validate()).
+    pub auto_approve: Vec<String>,
+    /// The reverse tuning: a matching mutation ALWAYS queues for approval,
+    /// even at `auto` or with a runbook match. Wins over `auto_approve`
+    /// when both match (deny beats allow).
+    pub always_ask: Vec<String>,
+    /// When NON-empty: every mutation must match an entry (same three forms)
+    /// or it is blocked outright. Empty = no allowlist. Reads are exempt —
+    /// an allowlist is about what may CHANGE, not what may be looked at.
+    pub command_allowlist: Vec<String>,
+    /// Path prefixes no command line may mention, at ANY autonomy level —
+    /// hard-blocked like the destructive-pattern list. Plain substring
+    /// match on the composed line (blunt on purpose: false-positive on a
+    /// path in a grep pattern is a safe failure; a missed rm under a
+    /// creative quoting is not).
+    pub forbidden_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -954,6 +991,29 @@ impl Config {
                         .push(format!("http.jwt_secret references env:{name}, which is not set")),
                 },
                 Some(SecretRef::Store(_)) => {} // resolved + checked at connect time
+            }
+        }
+        // Policy-bounds lists: an empty-string entry would match EVERY
+        // command ("" is a substring of everything) — on auto_approve or
+        // command_allowlist that's a silent everything-is-pre-approved
+        // fail-open. Refuse it everywhere for symmetry.
+        for (list, name) in [
+            (&self.policy.auto_approve, "policy.auto_approve"),
+            (&self.policy.always_ask, "policy.always_ask"),
+            (&self.policy.command_allowlist, "policy.command_allowlist"),
+            (&self.policy.forbidden_paths, "policy.forbidden_paths"),
+        ] {
+            for entry in list {
+                if entry.trim().is_empty() {
+                    errs.push(format!("{name} contains an empty entry — it would match everything"));
+                } else if let Some((_, needle)) = entry.split_once(':')
+                    && needle.trim().is_empty()
+                {
+                    errs.push(format!(
+                        "{name} entry {entry:?} has an empty pattern after ':' — it would match \
+                         every command of that tool; drop the colon to mean that deliberately"
+                    ));
+                }
             }
         }
         // A declared escalation chain must be structurally sound before

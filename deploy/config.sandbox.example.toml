@@ -32,6 +32,14 @@ max_actions_per_hour = 30
 # $5/day hard stop — enforced by the CostGuard; loud notice when reached.
 max_cost_per_day_cents = 500
 
+# Policy bounds (all optional; empty lists change nothing). Entries match
+# as "<tool>", "<tool>:<substring>", or "runbook:<title>".
+#   [policy]
+#   always_ask = ["kubernetes:delete"]     # force approval even at auto
+#   auto_approve = ["systemd:systemctl start nginx"]  # Medium-risk only
+#   command_allowlist = []                 # non-empty => only listed mutations run
+#   forbidden_paths = ["/etc/shadow"]      # hard-blocked at every level
+
 # Escalation contact chain: who gets paged when an incident opens, and how
 # it walks unacknowledged. With no steps declared, opsclaw broadcasts on
 # every channel (60m ack window, 20m re-notify) — this explicit single step

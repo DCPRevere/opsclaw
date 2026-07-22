@@ -117,6 +117,20 @@ enum Gate {
     Block,
 }
 
+/// Does any entry of a policy-bounds list (`auto_approve`/`always_ask`/
+/// `command_allowlist` — `config::PolicyCfg`) match this request? Three
+/// entry forms, all matched here so the semantics can't drift per list:
+/// bare `"<tool>"`, `"<tool>:<needle>"` (substring of the command), and
+/// `"runbook:<title>"` (against the CODE-COMPUTED `req.runbook`, never
+/// model text). Empty needles are refused by config validation.
+fn bounds_match(list: &[String], req: &CommandRequest) -> bool {
+    list.iter().any(|entry| match entry.split_once(':') {
+        None => entry == &req.tool,
+        Some(("runbook", title)) => req.runbook.as_deref() == Some(title),
+        Some((tool, needle)) => tool == req.tool && req.command.contains(needle),
+    })
+}
+
 /// The pure gate: risk × autonomy (× runbook match) → decision.
 ///
 /// - Reads execute at every level — `observe` means look, don't touch.
@@ -293,10 +307,77 @@ impl Policy {
             });
         }
 
+        // Forbidden paths (brief §5): hard-blocked at EVERY level, like the
+        // destructive-pattern list — checked on the raw line so a path
+        // buried mid-command still trips it.
+        if let Some(path) =
+            self.config.policy.forbidden_paths.iter().find(|p| req.command.contains(p.as_str()))
+        {
+            self.audit_one(
+                &req.principal,
+                &fq,
+                &req.tool,
+                &scrubbed_command,
+                risk,
+                AuditOutcome::Blocked,
+                None,
+            )
+            .await?;
+            return Ok(PolicyOutcome::Blocked {
+                reason: format!("command touches forbidden path {path:?}"),
+                dry_run_logged: false,
+            });
+        }
+
+        // Command allowlist (brief §5): once ANYTHING is listed, only listed
+        // mutations run — fail-closed by construction. Reads exempt (an
+        // allowlist bounds what may change, not what may be looked at).
+        if risk != RiskClass::Read
+            && !self.config.policy.command_allowlist.is_empty()
+            && !bounds_match(&self.config.policy.command_allowlist, &req)
+        {
+            self.audit_one(
+                &req.principal,
+                &fq,
+                &req.tool,
+                &scrubbed_command,
+                risk,
+                AuditOutcome::Blocked,
+                None,
+            )
+            .await?;
+            return Ok(PolicyOutcome::Blocked {
+                reason: "mutation is not on policy.command_allowlist".into(),
+                dry_run_logged: false,
+            });
+        }
+
         let autonomy =
             self.config.autonomy_for(&req.target.project, &req.target.env, &req.target.target);
 
-        match gate(risk, autonomy, req.runbook.is_some()) {
+        // The per-tool/per-runbook tuning lists (brief §5). Deny beats
+        // allow: always_ask downgrades an Execute to Approval even at
+        // `auto` or with a runbook match; auto_approve upgrades an
+        // Approval to Execute for MEDIUM only (High/Destructive never ride
+        // a config list past a human), and never at `observe` (the gate's
+        // Block stands — observe means look, don't touch).
+        let gated = match gate(risk, autonomy, req.runbook.is_some()) {
+            Gate::Execute
+                if risk != RiskClass::Read && bounds_match(&self.config.policy.always_ask, &req) =>
+            {
+                Gate::Approval
+            }
+            Gate::Approval
+                if risk == RiskClass::Medium
+                    && bounds_match(&self.config.policy.auto_approve, &req)
+                    && !bounds_match(&self.config.policy.always_ask, &req) =>
+            {
+                Gate::Execute
+            }
+            g => g,
+        };
+
+        match gated {
             Gate::Block => {
                 // The audit record IS the dry-run log: what would have run,
                 // classified and attributed, at a level that forbids acting.
@@ -756,6 +837,150 @@ mod tests {
         assert_eq!(stored.hypothesis, "test hypothesis");
         assert!(rig.executor.ran.lock().unwrap().is_empty());
         assert_eq!(outcomes(&rig.db).await, vec![AuditOutcome::ApprovalQueued]);
+    }
+
+    // ---- policy bounds: forbidden paths, allowlist, tuning lists ----
+
+    fn config_with_bounds(
+        autonomy: Autonomy,
+        f: impl FnOnce(&mut crate::config::PolicyCfg),
+    ) -> Config {
+        let mut cfg = config_at(autonomy);
+        f(&mut cfg.policy);
+        cfg
+    }
+
+    #[tokio::test]
+    async fn forbidden_path_blocks_even_at_auto() {
+        let cfg = config_with_bounds(Autonomy::Auto, |p| {
+            p.forbidden_paths = vec!["/etc/shadow".into()];
+        });
+        let rig = rig_with(cfg, FakeExecutor::ok(""));
+        let out =
+            rig.policy.execute(request("cat /etc/shadow", RiskClass::Medium)).await.unwrap();
+        match out {
+            PolicyOutcome::Blocked { reason, .. } => {
+                assert!(reason.contains("forbidden path"), "{reason}")
+            }
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+        assert!(rig.executor.ran.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_empty_allowlist_blocks_unlisted_mutations_but_not_reads() {
+        let cfg = config_with_bounds(Autonomy::Auto, |p| {
+            p.command_allowlist = vec!["shell:systemctl restart nginx".into()];
+        });
+        let rig = rig_with(cfg, FakeExecutor::ok(""));
+
+        // Unlisted mutation: blocked outright.
+        let out = rig.policy.execute(request("reboot", RiskClass::Medium)).await.unwrap();
+        assert!(
+            matches!(out, PolicyOutcome::Blocked { ref reason, .. } if reason.contains("allowlist")),
+            "{out:?}"
+        );
+        // Listed mutation: executes (at auto).
+        let out = rig
+            .policy
+            .execute(request("systemctl restart nginx", RiskClass::Medium))
+            .await
+            .unwrap();
+        assert!(matches!(out, PolicyOutcome::Executed(_)), "{out:?}");
+        // Reads are exempt from the allowlist.
+        let out = rig.policy.execute(request("uptime", RiskClass::Read)).await.unwrap();
+        assert!(matches!(out, PolicyOutcome::Executed(_)), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn always_ask_downgrades_execute_to_approval_even_at_auto() {
+        let cfg = config_with_bounds(Autonomy::Auto, |p| {
+            p.always_ask = vec!["shell:systemctl".into()];
+        });
+        let rig = rig_with(cfg, FakeExecutor::ok(""));
+        let out = rig
+            .policy
+            .execute(request("systemctl restart nginx", RiskClass::Medium))
+            .await
+            .unwrap();
+        assert!(matches!(out, PolicyOutcome::NeedsApproval(_)), "{out:?}");
+        // …but a read through the same tool still executes.
+        let out = rig.policy.execute(request("uptime", RiskClass::Read)).await.unwrap();
+        assert!(matches!(out, PolicyOutcome::Executed(_)), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn auto_approve_executes_a_medium_at_suggest_but_never_high() {
+        let cfg = config_with_bounds(Autonomy::Suggest, |p| {
+            p.auto_approve = vec!["shell".into()];
+        });
+        let rig = rig_with(cfg, FakeExecutor::ok(""));
+        // Medium (`systemctl start` classifies systemctl-mutate): the
+        // config pre-approval carries it past suggest's queue.
+        let out = rig
+            .policy
+            .execute(request("systemctl start nginx", RiskClass::Medium))
+            .await
+            .unwrap();
+        assert!(matches!(out, PolicyOutcome::Executed(_)), "{out:?}");
+        // High (`systemctl restart` classifies systemctl-disrupt — the
+        // classifier raises past the declared Medium): never rides a
+        // config list past a human.
+        let out = rig
+            .policy
+            .execute(request("systemctl restart nginx", RiskClass::Medium))
+            .await
+            .unwrap();
+        assert!(matches!(out, PolicyOutcome::NeedsApproval(_)), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn always_ask_beats_auto_approve_and_observe_still_blocks() {
+        let cfg = config_with_bounds(Autonomy::Suggest, |p| {
+            p.auto_approve = vec!["shell".into()];
+            p.always_ask = vec!["shell:start".into()];
+        });
+        let rig = rig_with(cfg, FakeExecutor::ok(""));
+        // Medium command matched by BOTH lists: always_ask must win.
+        let out = rig
+            .policy
+            .execute(request("systemctl start nginx", RiskClass::Medium))
+            .await
+            .unwrap();
+        assert!(matches!(out, PolicyOutcome::NeedsApproval(_)), "deny beats allow: {out:?}");
+
+        // At observe, auto_approve must not unlock anything — the gate's
+        // Block stands untouched.
+        let cfg = config_with_bounds(Autonomy::Observe, |p| {
+            p.auto_approve = vec!["shell".into()];
+        });
+        let rig = rig_with(cfg, FakeExecutor::ok(""));
+        let out = rig
+            .policy
+            .execute(request("systemctl start nginx", RiskClass::Medium))
+            .await
+            .unwrap();
+        assert!(matches!(out, PolicyOutcome::Blocked { .. }), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn runbook_scoped_bounds_entries_match_the_code_computed_field() {
+        let cfg = config_with_bounds(Autonomy::Auto, |p| {
+            p.always_ask = vec!["runbook:restart-flapping-service".into()];
+        });
+        let rig = rig_with(cfg, FakeExecutor::ok(""));
+        let mut matched = request("systemctl restart nginx", RiskClass::Medium);
+        matched.runbook = Some("restart-flapping-service".into());
+        let out = rig.policy.execute(matched).await.unwrap();
+        assert!(
+            matches!(out, PolicyOutcome::NeedsApproval(_)),
+            "the runbook-scoped always_ask must fire: {out:?}"
+        );
+        // A different runbook doesn't match the entry.
+        let mut other = request("systemctl restart nginx", RiskClass::Medium);
+        other.runbook = Some("some-other-runbook".into());
+        let out = rig.policy.execute(other).await.unwrap();
+        assert!(matches!(out, PolicyOutcome::Executed(_)), "{out:?}");
     }
 
     #[tokio::test]

@@ -46,8 +46,65 @@ pub struct Config {
     pub push: PushCfg,
     pub webhook_out: WebhookOutCfg,
     pub limits: LimitsCfg,
+    pub escalation: EscalationCfg,
     #[serde(rename = "project")]
     pub projects: Vec<ProjectCfg>,
+}
+
+/// Escalation contact chain (brief §6, DESIGN §4 Incidents): ordered
+/// `[[escalation.step]]` entries — notify step 0, wait `ack_timeout_minutes`
+/// for an ack (re-notifying every `repeat_interval_minutes` meanwhile), then
+/// escalate to the next step; a chain exhausted unacknowledged expires the
+/// incident. With NO steps configured, [`EscalationCfg::chain`] falls back
+/// to a single broadcast step (every channel, 60m ack window, 20m
+/// re-notify) — a deployment with no chain configured must still page
+/// SOMEWHERE rather than sit silent on a corroborated fault.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct EscalationCfg {
+    #[serde(rename = "step")]
+    pub steps: Vec<EscalationStepCfg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EscalationStepCfg {
+    /// Which channel this step pages: a `Channel::name()` string
+    /// ("telegram", "web", "webhook", "push"), or "*" to broadcast on every
+    /// configured channel. An unknown name falls back to broadcast with a
+    /// boot warning rather than paging nobody.
+    pub contact: String,
+    pub ack_timeout_minutes: i64,
+    pub repeat_interval_minutes: i64,
+}
+
+/// The broadcast contact name understood by the scheduler's escalation
+/// driver: fan out on every configured channel.
+pub const ESCALATION_BROADCAST: &str = "*";
+
+impl EscalationCfg {
+    /// The runtime chain: configured steps, or the loud single-step
+    /// broadcast default when none are declared (see the struct doc).
+    pub fn chain(&self) -> crate::incidents::EscalationChain {
+        use crate::incidents::{EscalationChain, EscalationStep};
+        if self.steps.is_empty() {
+            return EscalationChain::new(vec![EscalationStep {
+                contact: ESCALATION_BROADCAST.into(),
+                ack_timeout: chrono::Duration::minutes(60),
+                repeat_interval: chrono::Duration::minutes(20),
+            }]);
+        }
+        EscalationChain::new(
+            self.steps
+                .iter()
+                .map(|s| EscalationStep {
+                    contact: s.contact.clone(),
+                    ack_timeout: chrono::Duration::minutes(s.ack_timeout_minutes),
+                    repeat_interval: chrono::Duration::minutes(s.repeat_interval_minutes),
+                })
+                .collect(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -883,6 +940,16 @@ impl Config {
                 },
                 Some(SecretRef::Store(_)) => {} // resolved + checked at connect time
             }
+        }
+        // A declared escalation chain must be structurally sound before
+        // boot — a step that could never re-notify or an empty chain is a
+        // fail-open (nobody gets paged), the exact class validate() exists
+        // to catch. The zero-steps default is exempt: `chain()` substitutes
+        // the always-valid broadcast fallback there.
+        if !self.escalation.steps.is_empty()
+            && let Err(e) = self.escalation.chain().validate()
+        {
+            errs.push(e.to_string());
         }
         match (&self.push.vapid_private_key, &self.push.vapid_public_key) {
             (Some(_), None) | (None, Some(_)) => {

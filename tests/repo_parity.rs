@@ -490,6 +490,20 @@ control_claim_is_exactly_once_under_sequential_reclaim => |db| {
     assert!(db.claim("digest", "remundo::prod::cluster:2026-07-21T10:00", now).await.unwrap());
 }
 
+control_release_reopens_a_claim_for_retry => |db| {
+    let now = Utc::now();
+    assert!(db.claim("esc", "fp:s0-n0", now).await.unwrap());
+    // A failed send releases its claim; the same occurrence claims fresh.
+    db.release("esc", "fp:s0-n0").await.unwrap();
+    assert!(db.claim("esc", "fp:s0-n0", now).await.unwrap());
+    // Release is scoped to the exact (kind, key): other claims survive it.
+    assert!(db.claim("esc", "fp:s0-n1", now).await.unwrap());
+    db.release("esc", "fp:s0-n0").await.unwrap();
+    assert!(!db.claim("esc", "fp:s0-n1", now).await.unwrap());
+    // Releasing a never-claimed key is a no-op, not an error.
+    db.release("esc", "fp:never-claimed").await.unwrap();
+}
+
 control_prune_housekeeping_is_ok => |db| {
     // Not every backend has time-windowed state to sweep (the fake keeps no
     // claim/approval timestamps to age by design — see its module doc);

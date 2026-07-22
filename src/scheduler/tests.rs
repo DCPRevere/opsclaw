@@ -44,7 +44,10 @@ fn deps_with(
     let deps = SchedulerDeps {
         jobs: db.clone(),
         control: db.clone(),
+        incidents: db.clone(),
+        approvals: db.clone(),
         channel: channel.clone(),
+        named_channels: vec![channel.clone()],
         composer,
         config: Arc::new(Config::default()),
     };
@@ -317,7 +320,10 @@ async fn send_failure_gets_a_fresh_claim_on_genuine_retry_and_eventually_succeed
     let deps = SchedulerDeps {
         jobs: db.clone(),
         control: db.clone(),
+        incidents: db.clone(),
+        approvals: db.clone(),
         channel: flaky.clone(),
+        named_channels: vec![flaky.clone()],
         composer: Arc::new(FixedComposer("payload".into())),
         config: Arc::new(Config::default()),
     };
@@ -419,7 +425,10 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
     let deps = SchedulerDeps {
         jobs: db.clone(),
         control: db.clone(),
-        channel,
+        incidents: db.clone(),
+        approvals: db.clone(),
+        channel: channel.clone(),
+        named_channels: vec![channel],
         composer: Arc::new(NoopComposer),
         config: Arc::new(cfg),
     };
@@ -619,7 +628,10 @@ async fn spawn_ticks_on_the_adaptive_interval_and_tighten_speeds_it_up() {
     let deps = SchedulerDeps {
         jobs: db.clone(),
         control: db.clone(),
+        incidents: db.clone(),
+        approvals: db.clone(),
         channel: channel.clone(),
+        named_channels: vec![channel.clone()],
         composer,
         config: Arc::new(Config::default()),
     };
@@ -725,4 +737,263 @@ async fn a_panicking_body_is_caught_and_the_loop_respawns() {
     tokio::time::timeout(std::time::Duration::from_secs(5), tracker.wait())
         .await
         .expect("supervised loops must drain promptly on shutdown");
+}
+
+// ---- escalation driver (escalations.rs) ----
+
+fn active_incident(fingerprint: &str, opened_at: DateTime<Utc>) -> crate::domain::Incident {
+    use crate::domain::{FqTarget, Incident, IncidentState, Severity};
+    Incident {
+        id: uuid::Uuid::new_v4(),
+        fingerprint: fingerprint.into(),
+        target: FqTarget::new("remundo", "prod", "cluster"),
+        severity: Severity::Critical,
+        state: IncidentState::Active,
+        signals: "pod restarts: 6800; CA expired 2026-03-06".into(),
+        hypothesis: "dapr sentry CA expired, control plane crashlooping".into(),
+        recommended_action: Some("rotate the sentry CA".into()),
+        opened_at,
+        acked_at: None,
+        acked_by: None,
+        resolved_at: None,
+        last_notified_at: None,
+        notify_count: 0,
+        escalation_step: 0,
+        step_started_at: None,
+    }
+}
+
+async fn insert_incident(db: &InMemoryDb, incident: &crate::domain::Incident) {
+    crate::db::IncidentRepo::insert(db, incident).await.unwrap();
+}
+
+async fn get_incident(db: &InMemoryDb, id: uuid::Uuid) -> crate::domain::Incident {
+    crate::db::IncidentRepo::get(db, id).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn escalation_first_notify_pages_once_with_the_structured_payload() {
+    let (deps, db, channel) = deps();
+    let handle = SchedulerHandle::new(60_000);
+    let t0 = t(9, 0);
+    let incident = active_incident("fp-dapr", t0);
+    insert_incident(&db, &incident).await;
+
+    escalations::drive(&deps, &handle, t0).await.unwrap();
+    let sent = channel.sent();
+    assert_eq!(sent.len(), 1, "exactly one page for the first notify");
+    let body = &sent[0].body;
+    for needle in [
+        "Critical",
+        "remundo::prod::cluster",
+        "dapr sentry CA expired",
+        "pod restarts: 6800",
+        "rotate the sentry CA",
+        "step 1/1",
+    ] {
+        assert!(body.contains(needle), "page must carry {needle:?}, got:\n{body}");
+    }
+
+    // The chain position was persisted…
+    let stored = get_incident(&db, incident.id).await;
+    assert_eq!(stored.notify_count, 1);
+    assert_eq!(stored.step_started_at, Some(t0));
+    assert_eq!(stored.last_notified_at, Some(t0));
+
+    // …so an immediate second tick is a Wait, not a duplicate page.
+    escalations::drive(&deps, &handle, t0).await.unwrap();
+    assert_eq!(channel.sent().len(), 1, "no spam on the very next tick");
+}
+
+#[tokio::test]
+async fn escalation_renotifies_then_expires_on_the_default_chain() {
+    let (deps, db, channel) = deps();
+    let handle = SchedulerHandle::new(60_000);
+    let t0 = t(9, 0);
+    let incident = active_incident("fp-renotify", t0);
+    insert_incident(&db, &incident).await;
+
+    // Default (no [[escalation.step]] configured) chain: one broadcast
+    // step, 60m ack window, 20m re-notify.
+    escalations::drive(&deps, &handle, t0).await.unwrap();
+    escalations::drive(&deps, &handle, t0 + Duration::minutes(21)).await.unwrap();
+    let sent = channel.sent();
+    assert_eq!(sent.len(), 2, "one notify + one re-notify");
+    assert!(sent[1].body.contains("REMINDER"), "re-notify says so: {}", sent[1].body);
+
+    // Past the single step's ack window: the chain is exhausted — the
+    // incident expires, with no further pages.
+    escalations::drive(&deps, &handle, t0 + Duration::minutes(61)).await.unwrap();
+    let stored = get_incident(&db, incident.id).await;
+    assert_eq!(stored.state, crate::domain::IncidentState::Expired);
+    assert_eq!(channel.sent().len(), 2, "expiry itself is not a page");
+
+    // An Expired incident is closed: nothing further ever happens.
+    escalations::drive(&deps, &handle, t0 + Duration::minutes(90)).await.unwrap();
+    assert_eq!(channel.sent().len(), 2);
+}
+
+#[tokio::test]
+async fn escalation_walks_configured_steps_and_resolves_named_contacts() {
+    use crate::config::EscalationStepCfg;
+    let db = Arc::new(InMemoryDb::new());
+    let broadcast = Arc::new(RecordingChannel::new());
+    let named = Arc::new(RecordingChannel::new()); // Channel::name() == "recording"
+    let mut cfg = Config::default();
+    cfg.escalation.steps = vec![
+        EscalationStepCfg {
+            contact: "recording".into(), // resolves to `named`
+            ack_timeout_minutes: 15,
+            repeat_interval_minutes: 5,
+        },
+        EscalationStepCfg {
+            contact: "no-such-channel".into(), // falls back to broadcast
+            ack_timeout_minutes: 15,
+            repeat_interval_minutes: 5,
+        },
+    ];
+    let deps = SchedulerDeps {
+        jobs: db.clone(),
+        control: db.clone(),
+        incidents: db.clone(),
+        approvals: db.clone(),
+        channel: broadcast.clone(),
+        named_channels: vec![named.clone()],
+        composer: Arc::new(NoopComposer),
+        config: Arc::new(cfg),
+    };
+    let handle = SchedulerHandle::new(60_000);
+    let t0 = t(9, 0);
+    let incident = active_incident("fp-chain", t0);
+    insert_incident(&db, &incident).await;
+
+    // Step 0 pages the NAMED channel only.
+    escalations::drive(&deps, &handle, t0).await.unwrap();
+    assert_eq!(named.sent().len(), 1);
+    assert!(broadcast.sent().is_empty());
+    assert!(named.sent()[0].body.contains("step 1/2"));
+
+    // Past step 0's ack window: escalate to step 1, whose unknown contact
+    // falls back to the broadcast fan-out (page everyone, never no one).
+    escalations::drive(&deps, &handle, t0 + Duration::minutes(16)).await.unwrap();
+    assert_eq!(named.sent().len(), 1, "step 0's contact is done");
+    assert_eq!(broadcast.sent().len(), 1);
+    let body = &broadcast.sent()[0].body;
+    assert!(body.contains("ESCALATION"), "{body}");
+    assert!(body.contains("step 2/2"), "{body}");
+
+    let stored = get_incident(&db, incident.id).await;
+    assert_eq!(stored.escalation_step, 1);
+    assert_eq!(stored.step_started_at, Some(t0 + Duration::minutes(16)));
+}
+
+#[tokio::test]
+async fn escalation_ack_stops_the_chain_and_resolve_stays_silent() {
+    let (deps, db, channel) = deps();
+    let handle = SchedulerHandle::new(60_000);
+    let t0 = t(9, 0);
+    let mut acked = active_incident("fp-acked", t0);
+    acked.state = crate::domain::IncidentState::Acknowledged;
+    insert_incident(&db, &acked).await;
+    let mut resolved = active_incident("fp-resolved", t0);
+    resolved.state = crate::domain::IncidentState::Resolved;
+    insert_incident(&db, &resolved).await;
+
+    escalations::drive(&deps, &handle, t0 + Duration::minutes(30)).await.unwrap();
+    assert!(channel.sent().is_empty(), "no pages for acked or resolved incidents");
+    // An acked incident is still OPEN — cadence stays tightened while it's
+    // being worked.
+    assert_eq!(handle.interval_ms(), 30_000);
+}
+
+#[tokio::test]
+async fn escalation_send_failure_releases_the_claim_and_the_next_tick_retries() {
+    let db = Arc::new(InMemoryDb::new());
+    let flaky = Arc::new(FlakyThenOkChannel::new(1)); // first send fails, then ok
+    let deps = SchedulerDeps {
+        jobs: db.clone(),
+        control: db.clone(),
+        incidents: db.clone(),
+        approvals: db.clone(),
+        channel: flaky.clone(),
+        named_channels: vec![],
+        composer: Arc::new(NoopComposer),
+        config: Arc::new(Config::default()),
+    };
+    let handle = SchedulerHandle::new(60_000);
+    let t0 = t(9, 0);
+    let incident = active_incident("fp-flaky", t0);
+    insert_incident(&db, &incident).await;
+
+    // First tick: the send errors — nothing recorded, claim released.
+    escalations::drive(&deps, &handle, t0).await.unwrap();
+    assert_eq!(get_incident(&db, incident.id).await.notify_count, 0);
+
+    // Next tick retries the SAME occurrence and succeeds.
+    escalations::drive(&deps, &handle, t0 + Duration::minutes(1)).await.unwrap();
+    let stored = get_incident(&db, incident.id).await;
+    assert_eq!(stored.notify_count, 1, "the released claim allowed the retry");
+}
+
+#[tokio::test]
+async fn incident_pressure_tightens_while_open_and_relaxes_when_clear() {
+    let (deps, db, _channel) = deps();
+    let handle = SchedulerHandle::new(60_000);
+    assert_eq!(handle.interval_ms(), 60_000);
+
+    let t0 = t(9, 0);
+    let incident = active_incident("fp-pressure", t0);
+    insert_incident(&db, &incident).await;
+    escalations::drive(&deps, &handle, t0).await.unwrap();
+    assert_eq!(handle.interval_ms(), 30_000, "open incident tightens the cadence");
+    // Reconciliation is level-based: another tick with the incident still
+    // open must not stack a second tighten.
+    escalations::drive(&deps, &handle, t0 + Duration::minutes(1)).await.unwrap();
+    assert_eq!(handle.interval_ms(), 30_000);
+
+    crate::db::IncidentRepo::set_state(
+        db.as_ref(),
+        incident.id,
+        crate::domain::IncidentState::Resolved,
+        None,
+    )
+    .await
+    .unwrap();
+    escalations::drive(&deps, &handle, t0 + Duration::minutes(2)).await.unwrap();
+    assert_eq!(handle.interval_ms(), 60_000, "clear board relaxes back to base");
+}
+
+#[tokio::test]
+async fn expired_approvals_are_announced_exactly_once() {
+    let (deps, db, channel) = deps();
+    let t0 = t(9, 0);
+    let req = crate::incidents::new_approval_request(
+        crate::incidents::NewApproval {
+            requested_by: crate::domain::Principal::Agent { job: None },
+            incident: None,
+            target: crate::domain::FqTarget::new("remundo", "prod", "cluster"),
+            tool: "kubernetes".into(),
+            command: "delete pod stuck-pod -n prod-backend".into(),
+            risk: crate::domain::RiskClass::High,
+            hypothesis: "pod wedged in Terminating".into(),
+            expires_in: Some(Duration::minutes(30)),
+        },
+        t0,
+    );
+    crate::db::ApprovalRepo::insert(db.as_ref(), &req).await.unwrap();
+
+    // Before the deadline: nothing to sweep.
+    escalations::expire_approvals(&deps, t0 + Duration::minutes(10)).await.unwrap();
+    assert!(channel.sent().is_empty());
+
+    // Past it: swept + announced once…
+    escalations::expire_approvals(&deps, t0 + Duration::minutes(31)).await.unwrap();
+    let sent = channel.sent();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].body.contains("EXPIRED"), "{}", sent[0].body);
+    assert!(sent[0].body.contains("delete pod stuck-pod"), "{}", sent[0].body);
+
+    // …and never again (expire_due only returns rows it just transitioned).
+    escalations::expire_approvals(&deps, t0 + Duration::minutes(45)).await.unwrap();
+    assert_eq!(channel.sent().len(), 1);
 }

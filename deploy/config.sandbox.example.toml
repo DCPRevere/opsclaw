@@ -32,6 +32,16 @@ max_actions_per_hour = 30
 # $5/day hard stop — enforced by the CostGuard; loud notice when reached.
 max_cost_per_day_cents = 500
 
+# Escalation contact chain: who gets paged when an incident opens, and how
+# it walks unacknowledged. With no steps declared, opsclaw broadcasts on
+# every channel (60m ack window, 20m re-notify) — this explicit single step
+# does the same for the web-UI-only sandbox setup; add a telegram step
+# first once a bot is configured, e.g. contact = "telegram".
+[[escalation.step]]
+contact = "*"              # "*" = every channel; or a channel name
+ack_timeout_minutes = 60   # unacked this long -> next step (or expire)
+repeat_interval_minutes = 20
+
 [[project]]
 name = "remundo"
 autonomy = "suggest"

@@ -22,6 +22,12 @@ impl crate::db::ControlRepo for InMemoryDb {
         Ok(store.claims.insert((kind.to_string(), key.to_string())))
     }
 
+    async fn release(&self, kind: &str, key: &str) -> Result<()> {
+        let mut store = self.store.lock().unwrap();
+        store.claims.remove(&(kind.to_string(), key.to_string()));
+        Ok(())
+    }
+
     async fn prune_housekeeping(&self, _now: DateTime<Utc>) -> Result<()> {
         // The fake keeps no timestamps on claims/job_failures/approvals (it
         // stores none of the timing metadata SQLite ages on), so there is

@@ -92,6 +92,15 @@ pub trait ControlRepo: Send + Sync {
     /// composing/sending, keyed per occurrence — never per calendar day.
     async fn claim(&self, kind: &str, key: &str, at: DateTime<Utc>) -> Result<bool>;
 
+    /// Release a claim this caller took but could not act on — a channel
+    /// send that returned an ERROR (not a crash) must put the occurrence
+    /// back so the next tick retries it, instead of the claim wedging that
+    /// occurrence silent forever. Only for the known-failed path: a crash
+    /// between claim and send deliberately leaves the claim held (at-most-
+    /// once is the safe direction for paging, per the claim-before-compose
+    /// rule above). Releasing a never-claimed key is a harmless no-op.
+    async fn release(&self, kind: &str, key: &str) -> Result<()>;
+
     /// Time-windowed cleanup of expired claims and similar bookkeeping.
     async fn prune_housekeeping(&self, now: DateTime<Utc>) -> Result<()>;
 }

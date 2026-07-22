@@ -68,6 +68,11 @@ pub struct AppState {
     /// …) — what an approve/deny/estop handler's confirmation, or a fired
     /// scan job, actually reaches operators through.
     pub channel: Arc<dyn Channel>,
+    /// The same channels INDIVIDUALLY — what the scheduler's escalation
+    /// driver resolves a step's named contact ("telegram", "web", …)
+    /// against; `channel` above is the fan-out and cannot express "this
+    /// channel only". Kept in lock-step with `channel` by `boot::assemble`.
+    pub named_channels: Vec<Arc<dyn Channel>>,
     /// The alert-ingestion seam (`http::webhook::IngestAlert`) a verified
     /// webhook hands its parsed payload to. Defaults to a no-op until the
     /// agent-loop/incident-opening integration wires the real one.
@@ -142,7 +147,8 @@ impl AppState {
             estop,
             scheduler,
             web: web.clone(),
-            channel: web,
+            channel: web.clone(),
+            named_channels: vec![web],
             ingest: Arc::new(NoopIngest),
             composer: Arc::new(NoopComposer),
             chat: Arc::new(NoopChat),
@@ -218,7 +224,8 @@ impl AppState {
             estop,
             scheduler: SchedulerHandle::new(60_000),
             web: web.clone(),
-            channel: web,
+            channel: web.clone(),
+            named_channels: vec![web],
             ingest: Arc::new(NoopIngest),
             composer: Arc::new(NoopComposer),
             chat: Arc::new(NoopChat),

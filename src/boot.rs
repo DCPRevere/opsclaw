@@ -169,6 +169,7 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
             secret,
         )));
     }
+    state.named_channels = channels.clone();
     state.channel = Arc::new(MultiChannel::new(channels));
     // The cost cap's loud once-per-day notification rides the same fan-out
     // as every other escalation (built just above — this is the earliest

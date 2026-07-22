@@ -83,7 +83,10 @@ pub(crate) fn scheduler_deps(state: &AppState) -> crate::scheduler::SchedulerDep
     crate::scheduler::SchedulerDeps {
         jobs: state.repos.clone(),
         control: state.repos.clone(),
+        incidents: state.repos.clone(),
+        approvals: state.repos.clone(),
         channel: state.channel.clone(),
+        named_channels: state.named_channels.clone(),
         composer: state.composer.clone(),
         config: state.config.clone(),
     }

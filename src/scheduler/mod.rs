@@ -49,6 +49,7 @@
 //! impl; the real agent-backed composer swaps in when Wave 3's agent loop
 //! lands, with no change to this module's shape.
 
+pub mod escalations;
 pub mod jobs;
 #[cfg(test)]
 mod tests;
@@ -58,7 +59,7 @@ pub use jobs::{
 };
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 
@@ -75,7 +76,13 @@ use crate::db::{ControlRepo, JobRepo};
 pub struct SchedulerDeps {
     pub jobs: Arc<dyn JobRepo>,
     pub control: Arc<dyn ControlRepo>,
+    pub incidents: Arc<dyn crate::db::IncidentRepo>,
+    pub approvals: Arc<dyn crate::db::ApprovalRepo>,
     pub channel: Arc<dyn Channel>,
+    /// The individual configured channels, for escalation steps that
+    /// address ONE channel by `Channel::name()` — `channel` above is the
+    /// broadcast fan-out and deliberately cannot express "telegram only".
+    pub named_channels: Vec<Arc<dyn Channel>>,
     pub composer: Arc<dyn JobComposer>,
     pub config: Arc<Config>,
 }
@@ -100,6 +107,10 @@ pub struct SchedulerHandle {
     /// incidents) don't have the second's `relax()` prematurely widen the
     /// interval while the first is still active.
     tighten_count: Arc<AtomicU64>,
+    /// Level-tracked "open incidents exist" cause for
+    /// [`SchedulerHandle::set_incident_pressure`] — reconciled every tick by
+    /// the escalation driver.
+    incident_pressure: Arc<AtomicBool>,
 }
 
 /// A tick slower than `interval * LAG_MULTIPLE` pages the lag watchdog —
@@ -122,6 +133,7 @@ impl SchedulerHandle {
             interval_ms: Arc::new(AtomicU64::new(base_interval_ms.max(1))),
             base_interval_ms: base_interval_ms.max(1),
             tighten_count: Arc::new(AtomicU64::new(0)),
+            incident_pressure: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -158,6 +170,24 @@ impl SchedulerHandle {
         let new_interval =
             if tightened { (self.base_interval_ms / 2).max(1000) } else { self.base_interval_ms };
         self.interval_ms.store(new_interval, Ordering::Relaxed);
+    }
+
+    /// Reconcile the "open incidents exist" tighten cause as a level, not
+    /// edges: the escalation driver calls this every tick with the current
+    /// truth (any open incident ⇒ true) and the handle turns level changes
+    /// into exactly one `tighten`/`relax` pair — idempotent under repeated
+    /// same-value calls, so the driver never has to remember what it said
+    /// last tick (a crash between ticks can't leak a stuck tighten). Other
+    /// causes (an operator pinning cadence, future unconfirmed-hypothesis
+    /// tracking) still use `tighten`/`relax` directly; the counter keeps the
+    /// causes independent.
+    pub fn set_incident_pressure(&self, pressurised: bool) {
+        let was = self.incident_pressure.swap(pressurised, Ordering::Relaxed);
+        match (was, pressurised) {
+            (false, true) => self.tighten(),
+            (true, false) => self.relax(),
+            _ => {}
+        }
     }
 
     /// Record tick START — call before any phase work, so a slow phase reads
@@ -287,6 +317,8 @@ pub async fn tick(
     }
 
     phase!("run_due_jobs", jobs::run_due_jobs(deps, now_utc));
+    phase!("drive_escalations", escalations::drive(deps, handle, now_utc));
+    phase!("expire_approvals", escalations::expire_approvals(deps, now_utc));
     phase!("ping_deadman", ping_deadman(deps, now_utc));
 
     if now_utc.timestamp() % 3600 < deps.config.daemon.tick_seconds as i64

@@ -45,6 +45,15 @@ impl crate::db::ControlRepo for SqliteDb {
         Ok(res.rows_affected() > 0)
     }
 
+    async fn release(&self, kind: &str, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM claims WHERE kind = ? AND key = ?")
+            .bind(kind)
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn prune_housekeeping(&self, now: DateTime<Utc>) -> Result<()> {
         // Claims are pure history once their occurrence has long passed;
         // keep 30 days so recent activity stays inspectable.

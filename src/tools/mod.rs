@@ -25,18 +25,17 @@
 //!   `crate::runbooks::RunbookStore` — the definition store — and
 //!   `runbook_history` over `db::RunbookRunRepo` — execution history;
 //!   discover-then-inspect).
-//! - [`endpoint`] — shared plumbing for endpoint-backed tools: an already-
-//!   RESOLVED [`endpoint::EndpointAuth`] (base URL + optional bearer token)
-//!   per resource, and [`endpoint::get_json`]/[`endpoint::post_json`]
-//!   helpers with the same error-splitting discipline as [`executor`]. See
-//!   that module's doc for the credential-wiring gap (config already
-//!   declares resources; nothing yet resolves a `SecretRef` into a
-//!   `ToolCtx.endpoints` registry). [`elasticsearch`], [`azure_service_bus`],
-//!   [`eventstore`], [`prometheus`] are pure reads through it;
-//!   [`argocd`]'s reads go the same way, but `rollback` is a MUTATION that
-//!   composes a synthetic command line through [`executor::run_command`]
-//!   exactly like an ssh/kubernetes tool — a rollback over HTTP is as
-//!   classified, gated, and audited as a remote command (DESIGN.md §4).
+//! - [`endpoint`] — shared plumbing for endpoint-backed tools:
+//!   [`endpoint::get_json`]/[`endpoint::query_json`] compose canonical
+//!   `endpoint-get`/`endpoint-query` READ lines and submit them through
+//!   `ctx.policy` — endpoint reads pass the SAME choke point as ssh
+//!   commands (e-stop, audit-begin/end, response scrubbing), landing on
+//!   `targets::endpoint::EndpointExecutor`. [`elasticsearch`],
+//!   [`azure_service_bus`], [`eventstore`], [`prometheus`] are pure reads
+//!   through it; [`argocd`]'s reads go the same way, and its `rollback`
+//!   MUTATION composes its own vocabulary line through
+//!   [`executor::run_command`] — a rollback over HTTP is as classified,
+//!   gated, and audited as a remote command (DESIGN.md §4).
 //!
 //! [`registry`] applies DESIGN.md §4's context-gating: read-only tools
 //! register whenever their config section exists; mutating tools register
@@ -173,26 +172,23 @@ impl ToolCtx {
     /// against `endpoints`, returning the target plus its resolved auth.
     /// Same closed-world discipline as `resolve_target`: the model can only
     /// ever pick a resource this context was told about.
-    pub fn resolve_resource(
-        &self,
-        s: &str,
-    ) -> std::result::Result<(FqTarget, &endpoint::EndpointAuth), ToolError> {
+    pub fn resolve_resource(&self, s: &str) -> std::result::Result<FqTarget, ToolError> {
         let target = self.resolve_target(s)?;
         let endpoints = self.endpoints.as_ref().ok_or_else(|| {
             ToolError::Internal("called with no endpoint credentials wired".to_string())
         })?;
-        let auth = endpoints.get(&target).ok_or_else(|| {
+        if endpoints.get(&target).is_none() {
             // Name the valid choices — a model given only "no credentials"
             // burns tool-loop steps guessing address forms (observed live:
             // `cluster`, `cluster:logs`, … before the right one). The
             // resource-qualified form is not guessable from the base path.
-            ToolError::UserFacing(format!(
+            return Err(ToolError::UserFacing(format!(
                 "no resolved credentials for resource {s:?} — resource-qualified targets with \
                  credentials: {}",
                 endpoints.known_targets().join(", ")
-            ))
-        })?;
-        Ok((target, auth))
+            )));
+        }
+        Ok(target)
     }
 }
 
@@ -364,4 +360,55 @@ fn target_kind_of(config: &Config, target: &FqTarget) -> Option<RegistryTargetCl
 /// tests) needs "does a tool with this name exist in the registry".
 pub fn find<'a>(registry: &'a [Box<dyn Tool>], name: &str) -> Option<&'a dyn Tool> {
     registry.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+}
+
+/// Test-support: a `ToolCtx` whose reads run through the PRODUCTION wiring
+/// in miniature — a real `Policy` (disengaged e-stop, fresh scrubber,
+/// in-memory audit) driving a real `targets::endpoint::EndpointExecutor` at
+/// `base_url`. Endpoint tool tests use this so they prove their reads
+/// survive the choke point, not just that their HTTP paths are right.
+/// Returns the ctx plus the e-stop sentinel dir (dropping it deletes the
+/// sentinel path — hold it for the test's lifetime).
+#[cfg(test)]
+pub(crate) fn endpoint_test_ctx(
+    target: crate::domain::FqTarget,
+    base_url: &str,
+    token: Option<&str>,
+) -> (ToolCtx, tempfile::TempDir) {
+    use std::sync::Arc;
+    let (kind, _) =
+        target.resource.clone().expect("endpoint_test_ctx needs a resource-qualified target");
+    let db = Arc::new(crate::db::memory::InMemoryDb::new());
+    let dir = tempfile::tempdir().unwrap();
+    let estop = Arc::new(crate::policy::EStop::new(dir.path().join("estop"), db.clone()));
+    let auth = endpoint::EndpointAuth::new(base_url, token.map(str::to_string));
+    let mut executors: std::collections::HashMap<String, Arc<dyn crate::targets::TargetExecutor>> =
+        std::collections::HashMap::new();
+    executors.insert(
+        target.to_string(),
+        Arc::new(crate::targets::endpoint::EndpointExecutor::new(kind, auth.clone())),
+    );
+    let policy = Arc::new(crate::policy::Policy::new(
+        Arc::new(crate::config::Config::default()),
+        executors,
+        Arc::new(crate::audit::AuditWriter::new(db.clone())),
+        estop,
+        db.clone(),
+        Arc::new(crate::policy::Scrubber::new()),
+    ));
+    let mut reg = endpoint::EndpointRegistry::new();
+    reg.insert(&target, auth);
+    let ctx = ToolCtx {
+        principal: crate::domain::Principal::Agent { job: None },
+        policy,
+        known_targets: vec![target],
+        incidents: None,
+        approvals: None,
+        runbook_runs: None,
+        memory: None,
+        config: None,
+        endpoints: Some(Arc::new(reg)),
+        runbooks: None,
+    };
+    (ctx, dir)
 }

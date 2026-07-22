@@ -352,12 +352,39 @@ impl Policy {
         // Resource-qualified registrations (endpoint executors, keyed by the
         // FULL fq path incl. resource) take precedence; the base target key
         // is the fallback for plain ssh/local/kubernetes commands.
-        let executor = self
-            .executors
-            .get(&fq)
-            .or_else(|| self.executors.get(&Self::executor_key(target)))
-            .ok_or_else(|| crate::Error::NotFound(format!("no executor configured for {fq}")))?
-            .clone();
+        //
+        // SAFETY INVARIANT — endpoint-* lines never reach a shell. The
+        // classifier trusts `endpoint-get`/`endpoint-query` lines as Read
+        // WITHOUT shell-segment analysis (classify.rs "endpoint-read"), which
+        // is only sound because such a line can exclusively land on an
+        // `EndpointExecutor` (an HTTP client, no shell anywhere). Enforced
+        // here: an endpoint-* line requires a resource-qualified target and
+        // gets NO base-target fallback — resource-qualified map entries are
+        // only ever EndpointExecutors (targets::wiring), so a crafted
+        // `endpoint-get /x; rm -rf /` addressed at a plain ssh target is
+        // refused instead of shell-executed as a "Read".
+        let is_endpoint_line = command.trim_start().starts_with("endpoint-");
+        let executor = if is_endpoint_line {
+            if target.resource.is_none() {
+                return Err(crate::Error::Policy(format!(
+                    "endpoint read lines require a resource-qualified target, got {fq}"
+                )));
+            }
+            self.executors
+                .get(&fq)
+                .ok_or_else(|| {
+                    crate::Error::NotFound(format!("no endpoint executor configured for {fq}"))
+                })?
+                .clone()
+        } else {
+            self.executors
+                .get(&fq)
+                .or_else(|| self.executors.get(&Self::executor_key(target)))
+                .ok_or_else(|| {
+                    crate::Error::NotFound(format!("no executor configured for {fq}"))
+                })?
+                .clone()
+        };
 
         self.audit_one(principal, &fq, tool, scrubbed_command, risk, AuditOutcome::Begun, None)
             .await?;

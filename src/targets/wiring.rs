@@ -128,9 +128,19 @@ pub fn build_executors(
                     };
                     let mut fq = base.clone();
                     fq.resource = Some((resource.rtype(), resource.name().to_string()));
+                    // Full resolved auth — basic-auth scheme and per-resource
+                    // TLS trust included — so a mutation through this
+                    // executor authenticates exactly like the read registry
+                    // (an ECK Elasticsearch behind basic auth + self-signed
+                    // CA must be actionable, not just readable).
+                    let mut auth = crate::tools::endpoint::EndpointAuth::new(ep.url, token);
+                    if let Some(user) = ep.username {
+                        auth = auth.with_basic_user(user);
+                    }
+                    auth = auth.with_tls_options(ep.ca_cert_path, ep.insecure_tls)?;
                     map.insert(
                         fq.to_string(),
-                        Arc::new(EndpointExecutor::new(resource.rtype(), ep.url, token)),
+                        Arc::new(EndpointExecutor::new(resource.rtype(), auth)),
                     );
                 }
             }

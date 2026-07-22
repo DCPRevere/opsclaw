@@ -50,6 +50,23 @@ pub fn line_for_classification<'c>(tool: &str, command: &'c str) -> std::borrow:
 
 /// Classify a full command line (the max over its segments).
 pub fn classify_command(line: &str) -> Classification {
+    // Endpoint READ lines (`tools::endpoint::{get_json, query_json}` compose
+    // them; `targets::endpoint::EndpointExecutor` performs them) are a URL
+    // path plus, for `endpoint-query`, a JSON body — NOT shell. Segment
+    // splitting a JSON body on `;`/`&` would classify its fragments as
+    // unknown commands (fail-closed Medium) and block legitimate log
+    // searches under `observe`; shell hard-block patterns are equally
+    // meaningless against JSON. Read-safety for these lines is enforced
+    // where it belongs: the executor's per-kind path allowlists (a
+    // non-read path is refused BEFORE any request), so classifying the
+    // verb alone is sound, not lenient.
+    if line.starts_with("endpoint-get ") || line.starts_with("endpoint-query ") {
+        return Classification {
+            risk: RiskClass::Read,
+            hard_blocked: false,
+            rule: "endpoint-read",
+        };
+    }
     // Hard-block patterns that SPAN shell operators (the fork bomb is `:|:&`)
     // must see the whole raw line — segment splitting would dismember them.
     if HB_FORKBOMB.is_match(line) {

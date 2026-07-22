@@ -70,9 +70,9 @@ impl Tool for QueueDepthTool {
                 "azure_service_bus_queue_depth requires a \"queue\" argument".to_string(),
             )
         })?;
-        let (_, auth) = ctx.resolve_resource(resource)?;
+        let target = ctx.resolve_resource(resource)?;
         let result =
-            get_json(auth, self.name(), &format!("/{queue}?api-version=2021-05"))
+            get_json(ctx, &target, self.name(), &format!("/{queue}?api-version=2021-05"))
                 .await?;
         Ok(ToolResult { output: result.to_string() })
     }
@@ -132,12 +132,13 @@ impl Tool for PeekMessagesTool {
         })?;
         let dead_letter = args["dead_letter"].as_bool().unwrap_or(false);
         let count = args["count"].as_i64().unwrap_or(10);
-        let (_, auth) = ctx.resolve_resource(resource)?;
+        let target = ctx.resolve_resource(resource)?;
 
         let sub_path =
             if dead_letter { format!("{queue}/$deadletterqueue") } else { queue.to_string() };
         let result = get_json(
-            auth,
+            ctx,
+            &target,
             self.name(),
             &format!("/{sub_path}/messages/head?api-version=2021-05&count={count}"),
         )
@@ -149,20 +150,9 @@ impl Tool for PeekMessagesTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{FqTarget, Principal, ResourceType};
-    use crate::policy::{CommandRequest, PolicyExecute, PolicyOutcome};
-    use crate::tools::endpoint::{EndpointAuth, EndpointRegistry};
-    use std::sync::Arc;
+    use crate::domain::{FqTarget, ResourceType};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    struct NoopPolicy;
-    #[async_trait]
-    impl PolicyExecute for NoopPolicy {
-        async fn execute(&self, _req: CommandRequest) -> crate::Result<PolicyOutcome> {
-            Ok(PolicyOutcome::EStopped)
-        }
-    }
 
     fn target() -> FqTarget {
         FqTarget {
@@ -174,20 +164,11 @@ mod tests {
     }
 
     fn ctx_with(base_url: &str, token: Option<&str>) -> ToolCtx {
-        let mut reg = EndpointRegistry::new();
-        reg.insert(&target(), EndpointAuth::new(base_url, token.map(str::to_string)));
-        ToolCtx {
-            principal: Principal::Agent { job: None },
-            policy: Arc::new(NoopPolicy),
-            known_targets: vec![target()],
-            incidents: None,
-            approvals: None,
-            runbook_runs: None,
-            memory: None,
-            config: None,
-            endpoints: Some(Arc::new(reg)),
-            runbooks: None,
-        }
+        // Real Policy over a real EndpointExecutor (choke-point wiring in
+        // miniature) — reads here prove they survive e-stop/audit/scrub,
+        // not just that the HTTP path is right. The TempDir is the e-stop
+        // sentinel dir; dropping it leaves the sentinel absent = disengaged.
+        crate::tools::endpoint_test_ctx(target(), base_url, token).0
     }
 
     #[tokio::test]

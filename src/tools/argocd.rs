@@ -89,8 +89,8 @@ impl Tool for ListAppsTool {
         let resource = args["resource"].as_str().ok_or_else(|| {
             ToolError::UserFacing("argocd_list_apps requires a \"resource\" argument".to_string())
         })?;
-        let (_, auth) = ctx.resolve_resource(resource)?;
-        let result = get_json(auth, self.name(), "/api/v1/applications").await?;
+        let target = ctx.resolve_resource(resource)?;
+        let result = get_json(ctx, &target, self.name(), "/api/v1/applications").await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -142,9 +142,9 @@ impl Tool for SyncStatusTool {
         let app = args["app"].as_str().ok_or_else(|| {
             ToolError::UserFacing("argocd_sync_status requires an \"app\" argument".to_string())
         })?;
-        let (_, auth) = ctx.resolve_resource(resource)?;
+        let target = ctx.resolve_resource(resource)?;
         let result =
-            get_json(auth, self.name(), &format!("/api/v1/applications/{app}")).await?;
+            get_json(ctx, &target, self.name(), &format!("/api/v1/applications/{app}")).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -214,7 +214,7 @@ impl Tool for RollbackTool {
         })?;
         let hypothesis = args["hypothesis"].as_str().map(str::to_string);
 
-        let (target, _auth) = ctx.resolve_resource(resource)?;
+        let target = ctx.resolve_resource(resource)?;
         // Synthetic, stable, descriptive command line — not literally
         // runnable shell, but exactly what the classifier/audit need: a
         // deterministic string naming the app and target revision (see
@@ -264,14 +264,6 @@ mod tests {
         }
     }
 
-    struct NoopPolicy;
-    #[async_trait]
-    impl PolicyExecute for NoopPolicy {
-        async fn execute(&self, _req: CommandRequest) -> crate::Result<PolicyOutcome> {
-            Ok(PolicyOutcome::EStopped)
-        }
-    }
-
     #[tokio::test]
     async fn list_apps_sends_bearer_auth() {
         let server = MockServer::start().await;
@@ -281,7 +273,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
             .mount(&server)
             .await;
-        let ctx = ctx_with_policy(&server.uri(), Some("tok"), Arc::new(NoopPolicy));
+        let (ctx, _dir) = crate::tools::endpoint_test_ctx(target(), &server.uri(), Some("tok"));
         let r = ListAppsTool.call(&ctx, json!({"resource": target().to_string()})).await.unwrap();
         assert!(r.output.contains("items"));
     }
@@ -297,7 +289,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let ctx = ctx_with_policy(&server.uri(), None, Arc::new(NoopPolicy));
+        let (ctx, _dir) = crate::tools::endpoint_test_ctx(target(), &server.uri(), None);
         let r = SyncStatusTool
             .call(&ctx, json!({"resource": target().to_string(), "app": "api-service"}))
             .await
@@ -313,7 +305,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
             .mount(&server)
             .await;
-        let ctx = ctx_with_policy(&server.uri(), None, Arc::new(NoopPolicy));
+        let (ctx, _dir) = crate::tools::endpoint_test_ctx(target(), &server.uri(), None);
         let err =
             ListAppsTool.call(&ctx, json!({"resource": target().to_string()})).await.unwrap_err();
         match err {

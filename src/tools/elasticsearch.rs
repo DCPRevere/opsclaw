@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::domain::RiskClass;
-use crate::tools::endpoint::{get_json, post_json};
+use crate::tools::endpoint::{get_json, query_json};
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
 
@@ -68,13 +68,13 @@ impl Tool for ElasticsearchSearchTool {
         })?;
         let size = args["size"].as_i64().unwrap_or(20);
 
-        let (_, auth) = ctx.resolve_resource(resource)?;
+        let target = ctx.resolve_resource(resource)?;
         let mut body = query;
         if let Value::Object(map) = &mut body {
             map.entry("size").or_insert(json!(size));
         }
         let result =
-            post_json(auth, self.name(), &format!("/{index}/_search"), &body).await?;
+            query_json(ctx, &target, self.name(), &format!("/{index}/_search"), &body).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -128,8 +128,8 @@ impl Tool for ElasticsearchIndexStatsTool {
                 "elasticsearch_index_stats requires an \"index\" argument".to_string(),
             )
         })?;
-        let (_, auth) = ctx.resolve_resource(resource)?;
-        let result = get_json(auth, self.name(), &format!("/{index}/_stats")).await?;
+        let target = ctx.resolve_resource(resource)?;
+        let result = get_json(ctx, &target, self.name(), &format!("/{index}/_stats")).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -177,8 +177,8 @@ impl Tool for ElasticsearchClusterHealthTool {
                 "elasticsearch_cluster_health requires a \"resource\" argument".to_string(),
             )
         })?;
-        let (_, auth) = ctx.resolve_resource(resource)?;
-        let result = get_json(auth, self.name(), "/_cluster/health").await?;
+        let target = ctx.resolve_resource(resource)?;
+        let result = get_json(ctx, &target, self.name(), "/_cluster/health").await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -186,20 +186,9 @@ impl Tool for ElasticsearchClusterHealthTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{FqTarget, Principal, ResourceType};
-    use crate::policy::{CommandRequest, PolicyExecute, PolicyOutcome};
-    use crate::tools::endpoint::{EndpointAuth, EndpointRegistry};
-    use std::sync::Arc;
+    use crate::domain::{FqTarget, ResourceType};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    struct NoopPolicy;
-    #[async_trait]
-    impl PolicyExecute for NoopPolicy {
-        async fn execute(&self, _req: CommandRequest) -> crate::Result<PolicyOutcome> {
-            Ok(PolicyOutcome::EStopped)
-        }
-    }
 
     fn target() -> FqTarget {
         FqTarget {
@@ -211,20 +200,11 @@ mod tests {
     }
 
     fn ctx_with(base_url: &str, token: Option<&str>) -> ToolCtx {
-        let mut reg = EndpointRegistry::new();
-        reg.insert(&target(), EndpointAuth::new(base_url, token.map(str::to_string)));
-        ToolCtx {
-            principal: Principal::Agent { job: None },
-            policy: Arc::new(NoopPolicy),
-            known_targets: vec![target()],
-            incidents: None,
-            approvals: None,
-            runbook_runs: None,
-            memory: None,
-            config: None,
-            endpoints: Some(Arc::new(reg)),
-            runbooks: None,
-        }
+        // Real Policy over a real EndpointExecutor (choke-point wiring in
+        // miniature) — reads here prove they survive e-stop/audit/scrub,
+        // not just that the HTTP path is right. The TempDir is the e-stop
+        // sentinel dir; dropping it leaves the sentinel absent = disengaged.
+        crate::tools::endpoint_test_ctx(target(), base_url, token).0
     }
 
     #[tokio::test]

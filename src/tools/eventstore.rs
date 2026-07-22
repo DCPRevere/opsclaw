@@ -66,9 +66,10 @@ impl Tool for ReadStreamTool {
             )
         })?;
         let count = args["count"].as_i64().unwrap_or(20);
-        let (_, auth) = ctx.resolve_resource(resource)?;
+        let target = ctx.resolve_resource(resource)?;
         let result = get_json(
-            auth,
+            ctx,
+            &target,
             self.name(),
             &format!("/streams/{stream}/head/backward/{count}?embed=body"),
         )
@@ -127,8 +128,8 @@ impl Tool for ProjectionStatusTool {
                 "eventstore_projection_status requires a \"name\" argument".to_string(),
             )
         })?;
-        let (_, auth) = ctx.resolve_resource(resource)?;
-        let result = get_json(auth, self.name(), &format!("/projection/{name}")).await?;
+        let target = ctx.resolve_resource(resource)?;
+        let result = get_json(ctx, &target, self.name(), &format!("/projection/{name}")).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }
@@ -136,20 +137,9 @@ impl Tool for ProjectionStatusTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{FqTarget, Principal, ResourceType};
-    use crate::policy::{CommandRequest, PolicyExecute, PolicyOutcome};
-    use crate::tools::endpoint::{EndpointAuth, EndpointRegistry};
-    use std::sync::Arc;
+    use crate::domain::{FqTarget, ResourceType};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    struct NoopPolicy;
-    #[async_trait]
-    impl PolicyExecute for NoopPolicy {
-        async fn execute(&self, _req: CommandRequest) -> crate::Result<PolicyOutcome> {
-            Ok(PolicyOutcome::EStopped)
-        }
-    }
 
     fn target() -> FqTarget {
         FqTarget {
@@ -161,20 +151,11 @@ mod tests {
     }
 
     fn ctx_with(base_url: &str, token: Option<&str>) -> ToolCtx {
-        let mut reg = EndpointRegistry::new();
-        reg.insert(&target(), EndpointAuth::new(base_url, token.map(str::to_string)));
-        ToolCtx {
-            principal: Principal::Agent { job: None },
-            policy: Arc::new(NoopPolicy),
-            known_targets: vec![target()],
-            incidents: None,
-            approvals: None,
-            runbook_runs: None,
-            memory: None,
-            config: None,
-            endpoints: Some(Arc::new(reg)),
-            runbooks: None,
-        }
+        // Real Policy over a real EndpointExecutor (choke-point wiring in
+        // miniature) — reads here prove they survive e-stop/audit/scrub,
+        // not just that the HTTP path is right. The TempDir is the e-stop
+        // sentinel dir; dropping it leaves the sentinel absent = disengaged.
+        crate::tools::endpoint_test_ctx(target(), base_url, token).0
     }
 
     #[tokio::test]

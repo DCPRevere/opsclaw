@@ -127,7 +127,9 @@ impl EndpointAuth {
 
     /// Apply this endpoint's auth scheme to a request: basic when a
     /// username is set, bearer when only a token is, nothing otherwise.
-    fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    /// `pub` because `targets::endpoint::EndpointExecutor` performs through
+    /// the same auth.
+    pub fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match (&self.username, &self.token) {
             (Some(user), password) => req.basic_auth(user, password.as_deref()),
             (None, Some(token)) => req.bearer_auth(token),
@@ -240,63 +242,90 @@ pub fn registry_from_config(
     Ok(registry)
 }
 
-/// Authenticated GET, JSON response. `path` is appended to `auth.base_url`
-/// as-is (callers build the full path including query string). Maps a
-/// non-2xx response to `ToolError::UserFacing` (the status/body is useful
-/// for the model to see and react to — a 404 vs a 500 mean different
-/// things), and a transport-level failure (connection refused, DNS,
-/// timeout) to `ToolError::Internal` with the standard do-not-retry framing
-/// — mirrors the executor-backed tools' error-splitting discipline exactly.
-pub async fn get_json(auth: &EndpointAuth, tool: &str, path: &str) -> Result<Value, ToolError> {
-    let req = auth.apply_auth(auth.client.get(format!("{}{path}", auth.base_url)));
-    let resp = req.send().await.map_err(|e| {
-        ToolError::Internal(format!(
-            "{tool} is temporarily unreachable ({e}) — do NOT retry it this turn"
-        ))
-    })?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        let snippet: String = body.chars().take(500).collect();
-        return Err(ToolError::UserFacing(format!(
-            "{tool} returned HTTP {} for {path}: {snippet}",
-            status.as_u16()
-        )));
-    }
-    resp.json::<Value>()
-        .await
-        .map_err(|e| ToolError::Internal(format!("{tool} returned unparseable JSON: {e}")))
+/// Endpoint GET through the POLICY CHOKE POINT, JSON response. Composes the
+/// canonical `endpoint-get <path>` line and submits it via `ctx.policy`
+/// exactly like an ssh command — so the read is e-stoppable, audited
+/// (begin/end, with the real path as the command), and its response body is
+/// scrubbed before it can enter LLM context. `path` is appended to the
+/// resource's base url as-is (callers build the full path including query
+/// string) and must not contain whitespace (the canonical line is
+/// whitespace-tokenized; `targets::endpoint::EndpointExecutor` enforces it).
+///
+/// Error mapping mirrors the executor-backed tools' splitting: a non-2xx is
+/// `ToolError::UserFacing` (a 404 vs a 500 mean different things to the
+/// model); transport failure is `ToolError::Internal` with the standard
+/// do-not-retry framing; a policy refusal (e-stop) is UserFacing and states
+/// plainly that the read did not run.
+pub async fn get_json(
+    ctx: &crate::tools::ToolCtx,
+    target: &FqTarget,
+    tool: &str,
+    path: &str,
+) -> Result<Value, ToolError> {
+    read_via_policy(ctx, target, tool, path, format!("endpoint-get {path}")).await
 }
 
-/// Authenticated POST with a JSON body, JSON response — same error-splitting
-/// as [`get_json`]. Used by read operations that are POST-shaped (an ES
-/// `_search` query body, a prometheus range query) but are NOT mutations —
-/// callers must not use this for anything that changes remote state; a
-/// mutation goes through `tools::executor::run_command`, never this helper.
-pub async fn post_json(
-    auth: &EndpointAuth,
+/// A POST-SHAPED READ (an ES `_search` body) through the policy choke
+/// point — same discipline as [`get_json`]. The executor's per-kind query
+/// allowlist guarantees this verb can never perform a mutation; anything
+/// that changes remote state goes through `tools::executor::run_command`
+/// with its own explicit vocabulary line, never this helper.
+pub async fn query_json(
+    ctx: &crate::tools::ToolCtx,
+    target: &FqTarget,
     tool: &str,
     path: &str,
     body: &Value,
 ) -> Result<Value, ToolError> {
-    let req = auth.apply_auth(auth.client.post(format!("{}{path}", auth.base_url)).json(body));
-    let resp = req.send().await.map_err(|e| {
-        ToolError::Internal(format!(
+    read_via_policy(ctx, target, tool, path, format!("endpoint-query {path} {body}")).await
+}
+
+async fn read_via_policy(
+    ctx: &crate::tools::ToolCtx,
+    target: &FqTarget,
+    tool: &str,
+    path: &str,
+    line: String,
+) -> Result<Value, ToolError> {
+    use crate::policy::{CommandRequest, PolicyOutcome};
+    let req = CommandRequest {
+        principal: ctx.principal.clone(),
+        tool: tool.to_string(),
+        target: target.clone(),
+        command: line,
+        declared_risk: crate::domain::RiskClass::Read,
+        hypothesis: None,
+        runbook: None,
+    };
+    match ctx.policy.execute(req).await {
+        Ok(PolicyOutcome::Executed(out)) if out.exit_code == 0 => serde_json::from_str(&out.stdout)
+            .map_err(|e| ToolError::Internal(format!("{tool} returned unparseable JSON: {e}"))),
+        Ok(PolicyOutcome::Executed(out)) => {
+            // The executor put "HTTP <status>: <body>" on stderr — surface
+            // it with the same shape the old direct client used.
+            let snippet: String = out.stderr.chars().take(520).collect();
+            Err(ToolError::UserFacing(format!("{tool} {path} failed: {snippet}")))
+        }
+        Ok(PolicyOutcome::Blocked { reason, .. }) => Err(ToolError::UserFacing(format!(
+            "blocked by policy: {reason}. This read did NOT run."
+        ))),
+        Ok(PolicyOutcome::EStopped) => Err(ToolError::UserFacing(
+            "blocked: the emergency stop is engaged — nothing executes anywhere right now."
+                .to_string(),
+        )),
+        // Unreachable by construction: the gate executes Read at every
+        // autonomy level. Fail loudly rather than pretend.
+        Ok(PolicyOutcome::NeedsApproval(id)) => Err(ToolError::Internal(format!(
+            "endpoint read unexpectedly queued for approval ({id}) — this is a bug"
+        ))),
+        // Transport failure surfaces as the executor's Err(Policy(
+        // "endpoint … unreachable")); engine faults land here too. Both get
+        // the do-not-retry framing so the model doesn't hammer a dead
+        // backend.
+        Err(e) => Err(ToolError::Internal(format!(
             "{tool} is temporarily unreachable ({e}) — do NOT retry it this turn"
-        ))
-    })?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        let snippet: String = body.chars().take(500).collect();
-        return Err(ToolError::UserFacing(format!(
-            "{tool} returned HTTP {} for {path}: {snippet}",
-            status.as_u16()
-        )));
+        ))),
     }
-    resp.json::<Value>()
-        .await
-        .map_err(|e| ToolError::Internal(format!("{tool} returned unparseable JSON: {e}")))
 }
 
 /// The shared client-builder base: a bounded per-request timeout — endpoint
@@ -327,11 +356,70 @@ mod tests {
         assert_eq!(a.base_url, "http://example.com");
     }
 
+    // ---- reads through the full choke point (policy → executor → HTTP) ----
+
+    use crate::audit::{AuditOutcome, AuditWriter};
+    use crate::db::AuditRepo;
+    use crate::db::memory::InMemoryDb;
+    use crate::domain::{Principal, ResourceType};
+    use crate::policy::{EStop, Policy, Scrubber};
+    use crate::targets::TargetExecutor;
+    use crate::targets::endpoint::EndpointExecutor;
+    use crate::tools::ToolCtx;
+    use std::sync::Arc;
+
+    struct ChokeFixture {
+        ctx: ToolCtx,
+        db: Arc<InMemoryDb>,
+        scrubber: Arc<Scrubber>,
+        target: FqTarget,
+        _estop_dir: tempfile::TempDir,
+    }
+
+    /// The PRODUCTION wiring in miniature: a real `Policy` over a real
+    /// `EndpointExecutor`, so these tests prove endpoint reads are
+    /// e-stoppable, audited, and scrubbed — not just that HTTP works.
+    fn choke(kind: ResourceType, rname: &str, a: EndpointAuth) -> ChokeFixture {
+        let db = Arc::new(InMemoryDb::new());
+        let dir = tempfile::tempdir().unwrap();
+        let estop = Arc::new(EStop::new(dir.path().join("estop"), db.clone()));
+        let scrubber = Arc::new(Scrubber::new());
+        let mut target = FqTarget::new("p", "e", "t");
+        target.resource = Some((kind, rname.into()));
+        let mut executors: std::collections::HashMap<String, Arc<dyn TargetExecutor>> =
+            std::collections::HashMap::new();
+        executors
+            .insert(target.to_string(), Arc::new(EndpointExecutor::new(kind, a.clone())));
+        let policy = Arc::new(Policy::new(
+            Arc::new(crate::config::Config::default()),
+            executors,
+            Arc::new(AuditWriter::new(db.clone())),
+            estop,
+            db.clone(),
+            scrubber.clone(),
+        ));
+        let mut registry = EndpointRegistry::new();
+        registry.insert(&target, a);
+        let ctx = ToolCtx {
+            principal: Principal::Agent { job: None },
+            policy,
+            known_targets: vec![target.clone()],
+            incidents: None,
+            approvals: None,
+            runbook_runs: None,
+            memory: None,
+            config: None,
+            endpoints: Some(Arc::new(registry)),
+            runbooks: None,
+        };
+        ChokeFixture { ctx, db, scrubber, target, _estop_dir: dir }
+    }
+
     #[tokio::test]
-    async fn get_json_sends_bearer_auth_and_parses_response() {
+    async fn get_json_goes_through_policy_and_lands_in_the_audit_chain() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/health"))
+            .and(path("/_cluster/health"))
             .and(header("authorization", "Bearer secret-token"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "green"})),
@@ -339,47 +427,76 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result =
-            get_json(&auth(&server.uri(), Some("secret-token")), "es", "/health")
-                .await
-                .unwrap();
+        let f = choke(
+            ResourceType::Elasticsearch,
+            "logs",
+            auth(&server.uri(), Some("secret-token")),
+        );
+        let result = get_json(&f.ctx, &f.target, "es", "/_cluster/health").await.unwrap();
         assert_eq!(result["status"], "green");
+
+        // The read is ON THE RECORD: audit-begin + audit-end, with the real
+        // path as the command and the resource-qualified fq target.
+        let records = f.db.range(0, 100).await.unwrap();
+        let outcomes: Vec<AuditOutcome> = records.iter().map(|r| r.outcome).collect();
+        assert!(outcomes.contains(&AuditOutcome::Begun), "{outcomes:?}");
+        assert!(outcomes.contains(&AuditOutcome::Executed), "{outcomes:?}");
+        assert!(records.iter().all(|r| r.command == "endpoint-get /_cluster/health"));
+        assert!(records.iter().all(|r| r.fq_target == f.target.to_string()));
     }
 
     #[tokio::test]
-    async fn get_json_without_token_sends_no_auth_header() {
+    async fn get_json_is_halted_by_an_engaged_estop() {
         let server = MockServer::start().await;
+        // expect(0): an e-stopped read must never reach the endpoint at all.
         Mock::given(method("GET"))
-            .and(path("/health"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(0)
             .mount(&server)
             .await;
 
-        // No `header("authorization", ...)` matcher — a request WITH an auth
-        // header would still match this mock (wiremock doesn't assert
-        // absence by default), so the real assertion is that the call
-        // succeeds with no token configured, proving the header is skipped
-        // without erroring.
-        let result =
-            get_json(&auth(&server.uri(), None), "es", "/health").await.unwrap();
-        assert_eq!(result["ok"], true);
+        let f = choke(ResourceType::Elasticsearch, "logs", auth(&server.uri(), None));
+        crate::db::ControlRepo::set_estop(f.db.as_ref(), true).await.unwrap();
+        let err = get_json(&f.ctx, &f.target, "es", "/_cluster/health").await.unwrap_err();
+        match err {
+            ToolError::UserFacing(msg) => assert!(msg.contains("emergency stop"), "{msg}"),
+            _ => panic!("expected UserFacing, got {err:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_json_response_body_is_scrubbed_before_reaching_the_caller() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_cluster/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"leaked": "the-es-password", "status": "green"}),
+            ))
+            .mount(&server)
+            .await;
+
+        let f = choke(ResourceType::Elasticsearch, "logs", auth(&server.uri(), None));
+        f.scrubber.register("ES_PASSWORD", "the-es-password");
+        let result = get_json(&f.ctx, &f.target, "es", "/_cluster/health").await.unwrap();
+        assert_eq!(result["leaked"], "<redacted:ES_PASSWORD>");
+        assert_eq!(result["status"], "green");
     }
 
     #[tokio::test]
     async fn non_2xx_becomes_user_facing_with_status_and_body() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/health"))
+            .and(path("/_cluster/health"))
             .respond_with(ResponseTemplate::new(503).set_body_string("cluster unavailable"))
             .mount(&server)
             .await;
 
-        let err =
-            get_json(&auth(&server.uri(), None), "es", "/health").await.unwrap_err();
+        let f = choke(ResourceType::Elasticsearch, "logs", auth(&server.uri(), None));
+        let err = get_json(&f.ctx, &f.target, "es", "/_cluster/health").await.unwrap_err();
         match err {
             ToolError::UserFacing(msg) => {
-                assert!(msg.contains("503"));
-                assert!(msg.contains("cluster unavailable"));
+                assert!(msg.contains("503"), "{msg}");
+                assert!(msg.contains("cluster unavailable"), "{msg}");
             }
             _ => panic!("expected UserFacing"),
         }
@@ -391,9 +508,9 @@ mod tests {
         // ordinary process — a reliable "nothing is listening here" target,
         // unlike dropping a MockServer (the OS can keep the socket usable
         // briefly after Drop, making that pattern flaky).
-        let err = get_json(&auth("http://127.0.0.1:1", None), "es", "/health")
-            .await
-            .unwrap_err();
+        let f =
+            choke(ResourceType::Elasticsearch, "logs", auth("http://127.0.0.1:1", None));
+        let err = get_json(&f.ctx, &f.target, "es", "/_cluster/health").await.unwrap_err();
         match err {
             ToolError::Internal(msg) => assert!(msg.contains("do NOT retry")),
             _ => panic!("expected Internal, got {err:?}"),
@@ -401,38 +518,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_json_sends_body_and_bearer_auth() {
+    async fn query_json_posts_body_with_auth_through_the_choke_point() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/query"))
+            .and(path("/logs/_search"))
             .and(header("authorization", "Bearer tok"))
+            .and(wiremock::matchers::body_json(serde_json::json!({"query": {"match_all": {}}})))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": []})),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"hits": []})),
             )
             .mount(&server)
             .await;
 
-        let body = serde_json::json!({"query": "up"});
+        let f = choke(ResourceType::Elasticsearch, "logs", auth(&server.uri(), Some("tok")));
+        let body = serde_json::json!({"query": {"match_all": {}}});
         let result =
-            post_json(&auth(&server.uri(), Some("tok")), "prometheus", "/query", &body)
-                .await
-                .unwrap();
-        assert_eq!(result["result"], serde_json::json!([]));
-    }
-
-    #[tokio::test]
-    async fn post_json_non_2xx_is_user_facing() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/query"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("bad promql"))
-            .mount(&server)
-            .await;
-        let err =
-            post_json(&auth(&server.uri(), None), "prometheus", "/query", &serde_json::json!({}))
-                .await
-                .unwrap_err();
-        assert!(matches!(err, ToolError::UserFacing(_)));
+            query_json(&f.ctx, &f.target, "es", "/logs/_search", &body).await.unwrap();
+        assert_eq!(result["hits"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -440,14 +542,15 @@ mod tests {
         let server = MockServer::start().await;
         // base64("elastic:hunter2")
         Mock::given(method("GET"))
-            .and(path("/health"))
+            .and(path("/_cluster/health"))
             .and(header("authorization", "Basic ZWxhc3RpYzpodW50ZXIy"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
             .mount(&server)
             .await;
 
         let a = auth(&server.uri(), Some("hunter2")).with_basic_user("elastic");
-        let result = get_json(&a, "es", "/health").await.unwrap();
+        let f = choke(ResourceType::Elasticsearch, "logs", a);
+        let result = get_json(&f.ctx, &f.target, "es", "/_cluster/health").await.unwrap();
         assert_eq!(result["ok"], true);
     }
 

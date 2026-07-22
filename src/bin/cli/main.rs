@@ -488,7 +488,7 @@ async fn dispatch(
             telegram_bot_token_env,
             deadman_url,
         } => {
-            let outcome = if yes {
+            if yes {
                 let opts = opsclaw::cli::onboard::NonInteractiveOptions {
                     openrouter_api_key_env,
                     models,
@@ -496,15 +496,19 @@ async fn dispatch(
                     telegram_bot_token_env,
                     deadman_url,
                 };
-                opsclaw::cli::onboard::run_non_interactive(&opts, cfg_path, home).await?
+                let outcome =
+                    opsclaw::cli::onboard::run_non_interactive(&opts, cfg_path, home).await?;
+                for line in &outcome.summary {
+                    println!("  {line}");
+                }
+                println!("config written to {}", outcome.config_path);
             } else {
+                // The interactive wizard narrates its own summary (and the
+                // chained follow-on stages) through the prompter — printing
+                // the outcome again here would just repeat it.
                 let mut prompter = StdioPrompter::new();
-                opsclaw::cli::onboard::run(&mut prompter, cfg_path, home).await?
-            };
-            for line in &outcome.summary {
-                println!("  {line}");
+                opsclaw::cli::onboard::run(&mut prompter, cfg_path, home).await?;
             }
-            println!("config written to {}", outcome.config_path);
         }
 
         Command::Doctor { json } => {
@@ -550,13 +554,17 @@ async fn dispatch(
         Command::Config { command } => match command {
             ConfigCommand::Project { command: ConfigProjectCommand::Add } => {
                 let mut prompter = StdioPrompter::new();
-                let project = opsclaw::cli::config_cmd::add_project(&mut prompter, cfg_path)?;
+                let store = opsclaw::config::SecretStore::open(home)?;
+                let project =
+                    opsclaw::cli::config_cmd::add_project(&mut prompter, cfg_path, &store)?;
                 println!("added project {:?} to {}", project.name, cfg_path.display());
+                println!("next: `opsclaw-cli doctor` to verify, then `opsclaw-cli daemon`.");
             }
             ConfigCommand::Resource { command: ConfigResourceCommand::Add } => {
                 let mut prompter = StdioPrompter::new();
+                let store = opsclaw::config::SecretStore::open(home)?;
                 let (target, resource) =
-                    opsclaw::cli::config_cmd::add_resource(&mut prompter, cfg_path)?;
+                    opsclaw::cli::config_cmd::add_resource(&mut prompter, cfg_path, &store)?;
                 println!(
                     "added {}::{} to {target} in {} (restart the daemon to pick it up)",
                     resource.rtype(),
@@ -1082,8 +1090,14 @@ fn read_secret_value(
 fn read_password_confirmed() -> opsclaw::Result<String> {
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
-        let first = rpassword::prompt_password("password (hidden): ")
+        // The 12-character rule lives in account_cmd::create; stating it in
+        // the prompt (and checking before the confirmation read) spares the
+        // operator typing a doomed password twice only to have it rejected.
+        let first = rpassword::prompt_password("password (min 12 characters; hidden): ")
             .map_err(|e| opsclaw::Error::other(format!("could not read hidden input: {e}")))?;
+        if first.len() < 12 {
+            return Err(opsclaw::Error::validation("password must be at least 12 characters"));
+        }
         let second = rpassword::prompt_password("confirm password: ")
             .map_err(|e| opsclaw::Error::other(format!("could not read hidden input: {e}")))?;
         if first != second {

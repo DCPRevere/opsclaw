@@ -437,10 +437,28 @@ async fn advance_and_save(deps: &SchedulerDeps, job: &mut Job, now: DateTime<Utc
 /// snapshotted into a `jobs` row — so editing a const here reaches every
 /// unedited seeded job on its very next tick, no migration.
 pub const RECORD_SCAN_PROMPT: &str = "record_scan";
-const DEFAULT_SCAN_PROMPT: &str = "Scan this target for anomalies: elevated error rates, resource pressure (CPU/memory/disk), \
-     crash-looping or flapping processes, and any log lines indicating a fault. Corroborate any \
-     single signal before treating it as a finding (an app health endpoint proves only that its \
-     own process loop is alive) — never open an incident on one weak signal alone.";
+// The checklist below is MANDATORY, not advisory, because a real scan
+// (2026-07-22) declared a cluster healthy while six pods in one namespace
+// were crash-looping at ~7,000 restarts: the model that run sampled one
+// namespace and leaned on aggregate metrics (Prometheus `up`) and log
+// search, neither of which surfaces a crashloop. A scan whose coverage
+// depends on the model's per-run whims is not a scan.
+const DEFAULT_SCAN_PROMPT: &str = "Run a full health scan of this target. The following checks are MANDATORY every scan, in \
+     this order, before any deeper digging:\n\
+     1. WORKLOAD SWEEP — enumerate workload state across the WHOLE target (for kubernetes: \
+     pods across ALL namespaces), and flag anything crash-looping, restarting excessively, \
+     failing to pull images, stuck initializing/terminating, or not ready. Aggregate metrics \
+     and log searches do NOT substitute for this sweep — a crash-looping pod can look healthy \
+     in both.\n\
+     2. RESOURCE PRESSURE — CPU, memory, and disk headroom, flagging anything saturated or \
+     trending toward exhaustion.\n\
+     3. FAULT SIGNALS — elevated error rates and log lines indicating a fault, using the \
+     target's configured metrics/log resources.\n\
+     Corroborate any single weak signal before treating it as a finding (an app health \
+     endpoint proves only that its own process loop is alive) — never open an incident on one \
+     weak signal alone. A LONG-STANDING fault is still a fault: report it with its age; do not \
+     dismiss it as pre-existing. End the report by stating what was checked (namespaces/areas \
+     covered), so a reader can see coverage, not just conclusions.";
 
 /// Resolve a routine key to its prompt TEXT from the code const. Unknown keys
 /// (a stale seeded row referencing a routine that no longer exists) resolve

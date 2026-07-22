@@ -890,6 +890,21 @@ impl Config {
             .unwrap_or(Autonomy::Suggest)
     }
 
+    /// Effective expected state for a target (target > env; default
+    /// `Running`). DESIGN §3 Config: an intentionally-stopped or ephemeral
+    /// target (remundo's sandbox goes NXDOMAIN when stopped, and is wiped
+    /// monthly) must be reasoned about as a STATE, not an outage — the
+    /// dispatch layer threads this into the agent's team context so an
+    /// unreachable expected-stopped target doesn't page.
+    pub fn expected_state_for(&self, project: &str, env: &str, target: &str) -> ExpectedState {
+        let p = self.projects.iter().find(|p| p.name == project);
+        let e = p.and_then(|p| p.envs.iter().find(|e| e.name == env));
+        let t = e.and_then(|e| e.targets.iter().find(|t| t.name == target));
+        t.and_then(|t| t.expected_state)
+            .or(e.and_then(|e| e.expected_state))
+            .unwrap_or(ExpectedState::Running)
+    }
+
     /// Loud refusal to boot on dangerous misconfig. Everything here fails
     /// CLOSED: nothing silently degrades toward more autonomy, more spend, or
     /// less security.

@@ -159,12 +159,34 @@ pub fn build_tool_ctx(deps: &DispatchDeps, principal: Principal) -> ToolCtx {
 /// prefix-cache ordering). Lists target NAMES only (never credentials —
 /// `ToolCtx.known_targets` already carries the trusted paths the model can
 /// pick from; this string is just orientation, not authorization).
-fn team_context_line(targets: &[FqTarget]) -> Option<String> {
+fn team_context_line(targets: &[FqTarget], config: &Config) -> Option<String> {
+    use crate::domain::ExpectedState;
     if targets.is_empty() {
         return None;
     }
-    let names: Vec<String> =
-        targets.iter().filter(|t| t.resource.is_none()).map(|t| t.to_string()).collect();
+    // Base targets, annotated with any non-Running expected_state (DESIGN §3
+    // Config: an intentionally-stopped target must not page — remundo's
+    // sandbox goes NXDOMAIN when stopped, a state, not an outage; the model
+    // needs to KNOW that to reason correctly, and to flag the inverse
+    // anomaly: an expected-stopped target that is actually up).
+    let names: Vec<String> = targets
+        .iter()
+        .filter(|t| t.resource.is_none())
+        .map(|t| {
+            match config.expected_state_for(&t.project, &t.env, &t.target) {
+                ExpectedState::Running => t.to_string(),
+                ExpectedState::Stopped => format!(
+                    "{t} [EXPECTED STOPPED — unreachable/NXDOMAIN is its normal state, not an \
+                     outage; do not open an incident for it being down, DO flag it if found \
+                     running]"
+                ),
+                ExpectedState::Ephemeral => format!(
+                    "{t} [EPHEMERAL — created and wiped routinely; absence or reset is normal, \
+                     not an incident]"
+                ),
+            }
+        })
+        .collect();
     if names.is_empty() {
         return None;
     }
@@ -222,7 +244,7 @@ impl JobComposer for AgentJobComposer {
         let principal = Principal::Agent { job: Some(job.id) };
         let ctx = build_tool_ctx(&self.deps, principal);
         let registry = tools::registry(&ctx, /* heartbeat = */ true);
-        let team_context = team_context_line(&ctx.known_targets);
+        let team_context = team_context_line(&ctx.known_targets, &self.deps.config);
 
         let agent_deps = AgentDeps {
             llm: self.deps.llm.clone(),
@@ -287,7 +309,7 @@ impl IngestAlert for WebhookIngest {
         let ctx = build_tool_ctx(&self.deps, principal);
         // Full registry, NOT heartbeat — an alert is interactive-priority.
         let registry = tools::registry(&ctx, /* heartbeat = */ false);
-        let team_context = team_context_line(&ctx.known_targets);
+        let team_context = team_context_line(&ctx.known_targets, &self.deps.config);
 
         let agent_deps = AgentDeps {
             llm: self.deps.llm.clone(),
@@ -370,7 +392,7 @@ impl ChatHandler for ChatTurn {
         // Full registry — chat IS the interactive path (same reasoning as
         // WebhookIngest: a human is on the other end).
         let registry = tools::registry(&ctx, /* heartbeat = */ false);
-        let team_context = team_context_line(&ctx.known_targets);
+        let team_context = team_context_line(&ctx.known_targets, &self.deps.config);
 
         let agent_deps = AgentDeps {
             llm: self.deps.llm.clone(),
@@ -767,16 +789,32 @@ mod tests {
     fn team_context_line_lists_base_targets_and_resource_addresses() {
         let config = test_config();
         let targets = known_targets_from_config(&config);
-        let line = team_context_line(&targets).unwrap();
+        let line = team_context_line(&targets, &config).unwrap();
         assert!(line.contains("remundo::prod::web-1"));
         // Resource-qualified addresses ARE listed — the endpoint tools take
         // the full form and the model can't guess it from the base path.
         assert!(line.contains("remundo::prod::web-1::prometheus::metrics"), "{line}");
+        // Default expected_state (Running) gets no annotation noise.
+        assert!(!line.contains("EXPECTED STOPPED"), "{line}");
+    }
+
+    #[test]
+    fn team_context_line_annotates_non_running_expected_state() {
+        let mut config = test_config();
+        config.projects[0].envs[0].targets[0].expected_state =
+            Some(crate::domain::ExpectedState::Stopped);
+        let targets = known_targets_from_config(&config);
+        let line = team_context_line(&targets, &config).unwrap();
+        // The stopped target carries the do-not-page framing, including the
+        // inverse anomaly (found running when it should be stopped).
+        assert!(line.contains("EXPECTED STOPPED"), "{line}");
+        assert!(line.contains("not an outage"), "{line}");
+        assert!(line.contains("found running"), "{line}");
     }
 
     #[test]
     fn team_context_line_is_none_for_no_targets() {
-        assert!(team_context_line(&[]).is_none());
+        assert!(team_context_line(&[], &Config::default()).is_none());
     }
 
     // -----------------------------------------------------------------

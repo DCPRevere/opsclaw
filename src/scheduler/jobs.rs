@@ -63,10 +63,15 @@ impl JobComposer for NoopComposer {
 const JOB_COMPOSE_CONCURRENCY: usize = 4;
 
 /// Hard ceiling on a single job's compose. One wedged job (a provider stall,
-/// a pathological tool loop) must not hold the tick or its concurrency slot
-/// open indefinitely — past this the compose is abandoned and the occurrence
-/// is treated as "produced nothing" (released, retried with backoff).
-const COMPOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// a pathological tool loop) must not hold its concurrency slot open
+/// indefinitely — past this the compose is abandoned and the occurrence is
+/// treated as "produced nothing" (released, retried with backoff). Sized for
+/// the agent-backed composer: a scan is a full diagnose cycle (up to
+/// MAX_STEPS_HEARTBEAT tool calls against a live cluster), which routinely
+/// needs several minutes — 90s aborted every real scan. The jobs lane is
+/// separate from the alerts lane, so a long compose no longer delays the
+/// dead-man ping; this only bounds true wedges.
+const COMPOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Give up on a failing one-shot job occurrence after this long. Past this
 /// the occurrence is dead-lettered (the one-shot disabled) and the operator

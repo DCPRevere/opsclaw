@@ -72,6 +72,15 @@ pub fn router(state: AppState) -> Router {
         .merge(webhooks::router())
         .merge(config_ui::router())
         .layer(cors_layer())
+        // Response logging lives in a from_fn (inside the TraceLayer span, so
+        // it carries trace_id/account) rather than TraceLayer's on_response,
+        // because on_response cannot see the request path — and the path is
+        // what decides the level: the web tab polls /api/status every 15s,
+        // and at INFO that poll was >95% of the journal, burying real
+        // warnings (this is how live retain failures went unnoticed for
+        // hours). Health-poll success logs at DEBUG; everything else keeps
+        // its level.
+        .layer(axum::middleware::from_fn(log_response))
         // Operability: every request runs inside a `trace_id`-bearing span
         // so downstream logs for one turn share an id an operator can grep
         // on. Identity fields start Empty and are filled by `authenticate`
@@ -89,22 +98,7 @@ pub fn router(state: AppState) -> Router {
                         session = tracing::field::Empty,
                     )
                 })
-                .on_response(
-                    |res: &axum::http::Response<_>,
-                     latency: std::time::Duration,
-                     _: &tracing::Span| {
-                        let status = res.status().as_u16();
-                        let latency_ms = latency.as_millis() as u64;
-                        const SLOW_MS: u64 = 3000;
-                        if status >= 500 {
-                            tracing::warn!(status, latency_ms, "request failed (5xx)");
-                        } else if latency_ms >= SLOW_MS {
-                            tracing::warn!(status, latency_ms, "request slow");
-                        } else {
-                            tracing::info!(status, latency_ms, "request");
-                        }
-                    },
-                ),
+                .on_response(()),
         )
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
@@ -186,6 +180,34 @@ fn security_header(
         name,
         axum::http::HeaderValue::from_static(value),
     )
+}
+
+/// Per-request outcome log. Runs INSIDE the TraceLayer span (layer order:
+/// TraceLayer wraps this middleware), so every line carries trace_id and the
+/// identity fields. Successful `/api/status` polls log at DEBUG — the web tab
+/// fires one every 15s, and at INFO that heartbeat was effectively the whole
+/// journal; failures and slow responses stay loud regardless of path.
+async fn log_response(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_health_poll =
+        req.method() == axum::http::Method::GET && req.uri().path() == "/api/status";
+    let started = std::time::Instant::now();
+    let res = next.run(req).await;
+    let status = res.status().as_u16();
+    let latency_ms = started.elapsed().as_millis() as u64;
+    const SLOW_MS: u64 = 3000;
+    if status >= 500 {
+        tracing::warn!(status, latency_ms, "request failed (5xx)");
+    } else if latency_ms >= SLOW_MS {
+        tracing::warn!(status, latency_ms, "request slow");
+    } else if is_health_poll && status < 400 {
+        tracing::debug!(status, latency_ms, "request");
+    } else {
+        tracing::info!(status, latency_ms, "request");
+    }
+    res
 }
 
 /// The correlation id for a request: honour an inbound `x-request-id`

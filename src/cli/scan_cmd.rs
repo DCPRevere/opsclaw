@@ -39,27 +39,13 @@ fn scan_prompt(target: &FqTarget) -> String {
     )
 }
 
-/// Run one manual scan. `target` is the `project::env::target` path and must
-/// be configured — an unknown path is refused with the valid choices listed,
+/// Run one manual scan. `target` accepts the full `project::env::target`
+/// path OR any unambiguous suffix of it (`env/target`, bare `target` —
+/// brief §4's prefix fallbacks, resolved by `Config::resolve_target_str`);
+/// an unknown or ambiguous string is refused with the valid choices listed,
 /// same courtesy the tools' own resolve errors give the model.
 pub async fn run(state: &AppState, target: &str) -> Result<ScanOutcome> {
-    let fq = FqTarget::parse(target)?;
-    let known: Vec<String> = state
-        .config
-        .projects
-        .iter()
-        .flat_map(|p| {
-            p.envs.iter().flat_map(move |e| {
-                e.targets.iter().map(move |t| format!("{}::{}::{}", p.name, e.name, t.name))
-            })
-        })
-        .collect();
-    if !known.iter().any(|k| *k == fq.to_string()) {
-        return Err(crate::Error::validation(format!(
-            "no configured target {target:?} — configured targets: {}",
-            if known.is_empty() { "(none)".to_string() } else { known.join(", ") }
-        )));
-    }
+    let fq = state.config.resolve_target_str(target)?;
 
     let prompt = scan_prompt(&fq);
     let job = Job::new(

@@ -942,6 +942,55 @@ impl Config {
             .unwrap_or(ExpectedState::Running)
     }
 
+    /// Resolve an operator-typed target string with unambiguous-prefix
+    /// fallbacks (brief §4: "`opsclaw ssh web-1` works if there's only one
+    /// project/env"). Accepted forms, `::`- or `/`-separated: the full
+    /// `project::env::target`, `env::target`, or a bare `target` name —
+    /// each resolves iff it matches EXACTLY one configured target; zero
+    /// matches list every valid path, several list the ambiguous
+    /// candidates so the operator can type one more segment.
+    pub fn resolve_target_str(&self, s: &str) -> Result<crate::domain::FqTarget> {
+        let s = s.trim();
+        let parts: Vec<&str> = if s.contains("::") {
+            s.split("::").collect()
+        } else {
+            s.split('/').collect()
+        };
+        let mut matches: Vec<(&str, &str, &str)> = Vec::new();
+        let mut all: Vec<String> = Vec::new();
+        for p in &self.projects {
+            for e in &p.envs {
+                for t in &e.targets {
+                    all.push(format!("{}::{}::{}", p.name, e.name, t.name));
+                    let hit = match parts.as_slice() {
+                        [t1] => t.name == *t1,
+                        [e1, t1] => e.name == *e1 && t.name == *t1,
+                        [p1, e1, t1] => p.name == *p1 && e.name == *e1 && t.name == *t1,
+                        _ => false,
+                    };
+                    if hit {
+                        matches.push((&p.name, &e.name, &t.name));
+                    }
+                }
+            }
+        }
+        match matches.as_slice() {
+            [(p, e, t)] => Ok(crate::domain::FqTarget::new(*p, *e, *t)),
+            [] => Err(Error::validation(format!(
+                "no configured target matches {s:?} — configured targets: {}",
+                if all.is_empty() { "(none)".to_string() } else { all.join(", ") }
+            ))),
+            several => Err(Error::validation(format!(
+                "{s:?} is ambiguous — type more of the path: {}",
+                several
+                    .iter()
+                    .map(|(p, e, t)| format!("{p}::{e}::{t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
+    }
+
     /// Loud refusal to boot on dangerous misconfig. Everything here fails
     /// CLOSED: nothing silently degrades toward more autonomy, more spend, or
     /// less security.
@@ -1294,6 +1343,58 @@ mod tests {
 
         store.set("jwt", "a-sufficiently-long-and-random-secret-value").unwrap();
         cfg.resolve_jwt_secret(&store).unwrap();
+    }
+
+    // --- unambiguous-prefix target addressing (brief §4) ---
+
+    #[test]
+    fn resolve_target_str_accepts_every_unambiguous_form() {
+        let cfg = parse(
+            r#"
+            [[project]]
+            name = "remundo"
+            [[project.env]]
+            name = "prod"
+            [[project.env.target]]
+            name = "web-1"
+            kind = "local"
+            [[project.env.target]]
+            name = "db"
+            kind = "local"
+            [[project.env]]
+            name = "staging"
+            [[project.env.target]]
+            name = "web-1"
+            kind = "local"
+            "#,
+        );
+        // Bare name, unique across the whole tree.
+        assert_eq!(cfg.resolve_target_str("db").unwrap().to_string(), "remundo::prod::db");
+        // env/target and env::target disambiguate a duplicated name.
+        assert_eq!(
+            cfg.resolve_target_str("prod/web-1").unwrap().to_string(),
+            "remundo::prod::web-1"
+        );
+        assert_eq!(
+            cfg.resolve_target_str("staging::web-1").unwrap().to_string(),
+            "remundo::staging::web-1"
+        );
+        // Full path always works.
+        assert_eq!(
+            cfg.resolve_target_str("remundo::prod::web-1").unwrap().to_string(),
+            "remundo::prod::web-1"
+        );
+
+        // Ambiguous bare name: refused, candidates listed.
+        let err = cfg.resolve_target_str("web-1").unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(err.contains("remundo::prod::web-1"), "{err}");
+        assert!(err.contains("remundo::staging::web-1"), "{err}");
+
+        // Unknown: refused, valid paths listed.
+        let err = cfg.resolve_target_str("nope").unwrap_err().to_string();
+        assert!(err.contains("no configured target"), "{err}");
+        assert!(err.contains("remundo::prod::db"), "{err}");
     }
 
     // --- ResourceCfg union type: per-kind shapes enforced at parse time ---

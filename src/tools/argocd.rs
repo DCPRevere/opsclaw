@@ -49,7 +49,6 @@ use crate::tools::endpoint::get_json;
 use crate::tools::executor::run_command;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
-
 /// List applications and their sync/health status for the fleet (or a
 /// filtered subset).
 pub struct ListAppsTool;

@@ -388,8 +388,7 @@ mod tests {
         target.resource = Some((kind, rname.into()));
         let mut executors: std::collections::HashMap<String, Arc<dyn TargetExecutor>> =
             std::collections::HashMap::new();
-        executors
-            .insert(target.to_string(), Arc::new(EndpointExecutor::new(kind, a.clone())));
+        executors.insert(target.to_string(), Arc::new(EndpointExecutor::new(kind, a.clone())));
         let policy = Arc::new(Policy::new(
             Arc::new(crate::config::Config::default()),
             executors,
@@ -427,11 +426,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let f = choke(
-            ResourceType::Elasticsearch,
-            "logs",
-            auth(&server.uri(), Some("secret-token")),
-        );
+        let f =
+            choke(ResourceType::Elasticsearch, "logs", auth(&server.uri(), Some("secret-token")));
         let result = get_json(&f.ctx, &f.target, "es", "/_cluster/health").await.unwrap();
         assert_eq!(result["status"], "green");
 
@@ -469,9 +465,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/_cluster/health"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"leaked": "the-es-password", "status": "green"}),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"leaked": "the-es-password", "status": "green"}),
+                ),
+            )
             .mount(&server)
             .await;
 
@@ -508,8 +506,7 @@ mod tests {
         // ordinary process — a reliable "nothing is listening here" target,
         // unlike dropping a MockServer (the OS can keep the socket usable
         // briefly after Drop, making that pattern flaky).
-        let f =
-            choke(ResourceType::Elasticsearch, "logs", auth("http://127.0.0.1:1", None));
+        let f = choke(ResourceType::Elasticsearch, "logs", auth("http://127.0.0.1:1", None));
         let err = get_json(&f.ctx, &f.target, "es", "/_cluster/health").await.unwrap_err();
         match err {
             ToolError::Internal(msg) => assert!(msg.contains("do NOT retry")),
@@ -524,16 +521,13 @@ mod tests {
             .and(path("/logs/_search"))
             .and(header("authorization", "Bearer tok"))
             .and(wiremock::matchers::body_json(serde_json::json!({"query": {"match_all": {}}})))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"hits": []})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"hits": []})))
             .mount(&server)
             .await;
 
         let f = choke(ResourceType::Elasticsearch, "logs", auth(&server.uri(), Some("tok")));
         let body = serde_json::json!({"query": {"match_all": {}}});
-        let result =
-            query_json(&f.ctx, &f.target, "es", "/logs/_search", &body).await.unwrap();
+        let result = query_json(&f.ctx, &f.target, "es", "/logs/_search", &body).await.unwrap();
         assert_eq!(result["hits"], serde_json::json!([]));
     }
 
@@ -567,8 +561,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pem = dir.path().join("ca.pem");
         std::fs::write(&pem, "not a certificate").unwrap();
-        let err =
-            auth("https://es.local", None).with_tls_options(Some(&pem), false).unwrap_err();
+        let err = auth("https://es.local", None).with_tls_options(Some(&pem), false).unwrap_err();
         assert!(err.to_string().contains("not a valid PEM"), "{err}");
     }
 

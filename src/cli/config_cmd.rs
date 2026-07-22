@@ -262,8 +262,8 @@ fn wizard_resource(p: &mut dyn Prompter) -> Result<ResourceCfg> {
     };
     // ArgoCD and Service Bus cannot function unauthenticated — their
     // variants make `credential` mandatory, so the wizard must too.
-    let cred_required = username.is_some()
-        || matches!(rtype, ResourceType::Argocd | ResourceType::AzureServiceBus);
+    let cred_required =
+        username.is_some() || matches!(rtype, ResourceType::Argocd | ResourceType::AzureServiceBus);
     let cred_question = match (username.is_some(), cred_required) {
         (true, _) => "password reference (env:VAR or store:KEY)",
         (false, true) => "token reference (env:VAR or store:KEY)",
@@ -288,12 +288,10 @@ fn wizard_resource(p: &mut dyn Prompter) -> Result<ResourceCfg> {
     // endpoints (ECK's self-signed CA) are the norm for ES, possible for
     // most of them. Skipped for plain http, and for Service Bus (always a
     // publicly-trusted Azure certificate; its variant has no TLS knobs).
-    let ask_tls =
-        url.starts_with("https://") && rtype != ResourceType::AzureServiceBus;
+    let ask_tls = url.starts_with("https://") && rtype != ResourceType::AzureServiceBus;
     let (ca_cert_path, insecure_tls) = if ask_tls {
         let ca = p.ask("custom CA certificate path (PEM; blank for system trust)", None)?;
-        let ca_cert_path =
-            if ca.is_empty() { None } else { Some(std::path::PathBuf::from(ca)) };
+        let ca_cert_path = if ca.is_empty() { None } else { Some(std::path::PathBuf::from(ca)) };
         let insecure_tls = if ca_cert_path.is_none() {
             p.confirm(
                 "DISABLE certificate verification? (only for a localhost port-forward hop)",
@@ -385,10 +383,7 @@ pub fn add_resource(p: &mut dyn Prompter, config_path: &Path) -> Result<(String,
         .and_then(|pr| pr.envs.iter_mut().find(|e| e.name == env))
         .and_then(|e| e.targets.iter_mut().find(|t| t.name == tgt))
         .expect("chosen from the listed paths");
-    if target
-        .resources
-        .iter()
-        .any(|r| r.rtype() == resource.rtype() && r.name() == resource.name())
+    if target.resources.iter().any(|r| r.rtype() == resource.rtype() && r.name() == resource.name())
     {
         return Err(crate::Error::Config(format!(
             "resource {}::{} already exists on {chosen} — edit it by hand or pick another name",
@@ -575,14 +570,14 @@ mod tests {
         let config_path = seeded_config(dir.path());
 
         let mut p = ScriptedPrompter::new([
-            "remundo::sandbox::cluster",  // attach to target
-            "elasticsearch",              // type
-            "logs",                       // name
-            "https://localhost:9201",     // url
-            "elastic",                    // basic-auth username
-            "store:es-password",          // password reference
-            "",                           // custom CA path: none
-            "y",                          // disable cert verification (port-forward hop)
+            "remundo::sandbox::cluster", // attach to target
+            "elasticsearch",             // type
+            "logs",                      // name
+            "https://localhost:9201",    // url
+            "elastic",                   // basic-auth username
+            "store:es-password",         // password reference
+            "",                          // custom CA path: none
+            "y",                         // disable cert verification (port-forward hop)
         ]);
         let (target, resource) = add_resource(&mut p, &config_path).unwrap();
         assert_eq!(target, "remundo::sandbox::cluster");
@@ -599,10 +594,7 @@ mod tests {
         };
         assert_eq!(es.name, "logs");
         assert_eq!(es.username.as_deref(), Some("elastic"));
-        assert_eq!(
-            es.credential.as_ref().map(|c| c.to_string()),
-            Some("store:es-password".into())
-        );
+        assert_eq!(es.credential.as_ref().map(|c| c.to_string()), Some("store:es-password".into()));
         assert!(es.insecure_tls);
         reloaded.validate().unwrap();
     }
@@ -634,13 +626,8 @@ mod tests {
     fn add_resource_rejects_duplicate_and_leaves_file_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = seeded_config(dir.path());
-        let answers = [
-            "remundo::sandbox::cluster",
-            "prometheus",
-            "metrics",
-            "http://localhost:9090",
-            "",
-        ];
+        let answers =
+            ["remundo::sandbox::cluster", "prometheus", "metrics", "http://localhost:9090", ""];
         let mut p1 = ScriptedPrompter::new(answers);
         add_resource(&mut p1, &config_path).unwrap();
         let mut p2 = ScriptedPrompter::new(answers);

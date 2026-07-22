@@ -12,7 +12,6 @@ use crate::domain::RiskClass;
 use crate::tools::endpoint::get_json;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
-
 /// Read events from a stream (most recent first, capped) — the
 /// synchroniser-lag diagnostic starting point (REMUNDO.md: "Synchroniser
 /// lag: position vs head").

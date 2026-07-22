@@ -10,7 +10,6 @@ use crate::domain::RiskClass;
 use crate::tools::endpoint::get_json;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
-
 /// A single point-in-time PromQL evaluation.
 pub struct InstantQueryTool;
 

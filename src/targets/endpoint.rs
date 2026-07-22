@@ -65,8 +65,7 @@ impl EndpointExecutor {
     ) -> Result<ExecOutput> {
         let started = std::time::Instant::now();
         let url = format!("{}{path}", self.auth.base_url);
-        let mut req =
-            self.auth.apply_auth(self.auth.client.request(method, &url)).timeout(timeout);
+        let mut req = self.auth.apply_auth(self.auth.client.request(method, &url)).timeout(timeout);
         if let Some(b) = body {
             req = req.json(&b);
         }
@@ -120,9 +119,9 @@ fn read_path_allowed(kind: ResourceType, path: &str) -> std::result::Result<(), 
         return Err(format!("endpoint path {path:?} contains {f:?} — not a read"));
     }
     match kind {
-        ResourceType::Elasticsearch
-        | ResourceType::Eventstore
-        | ResourceType::AzureServiceBus => Ok(()),
+        ResourceType::Elasticsearch | ResourceType::Eventstore | ResourceType::AzureServiceBus => {
+            Ok(())
+        }
         ResourceType::Prometheus | ResourceType::Argocd => {
             if path.starts_with("/api/v1/") {
                 Ok(())
@@ -171,11 +170,8 @@ impl TargetExecutor for EndpointExecutor {
                 // The body is everything after the path, verbatim (JSON has
                 // spaces; re-join what whitespace-split tore apart is wrong
                 // — slice the original line instead).
-                let body_start = cmd
-                    .line
-                    .find(path)
-                    .map(|i| i + path.len())
-                    .unwrap_or(cmd.line.len());
+                let body_start =
+                    cmd.line.find(path).map(|i| i + path.len()).unwrap_or(cmd.line.len());
                 let raw = cmd.line[body_start..].trim();
                 let body: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
                     crate::Error::Policy(format!("endpoint-query body is not valid JSON: {e}"))
@@ -324,7 +320,9 @@ mod tests {
         let ex = exec(ResourceType::Elasticsearch, &server.uri(), None);
         let out = ex
             .run(
-                &cmd(r#"endpoint-query /logs-2026/_search {"query": {"match_all": {}}, "size": 5}"#),
+                &cmd(
+                    r#"endpoint-query /logs-2026/_search {"query": {"match_all": {}}, "size": 5}"#,
+                ),
                 Duration::from_secs(5),
             )
             .await
@@ -341,10 +339,7 @@ mod tests {
         // differently).
         let ex = exec(ResourceType::Elasticsearch, "http://127.0.0.1:1", None);
         let err = ex
-            .run(
-                &cmd(r#"endpoint-query /logs-2026/_doc {"evil": true}"#),
-                Duration::from_secs(1),
-            )
+            .run(&cmd(r#"endpoint-query /logs-2026/_doc {"evil": true}"#), Duration::from_secs(1))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("_search"), "{err}");
@@ -360,18 +355,14 @@ mod tests {
         assert!(err.to_string().contains("not a read"), "{err}");
 
         let prom = exec(ResourceType::Prometheus, "http://127.0.0.1:1", None);
-        let err = prom
-            .run(&cmd("endpoint-get /-/quit"), Duration::from_secs(1))
-            .await
-            .unwrap_err();
+        let err = prom.run(&cmd("endpoint-get /-/quit"), Duration::from_secs(1)).await.unwrap_err();
         assert!(err.to_string().contains("/api/v1/"), "{err}");
     }
 
     #[tokio::test]
     async fn stub_kinds_have_no_read_vocabulary() {
         let ex = exec(ResourceType::Postgres, "http://127.0.0.1:1", None);
-        let err =
-            ex.run(&cmd("endpoint-get /anything"), Duration::from_secs(1)).await.unwrap_err();
+        let err = ex.run(&cmd("endpoint-get /anything"), Duration::from_secs(1)).await.unwrap_err();
         assert!(err.to_string().contains("no endpoint read vocabulary"), "{err}");
     }
 

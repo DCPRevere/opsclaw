@@ -86,18 +86,16 @@ impl Tool for CertTool {
     }
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError> {
-        let host = args["host"]
-            .as_str()
-            .ok_or_else(|| ToolError::UserFacing("cert requires a \"host\" argument".to_string()))?;
+        let host = args["host"].as_str().ok_or_else(|| {
+            ToolError::UserFacing("cert requires a \"host\" argument".to_string())
+        })?;
         let port = match args.get("port") {
             None | Some(Value::Null) => 443u16,
-            Some(v) => v
-                .as_u64()
-                .and_then(|p| u16::try_from(p).ok())
-                .filter(|p| *p != 0)
-                .ok_or_else(|| {
-                    ToolError::UserFacing(format!("invalid port {v} — expected 1-65535"))
-                })?,
+            Some(v) => {
+                v.as_u64().and_then(|p| u16::try_from(p).ok()).filter(|p| *p != 0).ok_or_else(
+                    || ToolError::UserFacing(format!("invalid port {v} — expected 1-65535")),
+                )?
+            }
         };
         let command = compose(host, port)?;
         let target = ctx.resolve_vantage(args["target"].as_str())?;
@@ -159,10 +157,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = CertTool
-            .call(
-                &ctx,
-                json!({"target": "remundo::prod::web-1", "host": "example.com;id"}),
-            )
+            .call(&ctx, json!({"target": "remundo::prod::web-1", "host": "example.com;id"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));

@@ -93,8 +93,7 @@ pub async fn edit(
     }
     let all = jobs.list().await?;
     let Some(mut job) = all.into_iter().find(|j| j.name == name) else {
-        let mut names: Vec<String> =
-            jobs.list().await?.into_iter().map(|j| j.name).collect();
+        let mut names: Vec<String> = jobs.list().await?.into_iter().map(|j| j.name).collect();
         names.sort();
         return Err(crate::Error::NotFound(format!(
             "no job named {name:?} — jobs: {}",
@@ -198,8 +197,7 @@ mod tests {
         JobRepo::insert(db.as_ref(), &seeded_scan_job("scan")).await.unwrap();
         let err = edit(db.as_ref(), "scan", None, None, None).await.unwrap_err();
         assert!(err.to_string().contains("nothing to change"), "{err}");
-        let err =
-            edit(db.as_ref(), "nope", Some("x".into()), None, None).await.unwrap_err();
+        let err = edit(db.as_ref(), "nope", Some("x".into()), None, None).await.unwrap_err();
         assert!(err.to_string().contains("no job named"), "{err}");
         assert!(err.to_string().contains("scan"), "names the valid jobs: {err}");
     }

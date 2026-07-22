@@ -24,7 +24,12 @@ pub struct CreateOutcome {
 
 /// Create an operator account. The password arrives already-acquired (the
 /// binary layer prompts hidden, same rule as `secret set`: never argv).
-pub async fn create(db: &Db, email: &str, display_name: &str, password: &str) -> Result<CreateOutcome> {
+pub async fn create(
+    db: &Db,
+    email: &str,
+    display_name: &str,
+    password: &str,
+) -> Result<CreateOutcome> {
     let email = email.trim().to_ascii_lowercase();
     if email.is_empty() || !email.contains('@') {
         return Err(crate::Error::validation(format!("{email:?} is not a usable email address")));

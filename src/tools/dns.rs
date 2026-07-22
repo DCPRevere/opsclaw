@@ -194,10 +194,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = DnsTool
-            .call(
-                &ctx,
-                json!({"target": "remundo::prod::web-1", "name": "example.com; rm -rf /"}),
-            )
+            .call(&ctx, json!({"target": "remundo::prod::web-1", "name": "example.com; rm -rf /"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));

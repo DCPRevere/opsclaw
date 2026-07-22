@@ -233,11 +233,8 @@ impl Policy {
             command = scrubbed_command,
             tool = approval.tool,
             target = approval.target,
-            hypothesis = if approval.hypothesis.is_empty() {
-                "(none stated)"
-            } else {
-                &approval.hypothesis
-            },
+            hypothesis =
+                if approval.hypothesis.is_empty() { "(none stated)" } else { &approval.hypothesis },
             id = approval.id,
             expires = approval.expires_at.format("%H:%M:%S"),
         );
@@ -377,7 +374,8 @@ impl Policy {
         // Block stands — observe means look, don't touch).
         let gated = match gate(risk, autonomy, req.runbook.is_some()) {
             Gate::Execute
-                if risk != RiskClass::Read && bounds_match(&self.config.policy.always_ask, &req) =>
+                if risk != RiskClass::Read
+                    && bounds_match(&self.config.policy.always_ask, &req) =>
             {
                 Gate::Approval
             }
@@ -522,9 +520,7 @@ impl Policy {
             self.executors
                 .get(&fq)
                 .or_else(|| self.executors.get(&Self::executor_key(target)))
-                .ok_or_else(|| {
-                    crate::Error::NotFound(format!("no executor configured for {fq}"))
-                })?
+                .ok_or_else(|| crate::Error::NotFound(format!("no executor configured for {fq}")))?
                 .clone()
         };
 
@@ -870,8 +866,7 @@ mod tests {
             p.forbidden_paths = vec!["/etc/shadow".into()];
         });
         let rig = rig_with(cfg, FakeExecutor::ok(""));
-        let out =
-            rig.policy.execute(request("cat /etc/shadow", RiskClass::Medium)).await.unwrap();
+        let out = rig.policy.execute(request("cat /etc/shadow", RiskClass::Medium)).await.unwrap();
         match out {
             PolicyOutcome::Blocked { reason, .. } => {
                 assert!(reason.contains("forbidden path"), "{reason}")
@@ -931,11 +926,8 @@ mod tests {
         let rig = rig_with(cfg, FakeExecutor::ok(""));
         // Medium (`systemctl start` classifies systemctl-mutate): the
         // config pre-approval carries it past suggest's queue.
-        let out = rig
-            .policy
-            .execute(request("systemctl start nginx", RiskClass::Medium))
-            .await
-            .unwrap();
+        let out =
+            rig.policy.execute(request("systemctl start nginx", RiskClass::Medium)).await.unwrap();
         assert!(matches!(out, PolicyOutcome::Executed(_)), "{out:?}");
         // High (`systemctl restart` classifies systemctl-disrupt — the
         // classifier raises past the declared Medium): never rides a
@@ -956,11 +948,8 @@ mod tests {
         });
         let rig = rig_with(cfg, FakeExecutor::ok(""));
         // Medium command matched by BOTH lists: always_ask must win.
-        let out = rig
-            .policy
-            .execute(request("systemctl start nginx", RiskClass::Medium))
-            .await
-            .unwrap();
+        let out =
+            rig.policy.execute(request("systemctl start nginx", RiskClass::Medium)).await.unwrap();
         assert!(matches!(out, PolicyOutcome::NeedsApproval(_)), "deny beats allow: {out:?}");
 
         // At observe, auto_approve must not unlock anything — the gate's
@@ -969,11 +958,8 @@ mod tests {
             p.auto_approve = vec!["shell".into()];
         });
         let rig = rig_with(cfg, FakeExecutor::ok(""));
-        let out = rig
-            .policy
-            .execute(request("systemctl start nginx", RiskClass::Medium))
-            .await
-            .unwrap();
+        let out =
+            rig.policy.execute(request("systemctl start nginx", RiskClass::Medium)).await.unwrap();
         assert!(matches!(out, PolicyOutcome::Blocked { .. }), "{out:?}");
     }
 

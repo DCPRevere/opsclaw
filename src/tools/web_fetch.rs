@@ -349,7 +349,9 @@ mod tests {
     async fn oversized_body_is_truncated_with_an_honest_marker() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("y".repeat(MAX_BODY_BYTES * 2)))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("y".repeat(MAX_BODY_BYTES * 2)),
+            )
             .mount(&server)
             .await;
 

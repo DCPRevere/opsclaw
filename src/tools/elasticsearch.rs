@@ -10,7 +10,6 @@ use crate::domain::RiskClass;
 use crate::tools::endpoint::{get_json, query_json};
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
-
 /// `_search` against an index or index pattern — the vocabulary for both
 /// read-model queries and log search (REMUNDO.md: same ES instance serves
 /// both).

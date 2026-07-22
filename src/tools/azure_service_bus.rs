@@ -19,7 +19,6 @@ use crate::domain::RiskClass;
 use crate::tools::endpoint::get_json;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
-
 /// Active + dead-letter message counts for a queue.
 pub struct QueueDepthTool;
 
@@ -72,8 +71,7 @@ impl Tool for QueueDepthTool {
         })?;
         let target = ctx.resolve_resource(resource)?;
         let result =
-            get_json(ctx, &target, self.name(), &format!("/{queue}?api-version=2021-05"))
-                .await?;
+            get_json(ctx, &target, self.name(), &format!("/{queue}?api-version=2021-05")).await?;
         Ok(ToolResult { output: result.to_string() })
     }
 }

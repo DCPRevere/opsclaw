@@ -137,7 +137,10 @@ fn check_secrets(cfg: &Config, opsclaw_home: &std::path::Path) -> Result<Vec<Che
                         refs.push((
                             format!(
                                 "resource {}::{}::{}/{}",
-                                project.name, env.name, target.name, res.name()
+                                project.name,
+                                env.name,
+                                target.name,
+                                res.name()
                             ),
                             r.clone(),
                         ));

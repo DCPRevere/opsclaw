@@ -125,9 +125,7 @@ async fn drive_one(
             // A FAILED send (an error return, not a crash) releases the
             // claim so the next tick retries this same occurrence instead
             // of the claim wedging the step silent for its whole window.
-            if let Err(re) =
-                deps.control.release(CLAIM_KIND_ESCALATION_NOTIFY, &key).await
-            {
+            if let Err(re) = deps.control.release(CLAIM_KIND_ESCALATION_NOTIFY, &key).await {
                 tracing::error!(
                     incident = %incident.id,
                     "failed to release escalation claim after send error: {re}"
@@ -142,10 +140,7 @@ async fn drive_one(
 /// match against the individual configured channels, `"*"` (or an unknown
 /// name, loudly) falling back to the broadcast fan-out — a typo'd contact
 /// must page everyone rather than nobody.
-fn contact_channel<'a>(
-    deps: &'a SchedulerDeps,
-    contact: &str,
-) -> &'a std::sync::Arc<dyn Channel> {
+fn contact_channel<'a>(deps: &'a SchedulerDeps, contact: &str) -> &'a std::sync::Arc<dyn Channel> {
     if contact != ESCALATION_BROADCAST {
         if let Some(ch) = deps.named_channels.iter().find(|c| c.name() == contact) {
             return ch;

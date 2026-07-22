@@ -238,8 +238,11 @@ mod tests {
 
     fn guard_with(cost_per_step: f64, cap: u32) -> (CostGuard, Arc<dyn AllRepos>) {
         let repos = Db::fake().repos();
-        let guard =
-            CostGuard::new(Arc::new(FixedCostLlm { cost_cents: cost_per_step }), repos.clone(), cap);
+        let guard = CostGuard::new(
+            Arc::new(FixedCostLlm { cost_cents: cost_per_step }),
+            repos.clone(),
+            cap,
+        );
         (guard, repos)
     }
 
@@ -323,11 +326,7 @@ mod tests {
             Ok(ChatStep {
                 text: Some("ok".into()),
                 tool_calls: Vec::new(),
-                usage: TokenUsage {
-                    input_tokens: 1_000_000,
-                    output_tokens: 0,
-                    cost_cents: None,
-                },
+                usage: TokenUsage { input_tokens: 1_000_000, output_tokens: 0, cost_cents: None },
             })
         }
         fn name(&self) -> &str {

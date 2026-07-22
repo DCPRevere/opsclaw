@@ -731,13 +731,13 @@ impl TryFrom<RawResourceCfg> for ResourceCfg {
         fn unused(rtype: ResourceType, name: &str, field: &str, why: &str) -> String {
             format!("{rtype} resource {name:?}: `{field}` is not used by {rtype} resources — {why}")
         }
-        let need_url = |why: &str| {
-            url.clone().ok_or_else(|| required(rtype, &name, "url", why))
-        };
+        let need_url = |why: &str| url.clone().ok_or_else(|| required(rtype, &name, "url", why));
 
         match rtype {
             ResourceType::Elasticsearch => {
-                let url = need_url("the base url (e.g. https://localhost:9201) is how the tool reaches it")?;
+                let url = need_url(
+                    "the base url (e.g. https://localhost:9201) is how the tool reaches it",
+                )?;
                 Ok(Self::Elasticsearch(EsResourceCfg {
                     name,
                     url,
@@ -748,7 +748,9 @@ impl TryFrom<RawResourceCfg> for ResourceCfg {
                 }))
             }
             ResourceType::Prometheus => {
-                let url = need_url("the base url (e.g. http://localhost:9090) is how the tool reaches it")?;
+                let url = need_url(
+                    "the base url (e.g. http://localhost:9090) is how the tool reaches it",
+                )?;
                 Ok(Self::Prometheus(PromResourceCfg {
                     name,
                     url,
@@ -759,7 +761,9 @@ impl TryFrom<RawResourceCfg> for ResourceCfg {
                 }))
             }
             ResourceType::Eventstore => {
-                let url = need_url("the HTTP API url (e.g. https://esdb.example:2113) is how the tool reaches it")?;
+                let url = need_url(
+                    "the HTTP API url (e.g. https://esdb.example:2113) is how the tool reaches it",
+                )?;
                 Ok(Self::Eventstore(EventstoreResourceCfg {
                     name,
                     url,
@@ -778,7 +782,9 @@ impl TryFrom<RawResourceCfg> for ResourceCfg {
                         "ArgoCD auth is a bearer token; set `credential` only",
                     ));
                 }
-                let url = need_url("the API url (e.g. https://argocd.example) is how the tool reaches it")?;
+                let url = need_url(
+                    "the API url (e.g. https://argocd.example) is how the tool reaches it",
+                )?;
                 let credential = credential.ok_or_else(|| {
                     required(
                         rtype,
@@ -820,7 +826,8 @@ impl TryFrom<RawResourceCfg> for ResourceCfg {
                         "the namespace endpoint presents a publicly-trusted Azure certificate",
                     ));
                 }
-                let url = need_url("the namespace endpoint, e.g. https://<ns>.servicebus.windows.net")?;
+                let url =
+                    need_url("the namespace endpoint, e.g. https://<ns>.servicebus.windows.net")?;
                 let credential = credential.ok_or_else(|| {
                     required(
                         rtype,
@@ -983,11 +990,8 @@ impl Config {
     /// candidates so the operator can type one more segment.
     pub fn resolve_target_str(&self, s: &str) -> Result<crate::domain::FqTarget> {
         let s = s.trim();
-        let parts: Vec<&str> = if s.contains("::") {
-            s.split("::").collect()
-        } else {
-            s.split('/').collect()
-        };
+        let parts: Vec<&str> =
+            if s.contains("::") { s.split("::").collect() } else { s.split('/').collect() };
         let mut matches: Vec<(&str, &str, &str)> = Vec::new();
         let mut all: Vec<String> = Vec::new();
         for p in &self.projects {
@@ -1097,7 +1101,9 @@ impl Config {
         ] {
             for entry in list {
                 if entry.trim().is_empty() {
-                    errs.push(format!("{name} contains an empty entry — it would match everything"));
+                    errs.push(format!(
+                        "{name} contains an empty entry — it would match everything"
+                    ));
                 } else if let Some((_, needle)) = entry.split_once(':')
                     && needle.trim().is_empty()
                 {
@@ -1516,12 +1522,21 @@ mod tests {
     #[test]
     fn resource_url_is_required_for_built_out_kinds() {
         for (fields, kind) in [
-            (r#"type = "prometheus"
-                name = "metrics""#, "prometheus"),
-            (r#"type = "elasticsearch"
-                name = "logs""#, "elasticsearch"),
-            (r#"type = "eventstore"
-                name = "main""#, "eventstore"),
+            (
+                r#"type = "prometheus"
+                name = "metrics""#,
+                "prometheus",
+            ),
+            (
+                r#"type = "elasticsearch"
+                name = "logs""#,
+                "elasticsearch",
+            ),
+            (
+                r#"type = "eventstore"
+                name = "main""#,
+                "eventstore",
+            ),
         ] {
             let err = parse_resource(fields).unwrap_err();
             assert!(err.contains("has no `url`"), "{kind}: {err}");

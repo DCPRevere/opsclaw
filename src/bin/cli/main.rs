@@ -1045,9 +1045,8 @@ fn read_secret_value(
 ) -> opsclaw::Result<String> {
     use std::io::IsTerminal;
     if let Some(var) = from_env {
-        return std::env::var(var).map_err(|_| {
-            opsclaw::Error::Config(format!("environment variable {var} is not set"))
-        });
+        return std::env::var(var)
+            .map_err(|_| opsclaw::Error::Config(format!("environment variable {var} is not set")));
     }
     if let Some(path) = from_file {
         let raw = std::fs::read_to_string(path)?;

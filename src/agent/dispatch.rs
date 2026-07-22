@@ -172,19 +172,17 @@ fn team_context_line(targets: &[FqTarget], config: &Config) -> Option<String> {
     let names: Vec<String> = targets
         .iter()
         .filter(|t| t.resource.is_none())
-        .map(|t| {
-            match config.expected_state_for(&t.project, &t.env, &t.target) {
-                ExpectedState::Running => t.to_string(),
-                ExpectedState::Stopped => format!(
-                    "{t} [EXPECTED STOPPED — unreachable/NXDOMAIN is its normal state, not an \
+        .map(|t| match config.expected_state_for(&t.project, &t.env, &t.target) {
+            ExpectedState::Running => t.to_string(),
+            ExpectedState::Stopped => format!(
+                "{t} [EXPECTED STOPPED — unreachable/NXDOMAIN is its normal state, not an \
                      outage; do not open an incident for it being down, DO flag it if found \
                      running]"
-                ),
-                ExpectedState::Ephemeral => format!(
-                    "{t} [EPHEMERAL — created and wiped routinely; absence or reset is normal, \
+            ),
+            ExpectedState::Ephemeral => format!(
+                "{t} [EPHEMERAL — created and wiped routinely; absence or reset is normal, \
                      not an incident]"
-                ),
-            }
+            ),
         })
         .collect();
     if names.is_empty() {
@@ -589,18 +587,16 @@ mod tests {
                         ssh_user: None,
                         ssh_known_hosts_path: None,
                         ssh_strict_host_key_checking: None,
-                        resources: vec![ResourceCfg::Prometheus(
-                            crate::config::PromResourceCfg {
-                                name: "metrics".into(),
-                                // Nothing in these tests connects — the url
-                                // just satisfies the typed variant.
-                                url: "http://localhost:9090".into(),
-                                credential: None,
-                                username: None,
-                                ca_cert_path: None,
-                                insecure_tls: false,
-                            },
-                        )],
+                        resources: vec![ResourceCfg::Prometheus(crate::config::PromResourceCfg {
+                            name: "metrics".into(),
+                            // Nothing in these tests connects — the url
+                            // just satisfies the typed variant.
+                            url: "http://localhost:9090".into(),
+                            credential: None,
+                            username: None,
+                            ca_cert_path: None,
+                            insecure_tls: false,
+                        })],
                     }],
                 }],
             }],

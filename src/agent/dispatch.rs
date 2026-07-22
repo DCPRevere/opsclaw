@@ -248,6 +248,7 @@ impl JobComposer for AgentJobComposer {
             llm: self.deps.llm.clone(),
             memory: self.deps.memory.clone(),
             heartbeat: true,
+            on_tool: None,
         };
 
         // A malformed/unclassified job prompt is a real failure the
@@ -343,6 +344,7 @@ impl IngestAlert for WebhookIngest {
             llm: self.deps.llm.clone(),
             memory: self.deps.memory.clone(),
             heartbeat: false,
+            on_tool: None,
         };
 
         // The payload is DATA: framed as an observation, never merged into
@@ -409,17 +411,88 @@ const TRANSCRIPT_KEEP_ENTRIES: usize = 30;
 pub struct ChatTurn {
     deps: DispatchDeps,
     transcript: std::sync::Mutex<Vec<Turn>>,
+    /// Durable side of the shared transcript (migration 0007). `None` only
+    /// in tests/fixtures that don't care — every real boot wires it, so a
+    /// restart no longer erases the team's chat history.
+    chat_log: Option<Arc<dyn crate::db::ChatRepo>>,
+    /// The SSE hub, when a web surface exists: BOTH sides of every turn
+    /// (whatever channel it arrived on — web, Telegram, CLI) plus the
+    /// agent's live tool calls are published here, so the web chat log is a
+    /// window onto the whole team conversation, not just web-originated
+    /// turns.
+    web: Option<Arc<crate::channels::web::WebHub>>,
 }
+
+/// Tool-call args longer than this are truncated for the chat surface (the
+/// full args are still in the LLM history and, for executed commands, the
+/// audit chain — this is a display bound, not a record).
+const TOOL_EVENT_ARGS_MAX: usize = 400;
 
 impl ChatTurn {
     pub fn new(deps: DispatchDeps) -> Self {
-        ChatTurn { deps, transcript: std::sync::Mutex::new(Vec::new()) }
+        ChatTurn { deps, transcript: std::sync::Mutex::new(Vec::new()), chat_log: None, web: None }
+    }
+
+    /// Wire the durable log and the live web hub (boot; builder-style so
+    /// fixtures that want a bare in-memory ChatTurn keep `new` unchanged).
+    pub fn with_surfaces(
+        mut self,
+        chat_log: Arc<dyn crate::db::ChatRepo>,
+        web: Arc<crate::channels::web::WebHub>,
+    ) -> Self {
+        self.chat_log = Some(chat_log);
+        self.web = Some(web);
+        self
+    }
+
+    /// Reload the replay transcript from the durable log (boot): the newest
+    /// user/assistant rows, re-framed exactly as `chat()` stores them
+    /// in-memory, so the first post-restart turn continues the conversation
+    /// instead of starting amnesiac. Tool rows are skipped — they were
+    /// never part of the replay transcript. Best-effort loud: a read
+    /// failure logs and leaves the transcript empty (the durable log is a
+    /// UX feature, not a boot dependency).
+    pub async fn hydrate(&self) {
+        let Some(log) = &self.chat_log else { return };
+        let rows = match log.recent_chat(TRANSCRIPT_KEEP_ENTRIES as i64 * 2).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "chat transcript hydrate failed — starting empty");
+                return;
+            }
+        };
+        let mut t = self.transcript.lock().expect("chat transcript lock poisoned");
+        for row in rows {
+            match row.role.as_str() {
+                "user" => {
+                    t.push(Turn::User { content: format!("{} said: {}", row.speaker, row.content) })
+                }
+                "assistant" => {
+                    t.push(Turn::Assistant { content: row.content, tool_calls: Vec::new() })
+                }
+                _ => {}
+            }
+        }
+        if t.len() > TRANSCRIPT_KEEP_ENTRIES {
+            let excess = t.len() - TRANSCRIPT_KEEP_ENTRIES;
+            t.drain(..excess);
+        }
     }
 
     /// A snapshot of the shared transcript (user/assistant text pairs) —
     /// what a chat surface renders as history on load.
     pub fn transcript(&self) -> Vec<Turn> {
         self.transcript.lock().expect("chat transcript lock poisoned").clone()
+    }
+
+    /// Append one row to the durable log, loudly best-effort (a full disk
+    /// must not fail the chat turn the operator is waiting on).
+    async fn log_row(&self, role: &str, speaker: &str, content: &str) {
+        if let Some(log) = &self.chat_log
+            && let Err(e) = log.append_chat(chrono::Utc::now(), role, speaker, content).await
+        {
+            tracing::warn!(error = %e, role, "chat log append failed — row lost");
+        }
     }
 }
 
@@ -432,10 +505,38 @@ impl ChatHandler for ChatTurn {
         let registry = tools::registry(&ctx, /* heartbeat = */ false);
         let team_context = team_context_line(&ctx.known_targets, &self.deps.config);
 
+        // Live tool visibility: each tool call the model makes is published
+        // to the SSE hub as it happens (role "tool") and collected for the
+        // durable log after the turn. Args are scrubbed (they pass through
+        // the model, not the audit sink, so the log-layer scrubber never
+        // saw them) and display-truncated.
+        let tool_rows: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let on_tool: Option<crate::agent::ToolObserver> = {
+            let rows = tool_rows.clone();
+            let web = self.web.clone();
+            Some(Arc::new(move |name: &str, args: &str| {
+                let mut shown = crate::policy::Scrubber::global().scrub(args);
+                if shown.len() > TOOL_EVENT_ARGS_MAX {
+                    let mut cut = TOOL_EVENT_ARGS_MAX;
+                    while !shown.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    shown.truncate(cut);
+                    shown.push('…');
+                }
+                if let Some(web) = &web {
+                    web.publish(crate::channels::web::WebEvent::chat("tool", name, &shown));
+                }
+                rows.lock().expect("tool rows lock poisoned").push((name.to_string(), shown));
+            }))
+        };
+
         let agent_deps = AgentDeps {
             llm: self.deps.llm.clone(),
             memory: self.deps.memory.clone(),
             heartbeat: false,
+            on_tool,
         };
 
         // Attribution framing (DESIGN §3 memory: `"{operator} said: …"`) —
@@ -450,6 +551,14 @@ impl ChatHandler for ChatTurn {
         let _turn = self.deps.turn_gate.lock().await;
         let prior = self.transcript.lock().expect("chat transcript lock poisoned").clone();
 
+        // The user's message is durable and broadcast BEFORE the turn runs
+        // (it happened regardless of whether the reply succeeds) — every
+        // web tab sees it immediately, whatever channel it arrived on.
+        self.log_row("user", speaker, message).await;
+        if let Some(web) = &self.web {
+            web.publish(crate::channels::web::WebEvent::chat("user", speaker, message));
+        }
+
         let reply = agent::run_turn_with_history(
             &agent_deps,
             &ctx,
@@ -459,6 +568,23 @@ impl ChatHandler for ChatTurn {
             &attributed,
         )
         .await?;
+
+        // Durable log: the tool calls in order, then the reply; broadcast
+        // the reply to every tab (the tool events already streamed live).
+        // Guard dropped before the awaits (std MutexGuard is not Send).
+        let rows: Vec<(String, String)> =
+            std::mem::take(&mut *tool_rows.lock().expect("tool rows lock poisoned"));
+        for (name, args) in rows {
+            self.log_row("tool", &name, &args).await;
+        }
+        self.log_row("assistant", "assistant", &reply.reply).await;
+        if let Some(web) = &self.web {
+            web.publish(crate::channels::web::WebEvent::chat(
+                "assistant",
+                "assistant",
+                &reply.reply,
+            ));
+        }
 
         {
             let mut t = self.transcript.lock().expect("chat transcript lock poisoned");
@@ -1170,6 +1296,67 @@ mod tests {
         match t.last().unwrap() {
             Turn::Assistant { content, .. } => assert_eq!(content, "ok"),
             other => panic!("expected assistant last, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_turn_persists_the_durable_log_streams_tools_and_hydrates() {
+        use crate::db::ChatRepo;
+
+        let mut scripted = ScriptedLlm::new();
+        // A tool call mid-turn (the name needn't resolve — the observer
+        // fires for what the model CALLS, resolution comes after), then the
+        // final reply.
+        scripted.push_tool_call("probe_pods", serde_json::json!({"ns": "monitoring"}));
+        scripted.push_text("all quiet");
+        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
+        let db = Arc::new(InMemoryDb::new());
+        let hub = Arc::new(crate::channels::web::WebHub::new());
+        let mut rx = hub.subscribe();
+        let chat = ChatTurn::new(test_deps(llm, policy)).with_surfaces(db.clone(), hub.clone());
+
+        let op = Principal::Operator { account: uuid::Uuid::new_v4() };
+        let reply = chat.chat(op, "alice", "check the cluster").await.unwrap();
+        assert_eq!(reply, "all quiet");
+
+        // Durable log: user, tool, assistant — in order, with attribution
+        // (the user row stores the RAW message; framing is replay-only).
+        let rows = db.recent_chat(10).await.unwrap();
+        let brief: Vec<(&str, &str)> =
+            rows.iter().map(|r| (r.role.as_str(), r.speaker.as_str())).collect();
+        assert_eq!(
+            brief,
+            vec![("user", "alice"), ("tool", "probe_pods"), ("assistant", "assistant")]
+        );
+        assert_eq!(rows[0].content, "check the cluster");
+        assert!(rows[1].content.contains("monitoring"), "{}", rows[1].content);
+
+        // Live stream saw all three as chat-kind events, tool included.
+        let mut roles = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            assert_eq!(ev.kind, "chat");
+            roles.push(ev.body["role"].as_str().unwrap().to_string());
+        }
+        assert_eq!(roles, vec!["user", "tool", "assistant"]);
+
+        // A fresh ChatTurn over the same store (a daemon restart) hydrates
+        // the REPLAY transcript: user/assistant only, re-framed.
+        let mut scripted2 = ScriptedLlm::new();
+        scripted2.push_text("unused");
+        let llm2: Arc<dyn LlmProvider> = Arc::new(scripted2);
+        let policy2: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
+        let rebooted = ChatTurn::new(test_deps(llm2, policy2))
+            .with_surfaces(db.clone(), Arc::new(crate::channels::web::WebHub::new()));
+        rebooted.hydrate().await;
+        let t = rebooted.transcript();
+        assert_eq!(t.len(), 2, "tool rows must not enter the replay transcript");
+        match (&t[0], &t[1]) {
+            (Turn::User { content: u }, Turn::Assistant { content: a, .. }) => {
+                assert_eq!(u, "alice said: check the cluster");
+                assert_eq!(a, "all quiet");
+            }
+            other => panic!("expected re-framed user + assistant, got {other:?}"),
         }
     }
 }

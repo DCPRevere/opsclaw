@@ -76,8 +76,26 @@
   .list-item .title strong { display: block; }
   .list-item .title span { color: var(--text-dim); font-size: .85rem; }
   #chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .5rem; margin-bottom: .6rem; }
-  .msg { max-width: 80%; padding: .5rem .7rem; border-radius: .6rem; background: var(--panel); border: 1px solid var(--border); }
+  .msgwrap { max-width: 80%; align-self: flex-start; }
+  .msgwrap.out { align-self: flex-end; }
+  .msg { padding: .5rem .7rem; border-radius: .6rem; background: var(--panel); border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msgwrap .msg { max-width: none; }
   .msg.out { align-self: flex-end; background: var(--accent); border-color: var(--accent); }
+  .msg pre { background: var(--panel-2); padding: .5rem; border-radius: .4rem; overflow-x: auto; white-space: pre; margin: .3rem 0; }
+  .msg code { font-family: ui-monospace, monospace; font-size: .88em; background: var(--panel-2); padding: 0 .2em; border-radius: .25em; }
+  .msg pre code { background: none; padding: 0; }
+  .msg a { color: inherit; text-decoration: underline; }
+  .msgmeta { display: flex; align-items: center; gap: .35rem; margin-top: .15rem; font-size: .75rem; color: var(--text-dim); opacity: 0; transition: opacity .15s; }
+  .msgwrap.out .msgmeta { flex-direction: row-reverse; }
+  .msgwrap:hover .msgmeta, .msgwrap:focus-within .msgmeta { opacity: 1; }
+  @media (hover: none) { .msgmeta { opacity: .6; } }
+  .msgbtn { background: none; border: 1px solid var(--border); border-radius: .3rem; color: var(--text-dim); cursor: pointer; padding: 0 .35rem; font-size: .8rem; line-height: 1.4; }
+  .msgbtn:hover { color: var(--text); }
+  .toolrow { align-self: stretch; font-size: .8rem; color: var(--text-dim); }
+  .toolrow summary { cursor: pointer; list-style: none; padding: .1rem .3rem; }
+  .toolrow summary::-webkit-details-marker { display: none; }
+  .toolrow .toolglyph { opacity: .7; }
+  .toolrow pre { background: var(--panel-2); border-radius: .4rem; padding: .4rem .5rem; margin: .2rem 0 .2rem 1.2rem; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
   #chat-form { display: flex; gap: .5rem; flex: none; }
   #chat-form input { flex: 1; }
   .approval-actions, .incident-actions { display: flex; gap: .5rem; margin-top: .5rem; }

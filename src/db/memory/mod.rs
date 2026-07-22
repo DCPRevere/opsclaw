@@ -9,6 +9,7 @@ mod accounts;
 mod approvals;
 mod audit;
 mod channel_state;
+mod chat;
 mod control;
 mod incidents;
 mod invites;
@@ -50,6 +51,8 @@ struct Store {
     /// Generic small durable channel state (the Telegram getUpdates offset
     /// today; kept general — see migration 0005's doc comment).
     channel_state: HashMap<String, String>,
+    /// The durable shared chat log (append-only; `seq` assigned on append).
+    chat_messages: Vec<crate::db::ChatMessage>,
 }
 
 /// A single in-memory store shared across all repo trait impls.

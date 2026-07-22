@@ -29,9 +29,9 @@ use opsclaw::audit::{AuditOutcome, AuditRecord};
 use opsclaw::db::memory::InMemoryDb;
 use opsclaw::db::sqlite::SqliteDb;
 use opsclaw::db::{
-    Account, AccountRepo, ApprovalRepo, AuditRepo, ChannelStateRepo, CliToken, ControlRepo,
-    IncidentRepo, Invite, InviteRepo, JobRepo, PushSubscription, PushSubscriptionRepo, RunbookRun,
-    RunbookRunRepo, StepOutcome, StepStatus, TokenRepo,
+    Account, AccountRepo, ApprovalRepo, AuditRepo, ChannelStateRepo, ChatRepo, CliToken,
+    ControlRepo, IncidentRepo, Invite, InviteRepo, JobRepo, PushSubscription, PushSubscriptionRepo,
+    RunbookRun, RunbookRunRepo, StepOutcome, StepStatus, TokenRepo,
 };
 use opsclaw::domain::{
     ApprovalRequest, ApprovalState, FqTarget, Incident, IncidentState, Job, Payload, Principal,
@@ -52,6 +52,7 @@ pub trait RepoSuite:
     + InviteRepo
     + PushSubscriptionRepo
     + ChannelStateRepo
+    + ChatRepo
 {
 }
 impl<T> RepoSuite for T where
@@ -66,6 +67,7 @@ impl<T> RepoSuite for T where
         + InviteRepo
         + PushSubscriptionRepo
         + ChannelStateRepo
+        + ChatRepo
 {
 }
 
@@ -874,6 +876,32 @@ channel_state_get_set_roundtrip_and_overwrites => |db| {
 
     // A DIFFERENT key is independent.
     assert!(db.get_channel_state("some:other:key").await.unwrap().is_none());
+}
+
+// ---- ChatRepo (migration 0007 — the durable shared chat transcript) ----
+
+chat_log_appends_in_order_and_pages_the_newest => |db| {
+    for i in 0..5 {
+        let role = if i % 2 == 0 { "user" } else { "assistant" };
+        db.append_chat(Utc::now(), role, "alice", &format!("m{i}")).await.unwrap();
+    }
+    db.append_chat(Utc::now(), "tool", "kubernetes", r#"{"command":"get pods"}"#).await.unwrap();
+
+    // Full read: every row, ascending seq (render order), content intact.
+    let all = db.recent_chat(50).await.unwrap();
+    assert_eq!(all.len(), 6);
+    assert!(all.windows(2).all(|w| w[0].seq < w[1].seq), "ascending seq");
+    assert_eq!(all[0].content, "m0");
+    assert_eq!((all[5].role.as_str(), all[5].speaker.as_str()), ("tool", "kubernetes"));
+
+    // Limited read: the NEWEST page, still ascending within it.
+    let page = db.recent_chat(2).await.unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0].content, "m4");
+    assert_eq!(page[1].role, "tool");
+
+    // A zero/negative limit is empty, not an error.
+    assert!(db.recent_chat(0).await.unwrap().is_empty());
 }
 
 }

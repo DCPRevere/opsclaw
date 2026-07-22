@@ -6,22 +6,21 @@
 // replay the now-expired/used ticket, so reconnection is manual with
 // capped exponential backoff, fetching a FRESH ticket each time.
 //
-// POST /api/chat + GET /api/chat/history land the real chat turn (the
-// input used to be disabled with an honest "not wired yet" placeholder —
-// see git history — now that `state.chat` is wired to the real agent
-// loop end to end).
-//
 // Render-source design call: chat messages render from the SSE `chat`
 // event ONLY, never a second time from the POST response body — the
-// gateway broadcasts BOTH the operator's own message and the reply to
-// every connected tab (`http::routes::chat`'s module doc: "web chat is a
-// team surface, one shared conversation"), including the sender's own tab.
-// Rendering from the POST response too would double the sender's own
-// message in their own log; a pending "…thinking" row is used instead so
-// the sender gets immediate feedback without a second render path to keep
-// in sync with the SSE one.
+// gateway broadcasts the operator's message, the agent's LIVE TOOL CALLS
+// (role "tool", published mid-turn by ChatTurn), and the reply to every
+// connected tab including the sender's own. A pending "…thinking" row
+// gives the sender immediate feedback without a second render path.
+//
+// Message affordances (gianna's copy button + selection-with-attribution,
+// plus opsclaw's own reply-quote): each bubble gets hover-revealed Copy and
+// Reply buttons; selecting across multiple bubbles copies a speaker-
+// labelled transcript. Assistant text renders through format.js's
+// escape-first markdown (never raw model HTML); user text stays plain.
 import { api, escapeHtml } from './api.js';
 import { state } from './state.js';
+import { renderMarkdown, asDate, fmtTime } from './format.js';
 
 let evtSource = null;
 let streamConnecting = false;
@@ -48,20 +47,25 @@ export async function openStream() {
   evtSource.addEventListener('message', (e) => {
     let ev = {};
     try { ev = JSON.parse(e.data); } catch (_) { return; }
-    addMsg(ev.body && ev.body.text ? ev.body.text : JSON.stringify(ev.body), 'in');
+    addMsg({ role: 'assistant', content: ev.body && ev.body.text ? ev.body.text : JSON.stringify(ev.body) });
   });
   // Chat-kind events (`channels::web::WebEvent::chat`): every operator's
-  // message and every reply arrives here, including this tab's own —
-  // see the module doc above for why that's the ONLY render path. Only an
-  // ASSISTANT reply clears this tab's own pending row — a `user` event can
-  // be another operator's concurrent message (DESIGN: shared team chat),
-  // which must not swallow this tab's own in-flight "thinking…" indicator.
+  // message, every mid-turn tool call, and every reply arrives here,
+  // including this tab's own. Only an ASSISTANT reply clears this tab's own
+  // pending row — a `user` event can be another operator's concurrent
+  // message and a `tool` event means the turn is still running (the
+  // pending row stays below the streaming tool rows).
   evtSource.addEventListener('chat', (e) => {
     let ev = {};
     try { ev = JSON.parse(e.data); } catch (_) { return; }
     const body = ev.body || {};
     if (body.role === 'assistant') clearPending();
-    addMsg(body.text || '', body.role === 'assistant' ? 'in' : 'out', body.speaker);
+    addMsg({ role: body.role || 'assistant', speaker: body.speaker, content: body.text || '' });
+    if (body.role !== 'assistant' && pendingRow) {
+      // Keep the thinking row anchored at the bottom while tool rows stream in.
+      pendingRow.parentNode.appendChild(pendingRow);
+      pendingRow.parentNode.scrollTop = pendingRow.parentNode.scrollHeight;
+    }
   });
   evtSource.onerror = () => {
     evtSource.close();
@@ -75,14 +79,88 @@ export function closeStream() {
   if (streamRetryTimer) { clearTimeout(streamRetryTimer); streamRetryTimer = null; }
 }
 
-function addMsg(text, dir, speaker) {
+// Write `text` to the clipboard: async API in secure contexts, hidden-
+// textarea fallback otherwise (gianna's copyText).
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).catch(() => {});
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } catch (_) {}
+  ta.remove();
+  return Promise.resolve();
+}
+
+function metaButton(label, title, onClick) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'msgbtn';
+  b.textContent = label;
+  b.title = title;
+  b.setAttribute('aria-label', title);
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+// One message row. `m`: { role: 'user'|'assistant'|'tool', speaker, content, at }.
+// Tool rows render as a single collapsed activity line (name + args,
+// expandable); user/assistant get bubbles with meta (speaker, time, Copy,
+// Reply). Assistant content goes through renderMarkdown (escape-first —
+// never raw model HTML); user content is escaped plain text.
+function addMsg(m) {
   const log = document.getElementById('chat-log');
-  const div = document.createElement('div');
-  div.className = 'msg' + (dir === 'out' ? ' out' : '');
-  div.innerHTML = speaker && dir === 'out'
-    ? `<strong>${escapeHtml(speaker)}:</strong> ${escapeHtml(text)}`
-    : escapeHtml(text);
-  log.appendChild(div);
+  if (m.role === 'tool') {
+    const row = document.createElement('details');
+    row.className = 'toolrow';
+    const sum = document.createElement('summary');
+    sum.innerHTML = `<span class="toolglyph">⚙</span> <code>${escapeHtml(m.speaker || 'tool')}</code>`;
+    const args = document.createElement('pre');
+    args.textContent = m.content;
+    row.appendChild(sum);
+    row.appendChild(args);
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+    return;
+  }
+
+  const wrap = document.createElement('div');
+  const mine = m.role !== 'assistant';
+  wrap.className = 'msgwrap' + (mine ? ' out' : '');
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg' + (mine ? ' out' : '');
+  bubble.dataset.speaker = m.speaker || (mine ? 'operator' : 'opsclaw');
+  bubble.innerHTML = mine ? escapeHtml(m.content) : renderMarkdown(m.content);
+
+  const meta = document.createElement('div');
+  meta.className = 'msgmeta';
+  const time = document.createElement('span');
+  time.className = 'msgtime';
+  const d = asDate(m.at);
+  time.textContent = (m.speaker && mine ? m.speaker + ' · ' : '') + fmtTime(d);
+  time.title = d.toISOString();
+  meta.appendChild(time);
+  meta.appendChild(metaButton('⧉', 'Copy message', (e) => {
+    copyText(bubble.innerText.trim()).then(() => {
+      e.target.textContent = '✓';
+      setTimeout(() => { e.target.textContent = '⧉'; }, 1400);
+    });
+  }));
+  meta.appendChild(metaButton('↩', 'Reply (quote into input)', () => {
+    const input = document.getElementById('chat-input');
+    const quoted = bubble.innerText.trim().split('\n').map((l) => '> ' + l).join('\n');
+    input.value = quoted + '\n\n' + input.value;
+    input.focus();
+  }));
+
+  wrap.appendChild(bubble);
+  wrap.appendChild(meta);
+  log.appendChild(wrap);
   log.scrollTop = log.scrollHeight;
 }
 
@@ -110,29 +188,36 @@ function showError(text) {
   log.scrollTop = log.scrollHeight;
 }
 
-// Render the shared transcript (GET /api/chat/history) — a signed-in
-// operator opening the chat view sees the team's prior conversation, not a
-// blank log (the transcript is in-memory server-side and shared across
-// every surface, agent::dispatch::ChatTurn's own doc). Called from
-// main.js on every 'opsclaw:view' -> 'chat' transition (covers first
-// sign-in, since enterApp() lands on the chat view, and every later
-// switch back to it) rather than once at boot, since boot happens before
-// the session check resolves. Best-effort: a failed/empty history just
-// leaves the log as-is.
+// Render the durable shared transcript (GET /api/chat/history — migration
+// 0007, survives restarts and includes tool rows). Called from main.js on
+// every 'opsclaw:view' -> 'chat' transition. Best-effort: a failed/empty
+// history just leaves the log as-is.
 export async function loadHistory() {
   const r = await api('/api/chat/history');
   if (!r.ok) return;
   const log = document.getElementById('chat-log');
   log.innerHTML = '';
-  for (const turn of r.data.history || []) {
-    addMsg(turn.content, turn.role === 'assistant' ? 'in' : 'out');
-  }
+  for (const m of r.data.history || []) addMsg(m);
 }
 
 export function initChat() {
   const input = document.getElementById('chat-input');
   const form = document.getElementById('chat-form');
   const submitBtn = form.querySelector('button[type=submit]');
+
+  // Selection copy with attribution (gianna): selecting across two or more
+  // bubbles copies "Speaker:\ntext" blocks instead of the raw concatenation.
+  document.addEventListener('copy', (e) => {
+    const sel = document.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(0);
+    const bubbles = [...document.querySelectorAll('#chat-log .msg')]
+      .filter((b) => range.intersectsNode(b));
+    if (bubbles.length < 2) return; // single bubble: browser default is right
+    e.preventDefault();
+    const parts = bubbles.map((b) => `${b.dataset.speaker || ''}:\n${b.innerText.trim()}`);
+    e.clipboardData.setData('text/plain', parts.join('\n\n'));
+  });
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -148,9 +233,8 @@ export function initChat() {
         clearPending();
         showError(r.data.error || 'The chat turn failed — please try again.');
       }
-      // On success the reply (and the echo of this message) arrive via the
-      // SSE `chat` event, which also clears the pending row — see the
-      // module doc for why nothing renders here directly.
+      // On success the reply (and the echo of this message, and the tool
+      // rows) arrive via the SSE `chat` event — see the module doc.
     } finally {
       input.disabled = false;
       submitBtn.disabled = false;

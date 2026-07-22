@@ -342,3 +342,37 @@ pub trait ChannelStateRepo: Send + Sync {
     async fn get_channel_state(&self, key: &str) -> Result<Option<String>>;
     async fn set_channel_state(&self, key: &str, value: &str) -> Result<()>;
 }
+
+// ---- Additive (durable shared chat transcript, migration 0007): the team
+// chat previously lived only in `ChatTurn`'s in-memory Vec — a restart
+// erased it. Modeled on gianna's `messages` table (`migrations/0028` +
+// `db/postgres/messaging.rs`), collapsed to opsclaw's single-tenant shape.
+
+/// One row of the shared team chat log. `seq` totals-orders the log
+/// (backend-assigned, monotonic); `role` is `"user"` / `"assistant"` /
+/// `"tool"` (tool rows are the agent's mid-turn tool calls, kept for the
+/// UI's transparency rendering — the LLM replay transcript stays in-memory
+/// and never reads these).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessage {
+    pub seq: i64,
+    pub at: DateTime<Utc>,
+    pub role: String,
+    pub speaker: String,
+    pub content: String,
+}
+
+#[async_trait]
+pub trait ChatRepo: Send + Sync {
+    /// Append one row (the backend assigns `seq`).
+    async fn append_chat(
+        &self,
+        at: DateTime<Utc>,
+        role: &str,
+        speaker: &str,
+        content: &str,
+    ) -> Result<()>;
+    /// The newest `limit` rows, returned in ASCENDING `seq` order (render
+    /// order for a chat log — oldest of the page first).
+    async fn recent_chat(&self, limit: i64) -> Result<Vec<ChatMessage>>;
+}

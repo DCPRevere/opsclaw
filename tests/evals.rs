@@ -172,7 +172,7 @@ fn eval_deps(llm: Arc<dyn LlmProvider>) -> AgentDeps {
     // case instead uses a tight message + small registry so a turn
     // naturally finishes in one-few steps well under the deadline, per the
     // brief's "keep each eval cheap" instruction.
-    AgentDeps { llm, memory: Arc::new(Memory::disabled()), heartbeat: false }
+    AgentDeps { llm, memory: Arc::new(Memory::disabled()), heartbeat: false, on_tool: None }
 }
 
 /// Run one turn with a bounded per-eval timeout on top of the loop's own

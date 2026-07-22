@@ -17,19 +17,14 @@
 //! anything, and that's an orthogonal shutdown concern, not a per-request
 //! cap), so a slow turn is never cut off in flight.
 //!
-//! Broadcast design call: after a successful turn, BOTH the operator's own
-//! message and the agent's reply are published to `state.web` (the SSE
-//! hub) as `"chat"`-kind events, so every OTHER connected tab sees the
-//! live exchange too (DESIGN: "web chat is a team surface, one shared
-//! conversation" — the same reasoning `ChatTurn`'s single shared
-//! transcript already encodes). The HTTP response to the CALLER also
-//! carries the reply directly (`{"reply": "..."}`) — the caller's own tab
-//! does NOT wait on its own SSE echo to render the reply (a `POST` that
-//! succeeded should show its result immediately, not depend on a second
-//! channel), it renders from the POST response, and treats the SSE `chat`
-//! event as how OTHER tabs catch up. See `static/app/chat.js`'s own
-//! comment for how the client reconciles the two so nothing double-renders
-//! for the tab that sent the message.
+//! Broadcast design call: the SSE `"chat"`-kind events (the operator's
+//! message before the turn, the agent's live tool calls DURING it, the
+//! reply after) are published by `ChatTurn` itself, not here — so a turn
+//! entering via Telegram or the CLI reaches web tabs identically to a
+//! web-originated one (DESIGN: "web chat is a team surface, one shared
+//! conversation"). The HTTP response still carries the reply directly for
+//! the CLI twin; the web client renders exclusively from the SSE stream
+//! (see `static/app/chat.js`'s module comment).
 
 use axum::extract::State;
 use axum::routing::{get, post};
@@ -38,7 +33,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::Result;
-use crate::channels::web::WebEvent;
 use crate::domain::Principal;
 use crate::http::handlers::Authed;
 use crate::http::state::AppState;
@@ -66,13 +60,12 @@ pub(crate) async fn run_chat_turn(
     speaker: &str,
     message: &str,
 ) -> Result<String> {
-    let reply = state.chat.chat(Principal::Operator { account }, speaker, message).await?;
-    // Team-surface broadcast (module doc above): both sides of the
-    // exchange, in order, so every OTHER open tab's chat log matches what
-    // the sender's own tab already rendered from this call's return value.
-    state.web.publish(WebEvent::chat("user", speaker, message));
-    state.web.publish(WebEvent::chat("assistant", "assistant", &reply));
-    Ok(reply)
+    // The SSE broadcast (both sides of the exchange, plus the agent's live
+    // tool-call events mid-turn) happens INSIDE `ChatTurn` now — the turn
+    // handler owns it so a Telegram- or CLI-originated turn reaches the web
+    // tabs identically to a web-originated one (one shared conversation,
+    // whatever the entry channel).
+    state.chat.chat(Principal::Operator { account }, speaker, message).await
 }
 
 /// POST /api/chat — `{"message": "..."}` -> `{"reply": "..."}`. Cookie-authed
@@ -94,17 +87,20 @@ async fn send(
 }
 
 /// GET /api/chat/history — the shared transcript for render-on-load, as
-/// `{"history": [{"role": ..., "content": ...}, ...]}`. Empty (not an
-/// error) when `state.chat` has no transcript to offer (`ChatHandler::
-/// transcript`'s defaulted empty `Vec` — a boot-safe `NoopChat` state, or a
-/// real `ChatTurn` that hasn't seen a turn yet, look identical here: both
-/// are "nothing to show", not a failure).
+/// `{"history": [{"role", "speaker", "content", "at"}, ...]}` in render
+/// order. Reads the DURABLE log (migration 0007) rather than the in-memory
+/// replay transcript, so history survives a daemon restart and includes
+/// the agent's tool-call rows (`role: "tool"`) the replay transcript never
+/// holds. Empty is "nothing said yet", not a failure.
 async fn history(State(state): State<AppState>, Authed(_ctx): Authed) -> Result<Json<Value>> {
-    let history = state.chat.transcript().await;
+    const PAGE: i64 = 200;
+    let rows = state.repos.recent_chat(PAGE).await?;
     Ok(Json(json!({
-        "history": history.into_iter().map(|(role, content)| json!({
-            "role": role,
-            "content": content,
+        "history": rows.into_iter().map(|m| json!({
+            "role": m.role,
+            "speaker": m.speaker,
+            "content": m.content,
+            "at": m.at.to_rfc3339(),
         })).collect::<Vec<_>>()
     })))
 }

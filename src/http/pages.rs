@@ -53,6 +53,7 @@ pub async fn app_shell() -> Response {
 }
 
 const APP_STATE_JS: &str = include_str!("../../static/app/state.js");
+const APP_FORMAT_JS: &str = include_str!("../../static/app/format.js");
 const APP_API_JS: &str = include_str!("../../static/app/api.js");
 const APP_AUTH_JS: &str = include_str!("../../static/app/auth.js");
 const APP_CHAT_JS: &str = include_str!("../../static/app/chat.js");
@@ -70,6 +71,7 @@ const APP_MAIN_JS: &str = include_str!("../../static/app/main.js");
 pub async fn app_module(Path(name): Path<String>) -> Response {
     let body = match name.as_str() {
         "state.js" => Some(APP_STATE_JS),
+        "format.js" => Some(APP_FORMAT_JS),
         "api.js" => Some(APP_API_JS),
         "auth.js" => Some(APP_AUTH_JS),
         "chat.js" => Some(APP_CHAT_JS),

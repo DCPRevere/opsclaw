@@ -233,7 +233,12 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     // replace the boot-safe no-ops AppState::new installs.
     state.ingest = Arc::new(WebhookIngest::new(deps.clone(), state.channel.clone()));
     state.composer = Arc::new(AgentJobComposer::new(deps.clone()));
-    state.chat = Arc::new(ChatTurn::new(deps));
+    // The chat handler gets the durable transcript (migration 0007) and the
+    // SSE hub, then rehydrates its replay transcript from the log so a
+    // restart continues the team conversation instead of forgetting it.
+    let chat = ChatTurn::new(deps).with_surfaces(state.repos.clone(), state.web.clone());
+    chat.hydrate().await;
+    state.chat = Arc::new(chat);
 
     Ok(state)
 }

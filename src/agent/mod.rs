@@ -85,7 +85,18 @@ pub struct AgentDeps {
     /// wall-clock deadline (an unattended scan may legitimately run a slow
     /// diagnostic chain with no impatient human on the other end).
     pub heartbeat: bool,
+    /// Observer fired once per tool call the model makes, as it happens —
+    /// (tool name, compact args JSON). The chat surface uses this to render
+    /// the agent's tool activity live in the shared log (the same
+    /// transparency stance as the audit chain, surfaced where the operator
+    /// is looking). `None` (scans, webhook ingest, tests) observes nothing.
+    pub on_tool: Option<ToolObserver>,
 }
+
+/// See [`AgentDeps::on_tool`]. Sync + cheap by contract: called from inside
+/// the turn loop, so an implementation must hand off (publish to a
+/// broadcast hub, push into a Vec) — never block on I/O.
+pub type ToolObserver = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// Run one full tool-calling turn: assemble the system prompt, give the
 /// model the tool registry, execute what it calls, feed results back,
@@ -183,6 +194,12 @@ pub async fn run_turn_with_history(
             }
         } else {
             for call in &step.tool_calls {
+                if let Some(observe) = &deps.on_tool {
+                    // Compact single-line args (the model's own JSON can be
+                    // multi-line); truncation is the OBSERVER's concern —
+                    // this reports what was actually called.
+                    observe(&call.name, &call.args.to_string());
+                }
                 history.push(Turn::Assistant {
                     content: step.text.clone().unwrap_or_default(),
                     tool_calls: vec![call.clone()],
@@ -427,7 +444,7 @@ mod tests {
     }
 
     fn deps(llm: Arc<dyn LlmProvider>) -> AgentDeps {
-        AgentDeps { llm, memory: Arc::new(Memory::disabled()), heartbeat: false }
+        AgentDeps { llm, memory: Arc::new(Memory::disabled()), heartbeat: false, on_tool: None }
     }
 
     /// A trivial read-only tool: echoes its `q` argument back.

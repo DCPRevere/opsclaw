@@ -15,16 +15,21 @@
 //! - [`executor`] — shared plumbing for command-composing tools: builds a
 //!   `policy::CommandRequest` and turns a `PolicyOutcome` into a
 //!   `ToolResult`/`ToolError`. [`ssh`], [`shell`], [`monitor`], [`systemd`],
-//!   [`docker`], and [`kubernetes`] all compose a concrete command line
-//!   through this — they own VOCABULARY, never transport; the only path to
-//!   an executor is `ctx.policy.execute`.
+//!   [`docker`], [`firewall`], and [`kubernetes`] all compose a concrete
+//!   command line through this — they own VOCABULARY, never transport; the
+//!   only path to an executor is `ctx.policy.execute`. [`dns`] and [`cert`]
+//!   compose through it too, with an OPTIONAL target (DESIGN.md §4:
+//!   "resolve/check from a target's vantage or the daemon's" —
+//!   `ToolCtx::resolve_vantage`).
 //! - Daemon-local, no remote side effect: [`notify`] (the one structured
 //!   escalation tool), [`config_tool`] (read-only, secret-free inventory),
 //!   [`memory_tools`] (store/recall/forget), [`incidents_tool`] (incident
 //!   queries), [`runbooks_tool`] (`runbook_list` over
 //!   `crate::runbooks::RunbookStore` — the definition store — and
 //!   `runbook_history` over `db::RunbookRunRepo` — execution history;
-//!   discover-then-inspect).
+//!   discover-then-inspect), [`files`] (workspace-bounded
+//!   `file_read`/`file_write`), [`web_fetch`] (public-URL GET with an SSRF
+//!   guard; web SEARCH is deliberately deferred — see that module's doc).
 //! - [`endpoint`] — shared plumbing for endpoint-backed tools:
 //!   [`endpoint::get_json`]/[`endpoint::query_json`] compose canonical
 //!   `endpoint-get`/`endpoint-query` READ lines and submit them through
@@ -44,12 +49,16 @@
 
 pub mod argocd;
 pub mod azure_service_bus;
+pub mod cert;
 pub mod config_tool;
+pub mod dns;
 pub mod docker;
 pub mod elasticsearch;
 pub mod endpoint;
 pub mod eventstore;
 pub mod executor;
+pub mod files;
+pub mod firewall;
 pub mod incidents_tool;
 pub mod kubernetes;
 pub mod memory_tools;
@@ -60,6 +69,7 @@ pub mod runbooks_tool;
 pub mod shell;
 pub mod ssh;
 pub mod systemd;
+pub mod web_fetch;
 
 use std::sync::Arc;
 
@@ -167,6 +177,43 @@ impl ToolCtx {
         })
     }
 
+    /// Resolve the optional VANTAGE argument shared by `dns` and `cert`
+    /// (DESIGN.md §4: they "accept an optional target (resolve/check from a
+    /// target's vantage or the daemon's)"): an explicit target string goes
+    /// through [`ToolCtx::resolve_target`] as usual; absent, fall back to
+    /// the configured `local`-kind target — the daemon's own host. Zero or
+    /// several local candidates is a user-facing error naming the fix (pass
+    /// `target`), never a silent guess between hosts — the same closed-world
+    /// discipline as `resolve_target`.
+    pub fn resolve_vantage(&self, s: Option<&str>) -> std::result::Result<FqTarget, ToolError> {
+        if let Some(s) = s {
+            return self.resolve_target(s);
+        }
+        let locals: Vec<&FqTarget> = self
+            .known_targets
+            .iter()
+            .filter(|t| t.resource.is_none())
+            .filter(|t| {
+                self.config.as_ref().is_some_and(|c| {
+                    configured_kind(c, t) == Some(crate::config::TargetKindName::Local)
+                })
+            })
+            .collect();
+        match locals.as_slice() {
+            [one] => Ok((*one).clone()),
+            [] => Err(ToolError::UserFacing(
+                "no \"target\" given and no local-kind target is configured to act as the \
+                 daemon's own vantage — pass \"target\" to name where to run from."
+                    .to_string(),
+            )),
+            many => Err(ToolError::UserFacing(format!(
+                "no \"target\" given and more than one local target is configured ({}) — pass \
+                 \"target\" to pick the vantage.",
+                many.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")
+            ))),
+        }
+    }
+
     /// Resolve a model-supplied RESOURCE string (the resource-qualified
     /// `FqTarget::Display` form, `project::env::target::resource_type::name`)
     /// against `endpoints`, returning the target plus its resolved auth.
@@ -238,17 +285,24 @@ pub trait Tool: Send + Sync {
 ///
 /// Which targets exist comes from `ctx.known_targets` (already resolved by
 /// the dispatcher — see `ToolCtx`'s doc), keyed by `TargetKind` via
-/// `ctx.config`; `docker`/`systemd`/`monitor` are vocabulary that runs over
-/// ssh/local targets (any non-cloud, non-kubernetes target), not a distinct
-/// target kind of their own, so they gate on "at least one ssh or local
-/// target exists" rather than needing their own config section.
+/// `ctx.config`; `docker`/`systemd`/`monitor`/`dns`/`cert`/`firewall` are
+/// vocabulary that runs over ssh/local targets (any non-cloud,
+/// non-kubernetes target), not a distinct target kind of their own, so they
+/// gate on "at least one ssh or local target exists" rather than needing
+/// their own config section.
 pub fn registry(ctx: &ToolCtx, heartbeat: bool) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
     // --- Daemon-local: always register (no target/resource dependency). ---
     tools.push(Box::new(notify::NotifyTool));
+    tools.push(Box::new(web_fetch::WebFetchTool));
     if ctx.config.is_some() {
         tools.push(Box::new(config_tool::ConfigTool));
+        // The file tools resolve their workspace root from config
+        // (`daemon.workspace_dir`), so they gate on config the same way
+        // `opsclaw_config` does — daemon-local, but not context-free.
+        tools.push(Box::new(files::FileReadTool));
+        tools.push(Box::new(files::FileWriteTool));
     }
     if let Some(memory) = &ctx.memory {
         tools.push(Box::new(memory_tools::RecallMemoryTool { memory: memory.clone() }));
@@ -281,6 +335,9 @@ pub fn registry(ctx: &ToolCtx, heartbeat: bool) -> Vec<Box<dyn Tool>> {
         tools.push(Box::new(monitor::MonitorTool));
         tools.push(Box::new(systemd::SystemdTool));
         tools.push(Box::new(docker::DockerTool));
+        tools.push(Box::new(dns::DnsTool));
+        tools.push(Box::new(cert::CertTool));
+        tools.push(Box::new(firewall::FirewallTool));
     }
     if has_kubernetes {
         tools.push(Box::new(kubernetes::KubernetesTool));
@@ -345,14 +402,22 @@ fn is_ssh_or_local(k: RegistryTargetClass) -> bool {
 /// this is a belt-and-braces path, not the expected case.
 fn target_kind_of(config: &Config, target: &FqTarget) -> Option<RegistryTargetClass> {
     use crate::config::TargetKindName;
-    let project = config.projects.iter().find(|p| p.name == target.project)?;
-    let env = project.envs.iter().find(|e| e.name == target.env)?;
-    let t = env.targets.iter().find(|t| t.name == target.target)?;
-    Some(match t.kind {
+    Some(match configured_kind(config, target)? {
         TargetKindName::Ssh | TargetKindName::Local => RegistryTargetClass::SshOrLocal,
         TargetKindName::Kubernetes => RegistryTargetClass::Kubernetes,
         TargetKindName::Cloud => RegistryTargetClass::Cloud,
     })
+}
+
+/// The raw configured kind name for an `FqTarget` — the shared tree walk
+/// behind [`target_kind_of`]'s coarse gating classes, exposed separately
+/// because [`ToolCtx::resolve_vantage`] needs specifically `Local` (the
+/// daemon's own host), which the coarse `SshOrLocal` class erases.
+fn configured_kind(config: &Config, target: &FqTarget) -> Option<crate::config::TargetKindName> {
+    let project = config.projects.iter().find(|p| p.name == target.project)?;
+    let env = project.envs.iter().find(|e| e.name == target.env)?;
+    let t = env.targets.iter().find(|t| t.name == target.target)?;
+    Some(t.kind)
 }
 
 /// Find a registered tool by name — the dispatch loop's lookup (kept here,

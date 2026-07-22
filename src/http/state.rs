@@ -94,7 +94,9 @@ pub struct AppState {
     /// The daemon-wide shutdown token. Created HERE (not in `server::run`)
     /// so boot-time wiring can hand it to components that need it at
     /// construction (TelegramChannel's long-poll stops on it);
-    /// `server::run` cancels it on SIGINT/SIGTERM.
+    /// `server::run` cancels it on SIGINT/SIGTERM, and cancelling it
+    /// externally drains `server::run` the same way (the SIGTERM-equivalent
+    /// the daemon-lifecycle e2e shuts down through).
     pub shutdown: tokio_util::sync::CancellationToken,
     pub auth_limiter: Arc<RateLimiter>,
     /// Single-use replay guard for SSE stream tickets (gianna's

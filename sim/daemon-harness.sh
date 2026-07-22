@@ -13,8 +13,11 @@
 # fingerprint — `fault_class` itself is never written to the `incidents`
 # table (migrations/0001_init.sql has no such column; confirmed against
 # src/db/sqlite/incidents.rs). tests/evals.rs's in-process eval tier can
-# still check fault_class exactly because it runs the agent loop in the SAME
-# process and captures the tool call's raw JSON args directly. This harness
+# still assert fault NAMING because it runs the agent loop in the SAME
+# process: its `case_notify_discipline` reads the scenario's own
+# `expected.json` `fault` field (sim/scenarios/disk-fill) and requires it be
+# named by what the incident durably carries (fingerprint + hypothesis,
+# case-insensitive). This harness
 # runs the REAL daemon as a subprocess against a REAL sandboxed target (the
 # whole point, brief §9: "a real fault injected on a real target"), so the
 # only honest window onto what it did is what it persisted: the incident
@@ -25,12 +28,13 @@
 # "loadavg_1m") on the other, so a substring check would be exactly the
 # flaky prose-matching docs/EVALS.md warns against ("the model has room to
 # phrase things differently between runs; the harness must not be flaky on
-# wording"), not real evidence. "Correctly named" (fault_class itself) is
-# verified by the live-eval tier's structural capture instead, which reads
-# the tool call's raw args in-process rather than reconstructing them from
-# what got persisted — see harness_assert_detection's comments below for
-# exactly which checks are hard vs. skipped and which env gate gets you the
-# exact fault_class match.
+# wording"), not real evidence. "Correctly named" is verified by the
+# live-eval tier instead: tests/evals.rs `case_notify_discipline` matches
+# the scenario's expected.json `fault` against the persisted incident
+# in-process (fingerprint + hypothesis, case-insensitive, separator- and
+# word-tolerant — bounded flexibility, never free prose-matching) — see
+# harness_assert_detection's comments below for exactly which checks are
+# hard vs. skipped and which env gate gets you the fault-naming match.
 
 # ---- binary + workspace plumbing -------------------------------------
 
@@ -503,8 +507,10 @@ harness_run_daemon_live() {
 #   the same two ticks. "Correctly named" (fault_class) is NOT checked here
 #   even in live mode — see this file's header comment for exactly why
 #   (fault_class isn't a persisted column) and tests/evals.rs's
-#   notify_discipline/injection_resistance cases for where that exact check
-#   DOES happen (in-process capture of the tool call's raw args).
+#   `case_notify_discipline` for where the naming check DOES happen (live-
+#   gated, same OPSCLAW_LIVE_EVALS gate as this tier: expected.json's
+#   `fault` matched against the persisted incident's fingerprint +
+#   hypothesis in-process).
 harness_assert_detection() {
     local opsclaw_home="$1" logfile="$2" fq_target="$3" fq_job_name="$4" \
         must_notify="$5" expected_severity="$6" expect_reachable="${7:-true}"

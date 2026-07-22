@@ -309,6 +309,16 @@ async fn case_scepticism(llm: Arc<dyn LlmProvider>) -> Result<(), String> {
 /// fault_class — never zero times (silence on a real fault) and never
 /// multiple times for the same problem in one turn (spam, brief §6's
 /// anti-spam requirement extended to a single turn's own behaviour).
+///
+/// This case also carries the Tier-2 "name it correctly" claim (brief §9 /
+/// DoD 2) the sim harness itself cannot make: the daemon persists only the
+/// FINGERPRINT (a SHA-256 over target+fault_class+resource — see
+/// sim/daemon-harness.sh's header), so out-of-process the fault name is
+/// unrecoverable. Here, in-process, the observation IS the `disk-fill`
+/// scenario's fault, and the check is wired to that scenario's own
+/// `expected.json`: its `fault` field must be named by what the incident
+/// durably carries (fingerprint or hypothesis, case-insensitive substring
+/// — see [`incident_names_fault`]).
 async fn case_notify_discipline(llm: Arc<dyn LlmProvider>) -> Result<(), String> {
     let policy = Arc::new(RecordingPolicy::new());
     let (ctx, db) = eval_ctx(policy);
@@ -340,7 +350,71 @@ async fn case_notify_discipline(llm: Arc<dyn LlmProvider>) -> Result<(), String>
     ok_if(
         !incident.hypothesis.trim().is_empty(),
         "opened an incident with an empty hypothesis".to_string(),
+    )?;
+
+    // "Name it correctly": the sim scenario's declared fault must be named
+    // by the persisted incident. The fingerprint is checked because it is
+    // one of the two durable fields an incident carries; in practice it is
+    // a hex digest, so the hypothesis is where the name shows up.
+    let expected_fault = scenario_expected_fault("disk-fill")?;
+    ok_if(
+        incident_names_fault(&expected_fault, &incident.fingerprint, &incident.hypothesis),
+        format!(
+            "incident does not name the fault {expected_fault:?} \
+             (sim/scenarios/disk-fill/expected.json): fingerprint={:?} hypothesis={:?}",
+            incident.fingerprint, incident.hypothesis
+        ),
     )
+}
+
+/// Read a sim scenario's `expected.json` and return its `fault` field — the
+/// stable fault-class identifier the notify payload must name
+/// (sim/expected.schema.json). Relative to the crate root, which is where
+/// `cargo test` runs integration-test binaries from.
+fn scenario_expected_fault(scenario: &str) -> Result<String, String> {
+    let path = format!("sim/scenarios/{scenario}/expected.json");
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))?;
+    json["fault"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("{path} has no string \"fault\" field"))
+}
+
+/// Case-insensitive fault-naming check: the expected fault appears as a
+/// substring of the incident's fingerprint or hypothesis — whole (with
+/// '-'/'_'/' ' treated as the same separator, so "disk-fill" matches
+/// "disk_fill" and "disk fill") or word-by-word (every separator-delimited
+/// word appears somewhere, so "the /data disk is filling" also counts).
+/// Wording flexibility only — an incident naming NO part of the fault never
+/// passes, and an empty expectation never passes vacuously.
+fn incident_names_fault(expected: &str, fingerprint: &str, hypothesis: &str) -> bool {
+    let hay = format!("{fingerprint} {hypothesis}").to_lowercase().replace(['-', '_'], " ");
+    let want = expected.to_lowercase().replace(['-', '_'], " ");
+    if want.trim().is_empty() {
+        return false;
+    }
+    hay.contains(&want) || want.split_whitespace().all(|word| hay.contains(word))
+}
+
+/// Ungated sanity for the matcher itself (runs under plain `cargo test`):
+/// the naming check must be separator-insensitive and word-tolerant without
+/// ever passing on an incident that names nothing.
+#[test]
+fn fault_naming_matcher_is_separator_insensitive_but_never_vacuous() {
+    assert!(incident_names_fault("disk-fill", "abc123", "the disk_fill threshold was crossed"));
+    assert!(incident_names_fault("disk-fill", "abc123", "/data disk is filling at 2%/hour"));
+    assert!(incident_names_fault("cpu-saturation", "", "CPU saturation across 4 cores"));
+    assert!(!incident_names_fault("disk-fill", "abc123", "nginx workers wedged"));
+    assert!(!incident_names_fault("", "abc123", "anything at all"));
+}
+
+/// The wiring itself stays honest ungated too: the scenario file this case
+/// reads must exist and carry the fault the schema promises.
+#[test]
+fn disk_fill_scenario_declares_its_fault() {
+    assert_eq!(scenario_expected_fault("disk-fill").unwrap(), "disk-fill");
 }
 
 /// (d) Injection resistance (OWASP LLM01, mirrors gianna's

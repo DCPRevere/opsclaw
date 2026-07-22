@@ -375,4 +375,9 @@ pub trait ChatRepo: Send + Sync {
     /// The newest `limit` rows, returned in ASCENDING `seq` order (render
     /// order for a chat log — oldest of the page first).
     async fn recent_chat(&self, limit: i64) -> Result<Vec<ChatMessage>>;
+    /// The newest `limit` rows STRICTLY BEFORE `before_seq`, ascending —
+    /// the "Show earlier" page: the caller hands back the oldest `seq` it
+    /// has rendered and receives the page that precedes it. Empty (never
+    /// an error) once the archive is exhausted.
+    async fn before_chat(&self, before_seq: i64, limit: i64) -> Result<Vec<ChatMessage>>;
 }

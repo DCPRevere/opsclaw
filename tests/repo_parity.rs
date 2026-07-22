@@ -904,6 +904,29 @@ chat_log_appends_in_order_and_pages_the_newest => |db| {
     assert!(db.recent_chat(0).await.unwrap().is_empty());
 }
 
+chat_log_pages_backward_from_a_seq_anchor => |db| {
+    for i in 0..6 {
+        db.append_chat(Utc::now(), "user", "alice", &format!("m{i}")).await.unwrap();
+    }
+    // The client's anchor is the oldest seq it has rendered: after a
+    // 2-row first page (m4, m5), `before` that anchor is the NEXT-newest
+    // page (m2, m3), still ascending within it.
+    let first = db.recent_chat(2).await.unwrap();
+    let anchor = first[0].seq;
+    let page = db.before_chat(anchor, 2).await.unwrap();
+    assert_eq!(page.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), vec!["m2", "m3"]);
+    assert!(page.windows(2).all(|w| w[0].seq < w[1].seq), "ascending seq");
+    // The anchor row itself is EXCLUDED (strictly before) — no overlap,
+    // no gap, whatever the page size.
+    assert!(page.iter().all(|m| m.seq < anchor));
+    // Over-asking returns just what's left; before the oldest is empty
+    // (archive exhausted), and a zero limit is empty, not an error.
+    let rest = db.before_chat(anchor, 50).await.unwrap();
+    assert_eq!(rest.len(), 4);
+    assert!(db.before_chat(rest[0].seq, 10).await.unwrap().is_empty());
+    assert!(db.before_chat(anchor, 0).await.unwrap().is_empty());
+}
+
 }
 
 /// Not a parity behaviour (no in-memory analog) — pins that `SqliteDb::connect`

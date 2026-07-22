@@ -126,6 +126,24 @@ pub struct DaemonCfg {
     /// existed) — additive field, no migration needed for an existing
     /// config file (absent = the same default it always resolved to).
     pub runbooks_dir: PathBuf,
+    /// Workspace root for the daemon-local `file_read`/`file_write` tools
+    /// (brief §10 "file read/write (workspace-bounded)", §5's
+    /// "workspace-only file ops" policy bound). `None` resolves to
+    /// `<opsclaw_home>/workspace` at runtime ([`DaemonCfg::workspace_root`])
+    /// — additive field, no migration needed for an existing config file
+    /// (absent = the default it would always have resolved to).
+    pub workspace_dir: Option<PathBuf>,
+}
+
+impl DaemonCfg {
+    /// The resolved workspace root: the configured `workspace_dir`, else
+    /// `<opsclaw_home>/workspace` — the same `default_dir()`-anchored
+    /// defaulting convention as `runbooks_dir`, resolved at call time (not
+    /// in `Default`) so the field stays `Option` and an absent config line
+    /// round-trips as absent.
+    pub fn workspace_root(&self) -> PathBuf {
+        self.workspace_dir.clone().unwrap_or_else(|| default_dir().join("workspace"))
+    }
 }
 
 impl Default for DaemonCfg {
@@ -136,6 +154,7 @@ impl Default for DaemonCfg {
             tick_seconds: 300,
             deadman_url: None,
             runbooks_dir: default_dir().join("runbooks"),
+            workspace_dir: None,
         }
     }
 }

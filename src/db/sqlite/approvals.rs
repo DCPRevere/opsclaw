@@ -118,29 +118,39 @@ impl crate::db::ApprovalRepo for SqliteDb {
         // decide racing an expiry sweep) affects 0 rows and gets Conflict.
         let row = sqlx::query(
             "UPDATE approvals SET state = ?, decided_at = ?, decided_by = ?
-             WHERE id = ? AND state = 'pending'
+             WHERE id = ? AND state = 'pending' AND expires_at > ?
              RETURNING *",
         )
         .bind(state_str(state))
         .bind(now.to_rfc3339())
         .bind(by.to_string())
         .bind(id.to_string())
+        .bind(now.to_rfc3339())
         .fetch_optional(&self.pool)
         .await?;
         match row {
             Some(r) => Ok(row_to_approval(&r)),
             None => {
-                // Distinguish "doesn't exist" from "already decided" for a
-                // clearer error, but both are non-retryable the same way.
-                let exists = sqlx::query("SELECT 1 AS x FROM approvals WHERE id = ?")
+                // Distinguish "doesn't exist" / "already decided" / "past
+                // its deadline" for a clearer error, but all three are
+                // non-retryable the same way. The expiry arm matters for
+                // safety, not just clarity: without the expires_at guard in
+                // the UPDATE, a request the sweep hasn't reached yet would
+                // stay approvable — and would execute a stale command —
+                // arbitrarily long after its window closed.
+                let existing = sqlx::query("SELECT state, expires_at FROM approvals WHERE id = ?")
                     .bind(id.to_string())
                     .fetch_optional(&self.pool)
-                    .await?
-                    .is_some();
-                if exists {
-                    Err(Error::Conflict(format!("approval {id} already decided")))
-                } else {
-                    Err(Error::NotFound(format!("approval {id}")))
+                    .await?;
+                match existing {
+                    Some(r) if r.get::<String, _>("state") == "pending" => {
+                        Err(Error::Conflict(format!(
+                            "approval {id} expired at {} — re-request if still needed",
+                            r.get::<String, _>("expires_at")
+                        )))
+                    }
+                    Some(_) => Err(Error::Conflict(format!("approval {id} already decided"))),
+                    None => Err(Error::NotFound(format!("approval {id}"))),
                 }
             }
         }

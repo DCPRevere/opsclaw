@@ -118,7 +118,7 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         &secret_store,
         repos,
         policy.clone(),
-        policy,
+        policy.clone(),
         estop,
         scheduler_handle,
     )?;
@@ -187,6 +187,9 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     }
     state.named_channels = channels.clone();
     state.channel = Arc::new(MultiChannel::new(channels));
+    // Approval announcements go out on the full fan-out (same late-wiring
+    // as the cost guard's notifier just below).
+    policy.set_notifier(state.channel.clone());
     // The cost cap's loud once-per-day notification rides the same fan-out
     // as every other escalation (built just above — this is the earliest
     // point the notifier can exist).

@@ -162,6 +162,13 @@ pub struct Policy {
     /// In-memory: a restart resets the count, which under-throttles briefly —
     /// accepted for v1 and noted here so nobody mistakes it for durable.
     actions: Mutex<VecDeque<Instant>>,
+    /// Channel fan-out for the proactive approval announcement (DESIGN §4
+    /// Approvals / brief §5: the request must reach an operator's phone,
+    /// not sit silently in the queue hoping the agent's free-text reply
+    /// mentions it). Installed by boot AFTER the channels exist — same
+    /// late-wiring pattern as `CostGuard::set_notifier`; unset (tests,
+    /// early boot) simply skips the announcement.
+    notifier: std::sync::OnceLock<Arc<dyn crate::channels::Channel>>,
 }
 
 impl Policy {
@@ -181,6 +188,45 @@ impl Policy {
             approvals,
             scrubber,
             actions: Mutex::new(VecDeque::new()),
+            notifier: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Install the channel fan-out the approval announcement goes out on.
+    /// One-shot; a second call is ignored (boot calls it exactly once).
+    pub fn set_notifier(&self, channel: Arc<dyn crate::channels::Channel>) {
+        let _ = self.notifier.set(channel);
+    }
+
+    /// Announce a freshly-queued approval on every channel, with the full
+    /// decision context (command, fq target, risk, hypothesis, expiry) so an
+    /// operator can decide from their phone (brief §5). Best-effort: a
+    /// channel failure must never fail the policy decision itself — the row
+    /// is already durably queued and visible in the web UI/CLI either way.
+    async fn announce_approval(&self, approval: &ApprovalRequest, scrubbed_command: &str) {
+        let Some(channel) = self.notifier.get() else { return };
+        let body = format!(
+            "APPROVAL NEEDED [{risk}]: `{command}` ({tool}) on {target}\n\
+             hypothesis: {hypothesis}\n\
+             request {id} — approve/deny in the web UI (Approvals) or \
+             `opsclaw-cli approve {id}` / `opsclaw-cli deny {id}`. \
+             Expires {expires} UTC, then it cancels itself.",
+            risk = approval.risk,
+            command = scrubbed_command,
+            tool = approval.tool,
+            target = approval.target,
+            hypothesis = if approval.hypothesis.is_empty() {
+                "(none stated)"
+            } else {
+                &approval.hypothesis
+            },
+            id = approval.id,
+            expires = approval.expires_at.format("%H:%M:%S"),
+        );
+        if let Err(e) =
+            channel.send(crate::channels::OutboundMessage { operator: None, body }).await
+        {
+            tracing::warn!(approval = %approval.id, "approval announcement failed: {e}");
         }
     }
 
@@ -300,6 +346,7 @@ impl Policy {
                     None,
                 )
                 .await?;
+                self.announce_approval(&approval, &scrubbed_command).await;
                 Ok(PolicyOutcome::NeedsApproval(approval.id))
             }
             Gate::Execute => {
@@ -709,6 +756,36 @@ mod tests {
         assert_eq!(stored.hypothesis, "test hypothesis");
         assert!(rig.executor.ran.lock().unwrap().is_empty());
         assert_eq!(outcomes(&rig.db).await, vec![AuditOutcome::ApprovalQueued]);
+    }
+
+    #[tokio::test]
+    async fn queued_approval_is_announced_on_the_channel_with_full_context() {
+        let rig = rig_with(config_at(Autonomy::Suggest), FakeExecutor::ok(""));
+        let channel = Arc::new(crate::channels::recording::RecordingChannel::new());
+        rig.policy.set_notifier(channel.clone());
+
+        let out =
+            rig.policy.execute(request("systemctl restart nginx", RiskClass::Read)).await.unwrap();
+        let id = match out {
+            PolicyOutcome::NeedsApproval(id) => id,
+            other => panic!("expected NeedsApproval, got {other:?}"),
+        };
+
+        // The proactive announcement carries everything an operator needs to
+        // decide from a phone (brief §5): command, tool, fq target, risk,
+        // hypothesis, and the request id to act on.
+        let sent = channel.sent();
+        assert_eq!(sent.len(), 1, "exactly one announcement per queued approval");
+        let body = &sent[0].body;
+        for needle in [
+            "APPROVAL NEEDED",
+            "systemctl restart nginx",
+            "remundo::prod::bastion",
+            "test hypothesis",
+            &id.to_string(),
+        ] {
+            assert!(body.contains(needle), "announcement must carry {needle:?}, got:\n{body}");
+        }
     }
 
     #[tokio::test]

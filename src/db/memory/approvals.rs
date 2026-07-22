@@ -22,6 +22,15 @@ impl crate::db::ApprovalRepo for InMemoryDb {
     async fn decide(&self, id: Uuid, state: ApprovalState, by: Uuid) -> Result<ApprovalRequest> {
         let mut store = self.store.lock().unwrap();
         match store.approvals.get_mut(&id) {
+            // Past-deadline pending rows are undecidable even before the
+            // sweep expires them (mirrors SQLite's expires_at guard in the
+            // UPDATE — the spec backend).
+            Some(req) if req.state == ApprovalState::Pending && req.expires_at <= Utc::now() => {
+                Err(Error::Conflict(format!(
+                    "approval {id} expired at {} — re-request if still needed",
+                    req.expires_at.to_rfc3339()
+                )))
+            }
             Some(req) if req.state == ApprovalState::Pending => {
                 req.state = state;
                 req.decided_at = Some(Utc::now());

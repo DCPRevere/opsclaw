@@ -371,27 +371,32 @@ approval_expire_due_only_touches_pending_past_deadline => |db| {
     let future_id = Uuid::new_v4();
     ApprovalRepo::insert(db, &approval(future_id)).await.unwrap(); // expires in 15m
 
+    // Decided BEFORE its deadline (decide refuses expired rows), with a
+    // deadline that will have passed by sweep time — proving the sweep
+    // skips decided rows even when they're past their window.
     let already_decided_id = Uuid::new_v4();
     let mut decided = approval(already_decided_id);
-    decided.expires_at = Utc::now() - chrono::Duration::minutes(1);
+    decided.expires_at = Utc::now() + chrono::Duration::minutes(1);
     ApprovalRepo::insert(db, &decided).await.unwrap();
     db.decide(already_decided_id, ApprovalState::Approved, Uuid::new_v4()).await.unwrap();
 
-    let swept = db.expire_due(Utc::now()).await.unwrap();
+    let sweep_at = Utc::now() + chrono::Duration::minutes(2);
+    let swept = db.expire_due(sweep_at).await.unwrap();
     assert_eq!(swept.len(), 1);
     assert_eq!(swept[0].id, expired_id);
     assert_eq!(swept[0].state, ApprovalState::Expired);
 
-    // Not-yet-due request is untouched.
+    // Not-yet-due request is untouched (expires in 15m, sweep at +2m).
     let still_pending = ApprovalRepo::get(db, future_id).await.unwrap().unwrap();
     assert_eq!(still_pending.state, ApprovalState::Pending);
 
-    // Already-decided request is untouched (still Approved, not Expired).
+    // Already-decided request is untouched (still Approved, not Expired),
+    // even though its deadline has passed by sweep time.
     let still_approved = ApprovalRepo::get(db, already_decided_id).await.unwrap().unwrap();
     assert_eq!(still_approved.state, ApprovalState::Approved);
 
     // Idempotent: a second sweep at the same instant finds nothing new.
-    let swept_again = db.expire_due(Utc::now()).await.unwrap();
+    let swept_again = db.expire_due(sweep_at).await.unwrap();
     assert!(swept_again.is_empty());
 }
 
@@ -488,6 +493,23 @@ control_claim_is_exactly_once_under_sequential_reclaim => |db| {
     // A DIFFERENT key (different occurrence, or different kind) is unaffected.
     assert!(db.claim("scan", "remundo::prod::cluster:2026-07-21T10:05", now).await.unwrap());
     assert!(db.claim("digest", "remundo::prod::cluster:2026-07-21T10:00", now).await.unwrap());
+}
+
+approval_past_its_deadline_is_undecidable => |db| {
+    // The sweep may not have reached it yet, but a pending request past
+    // expires_at must refuse approve/deny — otherwise a stale command
+    // stays executable arbitrarily long after its window closed.
+    let id = Uuid::new_v4();
+    let mut stale = approval(id);
+    stale.requested_at = Utc::now() - chrono::Duration::minutes(46);
+    stale.expires_at = Utc::now() - chrono::Duration::minutes(31);
+    ApprovalRepo::insert(db, &stale).await.unwrap();
+
+    let err = db.decide(id, ApprovalState::Approved, Uuid::new_v4()).await.unwrap_err();
+    assert!(err.to_string().contains("expired"), "{err}");
+    // Still pending on the row — the expiry sweep, not decide, owns the
+    // state transition.
+    assert_eq!(ApprovalRepo::get(db, id).await.unwrap().unwrap().state, ApprovalState::Pending);
 }
 
 control_release_reopens_a_claim_for_retry => |db| {

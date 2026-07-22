@@ -208,11 +208,24 @@ pub struct MemoryCfg {
     /// shared across multiple team daemons; a lone daemon never needs to set
     /// it. Defaults to "default".
     pub team_id: String,
+    /// The team's DECLARED retention horizon in days for memory facts (brief
+    /// §8: "retention/archival policy"). `None` (the default) = keep forever.
+    ///
+    /// HONEST LIMITATION: Hindsight exposes no delete-by-age/TTL API (its
+    /// surface is retain/recall/list/reflect, per-fact invalidate, and
+    /// whole-bank delete — nothing age-based), so OpsClaw cannot and does
+    /// NOT silently prune to this horizon. Setting it records the policy and
+    /// makes boot warn loudly that enforcement is operator-driven: archive
+    /// with `opsclaw-cli memory export`, retire individual facts with
+    /// `opsclaw-cli memory forget`. Validated (`>= 1` when set): 0 would
+    /// read as "keep nothing", a policy no code path enforces — refusing it
+    /// beats letting an operator believe the bank is being emptied.
+    pub retention_days: Option<u32>,
 }
 
 impl Default for MemoryCfg {
     fn default() -> Self {
-        MemoryCfg { hindsight_url: None, team_id: "default".to_string() }
+        MemoryCfg { hindsight_url: None, team_id: "default".to_string(), retention_days: None }
     }
 }
 
@@ -925,6 +938,17 @@ impl Config {
                     .into(),
             );
         }
+        // A declared-but-impossible retention: 0 days reads as "keep
+        // nothing", and no code path empties the bank (Hindsight has no
+        // delete-by-age API — see `MemoryCfg::retention_days`). Refuse it
+        // rather than let the config claim a policy nothing enforces.
+        if self.memory.retention_days == Some(0) {
+            errs.push(
+                "memory.retention_days must be >= 1 when set (0 would declare \"keep nothing\", \
+                 which nothing enforces — omit the field to keep facts forever)"
+                    .into(),
+            );
+        }
         // The web UI/gateway is reachable whenever the daemon is not fully
         // faked (an operator can always reach a live daemon's HTTP port,
         // regardless of which external providers are wired) — an unset
@@ -1034,6 +1058,40 @@ mod tests {
         );
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("hindsight_url"), "{err}");
+    }
+
+    #[test]
+    fn retention_days_zero_refuses_but_positive_and_absent_are_fine() {
+        // 0 declares "keep nothing" — a policy no code path enforces
+        // (Hindsight has no delete-by-age API); refuse rather than pretend.
+        let cfg = parse(
+            r#"
+            [memory]
+            hindsight_url = "http://localhost:8888"
+            retention_days = 0
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("retention_days"), "{err}");
+
+        // A positive horizon is a valid DECLARED policy (boot warns that
+        // enforcement is operator-driven — see boot::daemon_state). The
+        // store-backed jwt_secret keeps this non-fully-faked config past the
+        // live-mode gate (store refs are checked at connect time, not here).
+        let cfg = parse(
+            r#"
+            [http]
+            jwt_secret = "store:jwt"
+            [memory]
+            hindsight_url = "http://localhost:8888"
+            retention_days = 90
+            "#,
+        );
+        assert_eq!(cfg.memory.retention_days, Some(90));
+        cfg.validate().unwrap();
+
+        // Absent = keep forever, the default.
+        assert_eq!(Config::default().memory.retention_days, None);
     }
 
     #[test]

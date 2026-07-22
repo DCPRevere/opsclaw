@@ -27,6 +27,12 @@ fn speaker_for(principal: &Principal) -> String {
     }
 }
 
+/// Recall over the team bank. Retrieval is HYBRID keyword + semantic (brief
+/// §8's requirement) by the backend's own design — Hindsight's recall runs
+/// semantic, BM25 keyword, graph, and temporal strategies in parallel and
+/// rank-fuses them, driven by the query alone (see
+/// `memory::hindsight::HindsightClient::recall`) — so this tool needs no
+/// retrieval-mode argument and none exists to pass.
 pub struct RecallMemoryTool {
     pub memory: Arc<Memory>,
 }

@@ -368,6 +368,21 @@ enum MemoryCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Dump the team's memory bank to stdout — markdown by default (one
+    /// section per fact with timestamp/context), --json for the machine
+    /// form. A complete enumeration of every stored fact (raw and
+    /// consolidated layers) up to --limit, via the backend's list endpoint —
+    /// this is also the ARCHIVAL path: the backend has no delete-by-age
+    /// API, so archiving old facts means exporting here and forgetting
+    /// per-fact.
+    Export {
+        /// Max facts to dump; the output says so loudly if the bank holds
+        /// more.
+        #[arg(long, default_value_t = 10_000)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn opsclaw_home() -> PathBuf {
@@ -722,6 +737,24 @@ async fn dispatch(
                     );
                 }
             }
+            MemoryCommand::Export { limit, json } => {
+                let outcome = opsclaw::cli::memory_cmd::export(cfg_path, limit).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&outcome);
+                } else if !outcome.enabled {
+                    println!("{}", opsclaw::cli::memory_cmd::DISABLED_MESSAGE);
+                } else {
+                    // The render is timestamped at the moment of export (an
+                    // archive without a date is half an archive) and TESTED
+                    // in `cli::memory_cmd` — this arm only prints it.
+                    let exported_at =
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    print!(
+                        "{}",
+                        opsclaw::cli::memory_cmd::render_export_markdown(&outcome, &exported_at)
+                    );
+                }
+            }
         },
 
         // `chat` picks local-vs-remote per invocation: `--remote` forces
@@ -1043,6 +1076,8 @@ mod tests {
             &["opsclaw-cli", "memory", "store", "some fact", "--speaker", "dcp"],
             &["opsclaw-cli", "memory", "forget", "some-id"],
             &["opsclaw-cli", "memory", "forget", "some free text query", "--reason", "wrong"],
+            &["opsclaw-cli", "memory", "export"],
+            &["opsclaw-cli", "memory", "export", "--limit", "50", "--json"],
             &["opsclaw-cli", "chat"],
             &["opsclaw-cli", "chat", "is prod healthy?"],
             &["opsclaw-cli", "chat", "is prod healthy?", "--remote"],

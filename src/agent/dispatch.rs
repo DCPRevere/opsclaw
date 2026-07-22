@@ -28,7 +28,7 @@ use crate::agent::{self, AgentDeps};
 use crate::channels::{Channel, ChatHandler};
 use crate::config::{Config, SecretStore};
 use crate::db::{ApprovalRepo, IncidentRepo, RunbookRunRepo};
-use crate::domain::{FqTarget, Job, Principal};
+use crate::domain::{FqTarget, Job, Payload, Principal};
 use crate::http::webhook::IngestAlert;
 use crate::llm::{LlmProvider, Turn};
 use crate::memory::{self, Memory};
@@ -262,8 +262,39 @@ impl JobComposer for AgentJobComposer {
         let reply =
             agent::run_turn(&agent_deps, &ctx, &registry, team_context.as_deref(), prompt).await?;
 
-        if memory::should_retain(prompt) {
-            agent::retain_turn_detached(&self.deps.memory, "agent", prompt.to_string());
+        // Retain what the turn LEARNED, never what it was told to do: the
+        // prompt is static routine text (`DEFAULT_SCAN_PROMPT`, identical
+        // every tick) — the earlier code retained it as "agent said: Scan
+        // this target…", storing the instruction as an agent assertion; the
+        // REPLY is the finding. Framed per DESIGN §3 memory: a scan job's
+        // finding is a passive observation anchored to its target ("scan of
+        // {fq_target} observed: …"); any other scheduled job's reply is
+        // something the agent itself asserted ("agent said: …"). Gated on
+        // `acted` (AgentReply's own doc: "callers use it to decide things
+        // like whether to retain the turn to memory"): a quiet tick's
+        // "nothing wrong" reply fires ~48×/day/target at the default cadence,
+        // and retaining those would feed Hindsight's extractor (its own LLM
+        // call per retain) a stream of all-clears that swamps the
+        // consolidated layer — while a real finding has, per the scan
+        // contract, run opsclaw_notify or another action tool.
+        let text = reply.reply.trim();
+        if reply.acted && !text.is_empty() {
+            match &job.payload {
+                Payload::ScanRoutine { .. } => {
+                    // Seeded scan jobs are named "{project}::{env}::{target}-scan"
+                    // (`scheduler::jobs::seed_default_scan_jobs`); strip the
+                    // suffix to recover the fq_target the finding is anchored
+                    // to. An operator-renamed job falls back to its full name —
+                    // an odd qualifier beats dropping the attribution.
+                    let fq_target = job.name.strip_suffix("-scan").unwrap_or(&job.name);
+                    agent::retain_scan_observation_detached(&self.deps.memory, fq_target, text);
+                }
+                Payload::Text(_) | Payload::Prompt { .. } => {
+                    if memory::should_retain(text) {
+                        agent::retain_turn_detached(&self.deps.memory, "agent", text.to_string());
+                    }
+                }
+            }
         }
 
         // Mirrors `scheduler::NoopComposer`'s "ran fine but produced
@@ -272,7 +303,6 @@ impl JobComposer for AgentJobComposer {
         // `fire_one_job` already filters an empty body before claiming a
         // send slot, but returning `None` here (rather than
         // `Some("".into())`) keeps that decision visible at this seam too.
-        let text = reply.reply.trim();
         Ok((!text.is_empty()).then(|| text.to_string()))
     }
 }
@@ -330,11 +360,21 @@ impl IngestAlert for WebhookIngest {
             agent::run_turn(&agent_deps, &ctx, &registry, team_context.as_deref(), &message)
                 .await?;
 
-        if memory::should_retain(&message) {
-            agent::retain_turn_detached(&self.deps.memory, "agent", message.clone());
+        // Retain the agent's DIAGNOSIS, not the alert envelope: `message` is
+        // the observation-framed payload plus this module's instruction line —
+        // the earlier code retained that whole block as "agent said: ===
+        // OBSERVATION from alertmanager …", pooling third-party alert JSON in
+        // the shared bank as an agent assertion. The REPLY is genuinely
+        // something the agent asserted to the team (it goes out on the
+        // channel below), so it takes DESIGN §3 memory's said-framing; the
+        // raw payload is transient signal that belongs to the incident
+        // record, not to long-lived memory.
+        let diagnosis = reply.reply.trim();
+        if memory::should_retain(diagnosis) {
+            agent::retain_turn_detached(&self.deps.memory, "agent", diagnosis.to_string());
         }
 
-        if !reply.reply.trim().is_empty() {
+        if !diagnosis.is_empty() {
             self.channel
                 .send(crate::channels::OutboundMessage { operator: None, body: reply.reply })
                 .await?;
@@ -424,7 +464,7 @@ impl ChatHandler for ChatTurn {
 
         {
             let mut t = self.transcript.lock().expect("chat transcript lock poisoned");
-            t.push(Turn::User { content: attributed.clone() });
+            t.push(Turn::User { content: attributed });
             t.push(Turn::Assistant { content: reply.reply.clone(), tool_calls: Vec::new() });
             if t.len() > TRANSCRIPT_KEEP_ENTRIES {
                 let excess = t.len() - TRANSCRIPT_KEEP_ENTRIES;
@@ -432,8 +472,15 @@ impl ChatHandler for ChatTurn {
             }
         }
 
-        if memory::should_retain(&attributed) {
-            agent::retain_turn_detached(&self.deps.memory, speaker, attributed);
+        // The RAW message, never `attributed`: `Memory::retain` applies the
+        // "{speaker} said: …" framing itself (`frame_said`), so handing it
+        // the pre-framed transcript line double-framed every chat retain as
+        // "alice said: alice said: …" — mangling exactly the attribution
+        // DESIGN §3 memory requires the shared bank to preserve. The
+        // transcript keeps the framed form (who spoke is part of that
+        // record); memory gets speaker + raw text and frames once.
+        if memory::should_retain(message) {
+            agent::retain_turn_detached(&self.deps.memory, speaker, message.to_string());
         }
 
         Ok(reply.reply)
@@ -562,6 +609,17 @@ mod tests {
     }
 
     fn test_deps(llm: Arc<dyn LlmProvider>, policy: Arc<dyn PolicyExecute>) -> DispatchDeps {
+        test_deps_with_memory(llm, policy, Arc::new(Memory::disabled()))
+    }
+
+    /// As `test_deps`, but with a caller-supplied `Memory` — the attribution-
+    /// framing tests need a real (wiremock-backed) one so they can read the
+    /// exact retain bodies each dispatch path sends.
+    fn test_deps_with_memory(
+        llm: Arc<dyn LlmProvider>,
+        policy: Arc<dyn PolicyExecute>,
+        memory: Arc<Memory>,
+    ) -> DispatchDeps {
         let db = Arc::new(InMemoryDb::new());
         let config = Arc::new(test_config());
         let (_dir, store) = {
@@ -576,10 +634,43 @@ mod tests {
             db.clone() as Arc<dyn IncidentRepo>,
             db.clone() as Arc<dyn ApprovalRepo>,
             db.clone() as Arc<dyn RunbookRunRepo>,
-            Arc::new(Memory::disabled()),
+            memory,
             llm,
         )
         .unwrap()
+    }
+
+    /// A wiremock Hindsight stub that 200s every retain, plus the `Memory`
+    /// pointed at it. Tests drive a dispatch path, `drain_detached` the
+    /// background write, then read the recorded request bodies.
+    async fn recording_memory() -> (wiremock::MockServer, Arc<Memory>) {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let client = crate::memory::hindsight::HindsightClient::new(server.uri(), None, "acme");
+        let memory = Arc::new(Memory::disabled().with_hindsight(Arc::new(client)));
+        (server, memory)
+    }
+
+    /// The retain bodies' `content` fields, in arrival order, after waiting
+    /// (bounded) for every detached retain to land.
+    async fn retained_contents(server: &wiremock::MockServer, memory: &Arc<Memory>) -> Vec<String> {
+        assert!(
+            memory.drain_detached(std::time::Duration::from_secs(5)).await,
+            "detached retains must drain"
+        );
+        server
+            .received_requests()
+            .await
+            .expect("request recording enabled")
+            .iter()
+            .map(|r| {
+                let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+                body["items"][0]["content"].as_str().unwrap_or_default().to_string()
+            })
+            .collect()
     }
 
     // -----------------------------------------------------------------
@@ -924,6 +1015,142 @@ mod tests {
             probe.max_seen.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "turns from different entry points overlapped — the turn gate is not serializing"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // (e) attribution framing at every retain call site (DESIGN §3 memory:
+    //     `"{operator} said: …"` for chat, `"scan of {fq_target} observed:
+    //     …"` for scan findings) — asserted at the WIRE, not on helpers,
+    //     because the bug class this guards against (double-framing, or a
+    //     path handing the wrong text to the right helper) only shows up in
+    //     the body Hindsight actually receives.
+    // -----------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_retain_is_framed_exactly_once_with_the_speaker() {
+        let (server, memory) = recording_memory().await;
+        let mut scripted = ScriptedLlm::new();
+        scripted.push_text("noted");
+        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
+        let chat = ChatTurn::new(test_deps_with_memory(llm, policy, memory.clone()));
+
+        let op = Principal::Operator { account: uuid::Uuid::new_v4() };
+        chat.chat(op, "alice", "the payments pod OOMs above 400 req/s").await.unwrap();
+
+        // ChatTurn::drain is the seam `http::server::run`'s shutdown calls
+        // (via `drain_background_work`) — once it reports drained, the
+        // detached write has LANDED, which is the whole SIGTERM promise
+        // (DESIGN §3 memory). Asserted here end-to-end: drain first, then
+        // read what reached the wire.
+        assert!(chat.drain(std::time::Duration::from_secs(5)).await);
+        assert_eq!(memory.detached_in_flight(), 0);
+
+        // Exactly one retain, framed ONCE — the regression this pins: the
+        // chat path used to hand Memory the pre-framed transcript line, so
+        // the bank stored "alice said: alice said: …".
+        let contents = retained_contents(&server, &memory).await;
+        assert_eq!(contents, vec!["alice said: the payments pod OOMs above 400 req/s".to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scan_finding_is_retained_as_an_observation_of_its_target() {
+        let (server, memory) = recording_memory().await;
+        let mut scripted = ScriptedLlm::new();
+        scripted
+            .push_tool_call(
+                "opsclaw_notify",
+                json!({
+                    "severity": "critical",
+                    "target": "remundo::prod::web-1",
+                    "fault_class": "disk_full",
+                    "resource": "",
+                    "evidence": "disk at 98%",
+                    "hypothesis": "runaway log growth"
+                }),
+            )
+            .push_text("disk on web-1 at 98%; opened a critical incident.");
+        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
+        let composer = AgentJobComposer::new(test_deps_with_memory(llm, policy, memory.clone()));
+        let job = Job::new(
+            "remundo::prod::web-1-scan",
+            crate::domain::Schedule::Interval { every_minutes: 5 },
+            Payload::ScanRoutine { routine: "record_scan".into() },
+        )
+        .system();
+
+        composer
+            .compose(&job, "Scan remundo::prod::web-1 for anomalies.", Utc::now())
+            .await
+            .unwrap();
+
+        // The FINDING (the reply), framed as a scan observation of the
+        // job's target — never the static routine prompt, and never
+        // "agent said:" (the framing gap this closes: scan retains used to
+        // store the instruction text as an agent assertion).
+        let contents = retained_contents(&server, &memory).await;
+        assert_eq!(
+            contents,
+            vec![
+                "scan of remundo::prod::web-1 observed: disk on web-1 at 98%; opened a critical \
+                 incident."
+                    .to_string()
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quiet_scan_retains_nothing() {
+        let (server, memory) = recording_memory().await;
+        let mut scripted = ScriptedLlm::new();
+        // No tool calls → acted=false: an all-clear tick, ~48×/day/target at
+        // the default cadence, must not reach the bank (see compose's own
+        // WHY-comment).
+        scripted.push_text("nothing wrong; all metrics nominal.");
+        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
+        let composer = AgentJobComposer::new(test_deps_with_memory(llm, policy, memory.clone()));
+        let job = Job::new(
+            "remundo::prod::web-1-scan",
+            crate::domain::Schedule::Interval { every_minutes: 5 },
+            Payload::ScanRoutine { routine: "record_scan".into() },
+        )
+        .system();
+
+        composer.compose(&job, "scan", Utc::now()).await.unwrap();
+
+        let contents = retained_contents(&server, &memory).await;
+        assert!(contents.is_empty(), "an all-clear scan must not be retained: {contents:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn webhook_retains_the_diagnosis_as_agent_speech_not_the_payload() {
+        let (server, memory) = recording_memory().await;
+        let mut scripted = ScriptedLlm::new();
+        scripted.push_text("the payments pod is OOMing again; same pattern as last week.");
+        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
+        let ingest = WebhookIngest::new(
+            test_deps_with_memory(llm, policy, memory.clone()),
+            Arc::new(RecordingChannel::new()),
+        );
+
+        let payload = json!({"alertname": "HighMem", "instance": "remundo::prod::web-1"});
+        ingest.ingest("alertmanager", &payload).await.unwrap();
+
+        // The DIAGNOSIS is retained as something the agent said; the alert
+        // envelope (observation fence + payload JSON) never reaches the bank
+        // — the framing gap this closes: webhook retains used to store the
+        // whole fenced payload as "agent said: === OBSERVATION …".
+        let contents = retained_contents(&server, &memory).await;
+        assert_eq!(
+            contents,
+            vec![
+                "agent said: the payments pod is OOMing again; same pattern as last week."
+                    .to_string()
+            ]
         );
     }
 

@@ -313,6 +313,22 @@ pub fn retain_turn_detached(
     memory.retain_detached(speaker.into(), message.into());
 }
 
+/// The observation sibling of [`retain_turn_detached`]: retain a scan turn's
+/// FINDING to team memory, detached, framed `"scan of {fq_target} observed:
+/// …"` (DESIGN §3 memory) so a heartbeat's passive finding is never pooled
+/// as something an operator or the agent said. No `should_retain` pre-gate
+/// here — the framing is applied inside `Memory::retain_observation`, which
+/// runs the filter on the framed text itself (a finding is a statement by
+/// construction; the filter's real job on this path is the secret-shape
+/// defence, which must see what will actually be stored).
+pub fn retain_scan_observation_detached(
+    memory: &Arc<Memory>,
+    fq_target: impl Into<String>,
+    finding: impl Into<String>,
+) {
+    memory.retain_observation_detached(fq_target.into(), finding.into());
+}
+
 fn finish(acted: bool, reply: impl Into<String>) -> AgentReply {
     AgentReply { reply: reply.into(), acted }
 }

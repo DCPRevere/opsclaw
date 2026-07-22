@@ -260,11 +260,18 @@ impl HindsightClient {
 
     /// Configure the team's bank once, so extraction/reflection are steered for
     /// SRE operations instead of running on stock defaults. Safe to call
-    /// repeatedly (PATCH is idempotent for our fixed config); callers gate it to
-    /// first-use to avoid a PATCH on every retain.
+    /// repeatedly (PATCH is idempotent for our fixed config); the daemon calls
+    /// it once at boot (`boot::daemon_state`), not on every retain.
+    ///
+    /// Short timeout (READ_TIMEOUT, not the client's 30s write default): this
+    /// sits on the boot path, and a down/hung Hindsight must delay daemon
+    /// start by seconds, not half a minute — the PATCH is tiny, and a missed
+    /// configure only means stock defaults until the next boot (loudly
+    /// warned, never fatal).
     pub async fn ensure_configured(&self) -> Result<()> {
         let resp = self
             .req(reqwest::Method::PATCH, &format!("/v1/default/banks/{}/config", self.bank))
+            .timeout(READ_TIMEOUT)
             .json(&bank_config())
             .send()
             .await
@@ -288,9 +295,16 @@ impl HindsightClient {
         r
     }
 
-    /// recall: the facts most RELEVANT to `query` (semantic ranking, token-
-    /// budgeted) — the agent's topical lookup, as distinct from `list`'s full
-    /// enumeration.
+    /// recall: the facts most RELEVANT to `query` (token-budgeted ranking) —
+    /// the agent's topical lookup, as distinct from `list`'s full enumeration.
+    ///
+    /// Retrieval is HYBRID by the backend's own design (brief §8 requires
+    /// "hybrid keyword + semantic search"): Hindsight's `/memories/recall`
+    /// runs four strategies in parallel — semantic similarity, BM25 keyword,
+    /// graph traversal, and temporal — and fuses them with Reciprocal Rank
+    /// Fusion before reranking. There is no retrieval-mode parameter to pass
+    /// (the query alone drives all four), so the plain `{query, max_tokens}`
+    /// body below already gets keyword AND semantic matching on every call.
     pub async fn recall(&self, query: &str, max_tokens: u32) -> Result<Vec<MemoryItem>> {
         let body = recall_body(query, max_tokens);
         tracing::debug!(bank = %self.bank, query, max_tokens, "memory.recall query");
@@ -469,17 +483,35 @@ fn recall_body(query: &str, max_tokens: u32) -> serde_json::Value {
 /// handle the curation endpoints (`invalidate`) address a single fact by. The
 /// id is empty when the response omitted it (older shapes / recall payloads that
 /// don't carry it); a caller wanting to forget a fact must have a non-empty id.
+///
+/// `kind`/`context`/`mentioned_at` are the per-item annotations Hindsight
+/// carries alongside the text (epistemic type, the situational note the
+/// retain supplied, and the retention timestamp) — optional because older
+/// shapes / partial payloads may omit any of them. They exist for the
+/// human-readable export (brief §8), which wants a timestamped, contextual
+/// dump, not just bare fact strings.
 #[derive(Debug, Clone)]
 pub struct MemoryItem {
     pub id: String,
     pub fact: String,
+    /// Epistemic type (`world` / `experience` / `observation`), when reported.
+    pub kind: Option<String>,
+    /// The situational note supplied at retain time ("operator chat with
+    /// OpsClaw", "scan finding"), when reported.
+    pub context: Option<String>,
+    /// Retention timestamp (RFC3339), when reported.
+    pub mentioned_at: Option<String>,
 }
 
 impl MemoryItem {
     fn from_json(r: &serde_json::Value) -> Self {
+        let opt = |key: &str| r[key].as_str().map(str::to_string);
         MemoryItem {
             id: r["id"].as_str().unwrap_or_default().to_string(),
             fact: r["text"].as_str().unwrap_or_default().to_string(),
+            kind: opt("type"),
+            context: opt("context"),
+            mentioned_at: opt("mentioned_at"),
         }
     }
 }
@@ -591,10 +623,15 @@ mod tests {
         let it = MemoryItem::from_json(&r);
         assert_eq!(it.id, "mem-1", "the id is the handle curation addresses a fact by");
         assert_eq!(it.fact, "remundo::prod::cluster's payments pod OOMs above 400 req/s.");
+        // The per-item annotations the export renders ride along when present.
+        assert_eq!(it.kind.as_deref(), Some("observation"));
+        assert_eq!(it.mentioned_at.as_deref(), Some("2026-06-18T17:57:17Z"));
         // A response missing the id yields an empty id, not a panic — callers that
-        // want to forget a fact check for a non-empty id first.
+        // want to forget a fact check for a non-empty id first; the optional
+        // annotations are None, never a panic or an empty-string masquerade.
         let no_id = MemoryItem::from_json(&serde_json::json!({ "text": "x" }));
         assert_eq!(no_id.id, "");
+        assert!(no_id.kind.is_none() && no_id.context.is_none() && no_id.mentioned_at.is_none());
     }
 
     #[tokio::test]

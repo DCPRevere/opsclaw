@@ -1,6 +1,7 @@
-//! `opsclaw-cli memory recall|store|forget` (DESIGN.md §1: "memory" in the
-//! local command list) — thin wrappers over `memory::Memory`, the same
-//! facade the daemon's chat/scan turns use. No Hindsight logic lives here:
+//! `opsclaw-cli memory recall|store|forget|export` (DESIGN.md §1: "memory"
+//! in the local command list; export is brief §8's human-readable
+//! export/archival mechanism) — thin wrappers over `memory::Memory`, the
+//! same facade the daemon's chat/scan turns use. No Hindsight logic lives here:
 //! `memory::Memory` already owns retain/recall/forget and the honest
 //! `is_enabled()` no-op stance; this module only builds a `Memory` handle
 //! from config and formats its answers.
@@ -99,6 +100,96 @@ pub async fn store(cfg_path: &Path, speaker: &str, text: &str) -> Result<StoreOu
 }
 
 #[derive(Debug, Serialize)]
+pub struct ExportOutcome {
+    pub enabled: bool,
+    /// The bank's full fact count — greater than `records.len()` when the
+    /// `limit` cap truncated the dump (the markdown marks that explicitly;
+    /// an archive that silently looked complete would be a lie).
+    pub total: usize,
+    pub records: Vec<ExportRecordOut>,
+}
+
+/// One exported fact with the annotations Hindsight reported for it —
+/// richer than `RecordOut` because an archival dump wants the timestamp and
+/// context (brief §8: human-readable export), while `recall` output stays a
+/// terse fact list.
+#[derive(Debug, Serialize)]
+pub struct ExportRecordOut {
+    pub id: String,
+    pub fact: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned_at: Option<String>,
+}
+
+/// `memory export [--json] [--limit N]` — the team bank's archival dump
+/// (brief §8), via Hindsight's `list` endpoint: the COMPLETE deterministic
+/// enumeration (every stored fact, raw and consolidated layers alike — see
+/// `Memory::export`), not a best-effort broad recall. Honest empty result
+/// when memory is disabled, same contract as `recall`.
+pub async fn export(cfg_path: &Path, limit: usize) -> Result<ExportOutcome> {
+    let memory = memory_from_config(cfg_path)?;
+    let enabled = memory.is_enabled();
+    let (records, total) = if enabled { memory.export(limit).await? } else { (Vec::new(), 0) };
+    Ok(ExportOutcome {
+        enabled,
+        total,
+        records: records
+            .into_iter()
+            .map(|r| ExportRecordOut {
+                id: r.id,
+                fact: r.fact,
+                kind: r.kind,
+                context: r.context,
+                mentioned_at: r.mentioned_at,
+            })
+            .collect(),
+    })
+}
+
+/// The export's default human-readable form: one markdown section per
+/// memory, annotations (timestamp / context / kind / id) as a sub-list.
+/// Lives here (not in `bin/cli`) so the format is TESTED — the whole point
+/// of the command is that a human or a later import can rely on its shape.
+/// `exported_at` is passed in (not read from the clock) for the same
+/// reason.
+pub fn render_export_markdown(outcome: &ExportOutcome, exported_at: &str) -> String {
+    let mut out = String::new();
+    out.push_str("# OpsClaw team memory export\n\n");
+    out.push_str(&format!(
+        "- exported: {exported_at}\n- facts: {} of {} in the bank\n",
+        outcome.records.len(),
+        outcome.total
+    ));
+    if outcome.records.len() < outcome.total {
+        out.push_str(&format!(
+            "- TRUNCATED: the bank holds {} more fact(s) than this dump — re-run with a higher \
+             --limit for a complete archive\n",
+            outcome.total - outcome.records.len()
+        ));
+    }
+    for (i, r) in outcome.records.iter().enumerate() {
+        out.push_str(&format!("\n## {}\n\n{}\n\n", i + 1, r.fact.trim()));
+        if let Some(ts) = &r.mentioned_at {
+            out.push_str(&format!("- retained: {ts}\n"));
+        }
+        if let Some(ctx) = &r.context {
+            out.push_str(&format!("- context: {ctx}\n"));
+        }
+        if let Some(kind) = &r.kind {
+            out.push_str(&format!("- kind: {kind}\n"));
+        }
+        if !r.id.is_empty() {
+            out.push_str(&format!("- id: {}\n", r.id));
+        }
+    }
+    out
+}
+
+#[derive(Debug, Serialize)]
 pub struct ForgetOutcome {
     pub enabled: bool,
     pub forgotten: Vec<String>,
@@ -184,6 +275,81 @@ mod tests {
         let outcome = forget(&cfg, "some-id", "operator correction").await.unwrap();
         assert!(!outcome.enabled);
         assert!(outcome.forgotten.is_empty());
+    }
+
+    #[tokio::test]
+    async fn export_is_honest_when_memory_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_config(&dir, None);
+        let outcome = export(&cfg, 100).await.unwrap();
+        assert!(!outcome.enabled);
+        assert_eq!(outcome.total, 0);
+        assert!(outcome.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn export_dumps_the_bank_with_annotations_and_marks_truncation() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"^/v1/default/banks/.*/memories/list$"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total": 3,
+                "items": [
+                    {
+                        "id": "m1",
+                        "text": "the payments pod OOMs above 400 req/s",
+                        "type": "observation",
+                        "context": "scan finding",
+                        "mentioned_at": "2026-06-18T17:57:17Z"
+                    },
+                    { "id": "m2", "text": "dcp said: restart fixed it" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_config(&dir, Some(&server.uri()));
+        // limit=2 < total=3: the outcome must carry the FULL total so the
+        // rendered archive can say it is incomplete.
+        let outcome = export(&cfg, 2).await.unwrap();
+        assert!(outcome.enabled);
+        assert_eq!(outcome.total, 3);
+        assert_eq!(outcome.records.len(), 2);
+        assert_eq!(outcome.records[0].mentioned_at.as_deref(), Some("2026-06-18T17:57:17Z"));
+
+        let md = render_export_markdown(&outcome, "2026-07-22T00:00:00Z");
+        // One section per memory, annotations as a sub-list…
+        assert!(md.contains("# OpsClaw team memory export"), "{md}");
+        assert!(md.contains("## 1\n\nthe payments pod OOMs above 400 req/s"), "{md}");
+        assert!(md.contains("- retained: 2026-06-18T17:57:17Z"), "{md}");
+        assert!(md.contains("- context: scan finding"), "{md}");
+        assert!(md.contains("- id: m1"), "{md}");
+        assert!(md.contains("## 2\n\ndcp said: restart fixed it"), "{md}");
+        // …and the truncation is called out, never silent.
+        assert!(md.contains("TRUNCATED"), "{md}");
+        assert!(md.contains("1 more fact(s)"), "{md}");
+        assert!(md.contains("- facts: 2 of 3 in the bank"), "{md}");
+    }
+
+    #[test]
+    fn complete_export_markdown_has_no_truncation_marker() {
+        let outcome = ExportOutcome {
+            enabled: true,
+            total: 1,
+            records: vec![ExportRecordOut {
+                id: String::new(), // an id-less fact renders without an id line
+                fact: "web-1 lives in us-east-1".into(),
+                kind: None,
+                context: None,
+                mentioned_at: None,
+            }],
+        };
+        let md = render_export_markdown(&outcome, "2026-07-22T00:00:00Z");
+        assert!(!md.contains("TRUNCATED"), "{md}");
+        assert!(!md.contains("- id:"), "{md}");
+        assert!(md.contains("- facts: 1 of 1 in the bank"), "{md}");
+        assert!(md.contains("- exported: 2026-07-22T00:00:00Z"), "{md}");
     }
 
     #[tokio::test]

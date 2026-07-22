@@ -398,6 +398,7 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
     cfg.projects.push(crate::config::ProjectCfg {
         name: "remundo".into(),
         autonomy: None,
+        escalation: None,
         envs: vec![crate::config::EnvCfg {
             name: "prod".into(),
             autonomy: None,
@@ -886,6 +887,74 @@ async fn escalation_walks_configured_steps_and_resolves_named_contacts() {
     let stored = get_incident(&db, incident.id).await;
     assert_eq!(stored.escalation_step, 1);
     assert_eq!(stored.step_started_at, Some(t0 + Duration::minutes(16)));
+}
+
+#[tokio::test]
+async fn escalation_resolves_the_chain_per_incident_project() {
+    // Two open incidents in DIFFERENT projects on the same tick: project
+    // "aproj" declares its own [project.escalation] naming the recording
+    // channel, so its incident pages there; project "bproj" declares
+    // nothing and inherits the GLOBAL chain, whose "*" contact is the
+    // broadcast fan-out. One drive() pass must route each to its own
+    // chain — the whole point of per-project escalation.
+    use crate::config::{EscalationCfg, EscalationStepCfg};
+    let db = Arc::new(InMemoryDb::new());
+    let broadcast = Arc::new(RecordingChannel::new());
+    let named = Arc::new(RecordingChannel::new()); // Channel::name() == "recording"
+    let mut cfg = Config::default();
+    cfg.escalation.steps = vec![EscalationStepCfg {
+        contact: "*".into(),
+        ack_timeout_minutes: 60,
+        repeat_interval_minutes: 20,
+    }];
+    cfg.projects.push(crate::config::ProjectCfg {
+        name: "aproj".into(),
+        autonomy: None,
+        escalation: Some(EscalationCfg {
+            steps: vec![EscalationStepCfg {
+                contact: "recording".into(), // resolves to `named`
+                ack_timeout_minutes: 15,
+                repeat_interval_minutes: 5,
+            }],
+        }),
+        envs: vec![],
+    });
+    cfg.projects.push(crate::config::ProjectCfg {
+        name: "bproj".into(),
+        autonomy: None,
+        escalation: None, // inherits the global chain
+        envs: vec![],
+    });
+    cfg.validate().unwrap();
+    let deps = SchedulerDeps {
+        jobs: db.clone(),
+        control: db.clone(),
+        incidents: db.clone(),
+        approvals: db.clone(),
+        channel: broadcast.clone(),
+        named_channels: vec![named.clone()],
+        composer: Arc::new(NoopComposer),
+        config: Arc::new(cfg),
+    };
+    let handle = SchedulerHandle::new(60_000);
+    let t0 = t(9, 0);
+    let mut a = active_incident("fp-aproj", t0);
+    a.target = crate::domain::FqTarget::new("aproj", "prod", "web-1");
+    let mut b = active_incident("fp-bproj", t0);
+    b.target = crate::domain::FqTarget::new("bproj", "prod", "db-1");
+    insert_incident(&db, &a).await;
+    insert_incident(&db, &b).await;
+
+    escalations::drive(&deps, &handle, t0).await.unwrap();
+
+    // aproj's incident went to the NAMED channel only…
+    let named_sent = named.sent();
+    assert_eq!(named_sent.len(), 1);
+    assert!(named_sent[0].body.contains("aproj::prod::web-1"), "{}", named_sent[0].body);
+    // …and bproj's went through the global broadcast fan-out only.
+    let broadcast_sent = broadcast.sent();
+    assert_eq!(broadcast_sent.len(), 1);
+    assert!(broadcast_sent[0].body.contains("bproj::prod::db-1"), "{}", broadcast_sent[0].body);
 }
 
 #[tokio::test]

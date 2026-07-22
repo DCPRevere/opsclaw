@@ -53,6 +53,15 @@ impl EscalationChain {
             return Err(crate::Error::Config("escalation chain has no steps".into()));
         }
         for (i, step) in self.steps.iter().enumerate() {
+            // An empty/whitespace contact is always a typo: the driver
+            // would fall back to broadcast (safe direction), but the
+            // operator plainly meant to name SOMEONE — refuse at boot like
+            // every other silently-wrong config shape.
+            if step.contact.trim().is_empty() {
+                return Err(crate::Error::Config(format!(
+                    "escalation step {i}: contact must not be empty (use \"*\" to broadcast)"
+                )));
+            }
             if step.ack_timeout <= Duration::zero() {
                 return Err(crate::Error::Config(format!(
                     "escalation step {i} ({}): ack_timeout must be positive",

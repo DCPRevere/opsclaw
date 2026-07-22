@@ -222,6 +222,22 @@
         <button class="ghost" id="config-reload-btn">Reload</button>
       </div>
     </div>
+    <div class="card">
+      <h2>Escalations, policy &amp; autonomy</h2>
+      <p class="muted">Structured edits, validated with the same checks the daemon boots with; the previous config is kept as <code>config.toml.bak</code>. Changes apply on the next daemon restart.</p>
+      <p class="muted">Escalation chain — <code>{"project": null, "steps": [{"contact": "*", "ack_timeout_minutes": 60, "repeat_interval_minutes": 20}]}</code>; set <code>"project"</code> to a project name for its override (empty steps remove it).</p>
+      <textarea id="config-escalation" rows="5" style="font-family:ui-monospace,monospace"></textarea>
+      <p class="muted">Policy bounds — any of <code>auto_approve</code>, <code>always_ask</code>, <code>command_allowlist</code>, <code>forbidden_paths</code> (a provided list replaces that list).</p>
+      <textarea id="config-policy" rows="5" style="font-family:ui-monospace,monospace"></textarea>
+      <p class="muted">Autonomy — <code>{"project": "...", "env": "...", "target": "...", "autonomy": "observe|suggest|act_on_known|auto"}</code> (omit env/target for higher levels; <code>"auto"</code> also needs <code>"confirm_auto": true</code>).</p>
+      <textarea id="config-autonomy" rows="3" style="font-family:ui-monospace,monospace"></textarea>
+      <div class="err" id="config-edit-err"></div>
+      <div class="approval-actions">
+        <button class="primary" id="config-escalation-save-btn">Apply escalation</button>
+        <button class="primary" id="config-policy-save-btn">Apply policy</button>
+        <button class="primary" id="config-autonomy-save-btn">Apply autonomy</button>
+      </div>
+    </div>
   </section>
 
 </main>

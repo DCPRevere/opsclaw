@@ -734,6 +734,7 @@ mod tests {
             projects: vec![ProjectCfg {
                 name: "remundo".into(),
                 autonomy: None,
+                escalation: None,
                 envs: vec![EnvCfg {
                     name: "prod".into(),
                     autonomy: None,

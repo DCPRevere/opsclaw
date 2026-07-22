@@ -43,6 +43,12 @@ use super::state::AppState;
 /// not by gating the static shell itself.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        // Bare root goes to the app shell — every first-run operator types
+        // `localhost:8484` and a 404 there reads as "daemon broken".
+        // Temporary (not 308): browsers cache permanent redirects, which
+        // would pin `/` to `/app` even if a future version serves something
+        // else at the root.
+        .route("/", get(|| async { axum::response::Redirect::temporary("/app") }))
         .route("/ready", get(ready))
         .route("/app", get(pages::app_shell))
         .route("/app/{name}", get(pages::app_module))

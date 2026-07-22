@@ -116,9 +116,12 @@ pub struct ToolCtx {
     pub memory: Option<Arc<Memory>>,
     pub config: Option<Arc<Config>>,
     /// Resolved endpoint credentials for configured `Resource`s
-    /// (elasticsearch/azure_service_bus/eventstore/prometheus/argocd — see
-    /// `endpoint`'s module doc for the wiring gap: this is `None` until a
-    /// later wave resolves `ResourceCfg.credential` and populates it).
+    /// (elasticsearch/azure_service_bus/eventstore/prometheus/argocd),
+    /// built by `tools::endpoint::registry_from_config` at boot. Used for
+    /// resource-target validation and the known-address error listing —
+    /// the actual HTTP transport for reads lives behind the policy choke
+    /// point (`endpoint`'s module doc). `None` only in contexts that
+    /// weren't given one (some tests).
     pub endpoints: Option<Arc<EndpointRegistry>>,
     /// The runbook DEFINITION store (title -> parsed `Runbook`, loaded from
     /// `config.daemon.runbooks_dir`) — distinct from `runbook_runs`, which

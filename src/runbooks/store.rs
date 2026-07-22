@@ -131,6 +131,32 @@ impl RunbookStore {
             .map(|lr| lr.runbook.clone())
             .collect()
     }
+
+    /// Code-side pre-approval lookup for the agent command path
+    /// (`tools::executor::run_command`): the best-matching runbook TITLE
+    /// for a composed command against a resolved target, per
+    /// [`crate::runbooks::matching::best_command_match`]'s conjunctive
+    /// fail-closed rule (glob AND keyword, or no match). The title flows
+    /// into `policy::CommandRequest.runbook` — the pre-approval that
+    /// unlocks `act_on_known` (DESIGN §4 Runbooks) — so this method is
+    /// deliberately the only store surface that produces one, and it takes
+    /// no model-supplied inputs: `command` is code-composed by the tool,
+    /// `target` is dispatcher-resolved.
+    ///
+    /// `tool` is trace context only — deliberately NOT part of the keyword
+    /// haystack: a keyword equal to a tool's name (`"docker"`, `"ssh"`)
+    /// must not match every command that tool composes.
+    pub fn match_for_command(
+        &self,
+        tool: &str,
+        command: &str,
+        target: &crate::domain::FqTarget,
+    ) -> Option<String> {
+        let runbooks = self.runbooks_for_matching();
+        let matched = crate::runbooks::matching::best_command_match(&runbooks, command, target)?;
+        tracing::debug!(tool, runbook = matched.title(), %target, "runbook matched for command");
+        Some(matched.title().to_string())
+    }
 }
 
 /// The actual directory walk + parse loop, shared by `load` and `reload`.
@@ -296,5 +322,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = RunbookStore::load(dir.path()).unwrap();
         assert_eq!(store.dir(), dir.path());
+    }
+
+    #[test]
+    fn match_for_command_returns_the_matching_title() {
+        let src = "+++\ntitle = \"Restart flapping nginx\"\n\n[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"\n+++\n- step one\n";
+        let rb = crate::runbooks::Runbook::parse(src).unwrap();
+        let store = RunbookStore::from_parsed("/nonexistent", vec![("nginx.md".into(), rb)]);
+        let target = crate::domain::FqTarget::new("remundo", "prod", "web-1");
+        assert_eq!(
+            store.match_for_command("systemd", "systemctl restart nginx", &target),
+            Some("Restart flapping nginx".to_string())
+        );
+    }
+
+    #[test]
+    fn match_for_command_none_when_nothing_pre_approves() {
+        let src = "+++\ntitle = \"Restart flapping nginx\"\n\n[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"\n+++\n- step one\n";
+        let rb = crate::runbooks::Runbook::parse(src).unwrap();
+        let store = RunbookStore::from_parsed("/nonexistent", vec![("nginx.md".into(), rb)]);
+        let target = crate::domain::FqTarget::new("remundo", "prod", "web-1");
+        // Keyword miss on a matching target: fail closed.
+        assert_eq!(store.match_for_command("systemd", "systemctl restart postgres", &target), None);
+        // Empty store: fail closed.
+        let empty = RunbookStore::from_parsed("/nonexistent", vec![]);
+        assert_eq!(empty.match_for_command("systemd", "systemctl restart nginx", &target), None);
     }
 }

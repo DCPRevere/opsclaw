@@ -1,13 +1,14 @@
 //! Shared plumbing for executor-backed tools (DESIGN.md §4 "Tool surface",
 //! item 1): every tool that composes a concrete command line against a
-//! target funnels through [`run_command`], which does exactly two things —
-//! build the `policy::CommandRequest` from trusted context plus the
-//! composed command, and turn the resulting `PolicyOutcome` into the
-//! `ToolResult`/`ToolError` the agent loop expects. Tools own vocabulary
-//! (what command to compose for "check disk usage"); this module owns the
-//! ONE path from a composed command line to `ctx.policy.execute` — no tool
-//! calls `PolicyExecute::execute` directly, so every executor-backed tool
-//! reports its outcome identically.
+//! target funnels through [`run_command`], which does exactly three things —
+//! derive the code-side runbook pre-approval (the deterministic store
+//! matcher; see the comment inside), build the `policy::CommandRequest`
+//! from trusted context plus the composed command, and turn the resulting
+//! `PolicyOutcome` into the `ToolResult`/`ToolError` the agent loop
+//! expects. Tools own vocabulary (what command to compose for "check disk
+//! usage"); this module owns the ONE path from a composed command line to
+//! `ctx.policy.execute` — no tool calls `PolicyExecute::execute` directly,
+//! so every executor-backed tool reports its outcome identically.
 
 use crate::domain::{FqTarget, RiskClass};
 use crate::policy::{CommandRequest, PolicyOutcome};
@@ -26,6 +27,18 @@ pub async fn run_command(
     declared_risk: RiskClass,
     hypothesis: Option<String>,
 ) -> Result<ToolResult, ToolError> {
+    // Runbook pre-approval (DESIGN.md §4 Runbooks: "a runbook match is the
+    // pre-approval that unlocks `act_on_known` in the policy gate") is
+    // derived HERE, in code, from the loaded store plus the tool-composed
+    // command and the dispatcher-resolved target — never from model output,
+    // which could otherwise grant itself pre-approval by naming a runbook.
+    // The gate trusts `CommandRequest.runbook` on exactly this basis: its
+    // only writers are this lookup and the operator-driven CLI path
+    // (`cli::runbook_cmd`), so policy re-derives nothing. No store wired
+    // (or no match) means `None` — at `act_on_known` the command then
+    // queues for a human, the fail-closed default.
+    let runbook =
+        ctx.runbooks.as_ref().and_then(|store| store.match_for_command(tool, &command, &target));
     let req = CommandRequest {
         principal: ctx.principal.clone(),
         tool: tool.to_string(),
@@ -33,7 +46,7 @@ pub async fn run_command(
         command,
         declared_risk,
         hypothesis,
-        runbook: None,
+        runbook,
     };
     let outcome = ctx
         .policy
@@ -258,5 +271,169 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Internal(_)));
+    }
+
+    // ---- the code-side runbook pre-approval lookup ------------------------
+
+    fn nginx_store() -> crate::runbooks::RunbookStore {
+        let src = "+++\ntitle = \"Restart flapping nginx\"\n\n[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"\n+++\n- step one\n";
+        let rb = crate::runbooks::Runbook::parse(src).unwrap();
+        crate::runbooks::RunbookStore::from_parsed("/nonexistent", vec![("nginx.md".into(), rb)])
+    }
+
+    #[tokio::test]
+    async fn matched_runbook_title_lands_in_the_command_request() {
+        let policy = std::sync::Arc::new(RecordingPolicy::always_executes(0, ""));
+        let mut ctx = ctx_with(policy.clone());
+        ctx.runbooks = Some(std::sync::Arc::new(nginx_store()));
+
+        run_command(
+            &ctx,
+            "systemd",
+            target(),
+            "systemctl restart nginx".into(),
+            RiskClass::Medium,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let seen = policy.seen.lock().unwrap();
+        assert_eq!(seen[0].runbook.as_deref(), Some("Restart flapping nginx"));
+    }
+
+    #[tokio::test]
+    async fn unmatched_command_carries_no_runbook() {
+        let policy = std::sync::Arc::new(RecordingPolicy::always_executes(0, ""));
+        let mut ctx = ctx_with(policy.clone());
+        ctx.runbooks = Some(std::sync::Arc::new(nginx_store()));
+
+        run_command(
+            &ctx,
+            "systemd",
+            target(),
+            "systemctl restart postgres".into(),
+            RiskClass::Medium,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let seen = policy.seen.lock().unwrap();
+        assert!(seen[0].runbook.is_none(), "keyword miss must not pre-approve");
+    }
+
+    // ---- act_on_known end to end through a REAL policy engine -------------
+    //
+    // The point of the whole wiring: at `act_on_known`, a runbook-matched
+    // Medium command EXECUTES autonomously while the same-shaped unmatched
+    // command queues for a human. Adapts `policy::tests`' rig (real
+    // `Policy`, fake `TargetExecutor`) the way `tools::mod::endpoint_test_ctx`
+    // does for endpoint reads, but with an executor-backed target.
+
+    /// Records every command line it ran, returns exit 0.
+    struct RigExecutor {
+        ran: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl crate::targets::TargetExecutor for RigExecutor {
+        async fn run(
+            &self,
+            cmd: &crate::targets::Command,
+            _timeout: std::time::Duration,
+        ) -> crate::Result<ExecOutput> {
+            self.ran.lock().unwrap().push(cmd.line.clone());
+            Ok(ExecOutput {
+                exit_code: 0,
+                stdout: "done".into(),
+                stderr: String::new(),
+                duration_ms: 1,
+            })
+        }
+        async fn probe(&self) -> crate::Result<crate::targets::ProbeReport> {
+            Ok(crate::targets::ProbeReport { reachable: true, detail: "rig".into() })
+        }
+    }
+
+    /// Real-`Policy` ToolCtx at `act_on_known`, runbook store wired.
+    /// Returns the ctx, the recording executor, and the e-stop sentinel
+    /// dir (hold it for the test's lifetime — same contract as
+    /// `endpoint_test_ctx`).
+    fn act_on_known_ctx() -> (ToolCtx, std::sync::Arc<RigExecutor>, tempfile::TempDir) {
+        use std::sync::Arc;
+        let config: crate::config::Config = toml::from_str(
+            r#"
+            [[project]]
+            name = "remundo"
+            autonomy = "act_on_known"
+            [[project.env]]
+            name = "prod"
+            [[project.env.target]]
+            name = "web-1"
+            kind = "local"
+            "#,
+        )
+        .expect("test config parses");
+        let db = Arc::new(crate::db::memory::InMemoryDb::new());
+        let dir = tempfile::tempdir().unwrap();
+        let estop = Arc::new(crate::policy::EStop::new(dir.path().join("ESTOP"), db.clone()));
+        let executor = Arc::new(RigExecutor { ran: Mutex::new(Vec::new()) });
+        let mut executors: std::collections::HashMap<
+            String,
+            Arc<dyn crate::targets::TargetExecutor>,
+        > = std::collections::HashMap::new();
+        executors.insert("remundo::prod::web-1".into(), executor.clone());
+        let policy = Arc::new(crate::policy::Policy::new(
+            Arc::new(config),
+            executors,
+            Arc::new(crate::audit::AuditWriter::new(db.clone())),
+            estop,
+            db,
+            Arc::new(crate::policy::Scrubber::new()),
+        ));
+        let mut ctx = ToolCtx::for_tests(Principal::Agent { job: None }, policy);
+        ctx.known_targets = vec![target()];
+        ctx.runbooks = Some(Arc::new(nginx_store()));
+        (ctx, executor, dir)
+    }
+
+    #[tokio::test]
+    async fn act_on_known_runbook_matched_command_executes_autonomously() {
+        let (ctx, executor, _dir) = act_on_known_ctx();
+        // `systemctl restart nginx` classifies Medium; the nginx runbook's
+        // glob covers remundo::prod::web-1 and its "nginx" keyword hits.
+        let r = run_command(
+            &ctx,
+            "systemd",
+            target(),
+            "systemctl restart nginx".into(),
+            RiskClass::Medium,
+            Some("nginx is flapping".into()),
+        )
+        .await
+        .unwrap();
+        assert!(r.output.contains("ran ("), "expected autonomous execution, got: {}", r.output);
+        assert_eq!(*executor.ran.lock().unwrap(), vec!["systemctl restart nginx".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn act_on_known_unmatched_command_queues_approval_instead() {
+        let (ctx, executor, _dir) = act_on_known_ctx();
+        // Same risk class, same target — but no runbook keyword hits, so no
+        // pre-approval: the command must queue, not run.
+        let r = run_command(
+            &ctx,
+            "systemd",
+            target(),
+            "systemctl restart postgres".into(),
+            RiskClass::Medium,
+            Some("guessing".into()),
+        )
+        .await
+        .unwrap();
+        assert!(r.output.contains("queued for human approval"), "got: {}", r.output);
+        assert!(r.output.contains("NOT run yet"));
+        assert!(executor.ran.lock().unwrap().is_empty(), "unmatched command must not execute");
     }
 }

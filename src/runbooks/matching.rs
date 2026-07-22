@@ -133,6 +133,77 @@ pub fn best_match<'a>(runbooks: &'a [Runbook], ctx: &MatchContext) -> Option<&'a
         .map(|(_, rb)| rb)
 }
 
+/// Command-path scoring — the AGENT side of "a runbook match is the
+/// pre-approval that unlocks `act_on_known`" (DESIGN §4 Runbooks, brief §5).
+/// Distinct from [`score`] above, which rates an incoming SIGNAL (alert
+/// categories, free text) and accepts a hit on any single dimension: a
+/// command match GRANTS execution rights in the policy gate, so it is
+/// strictly conjunctive and fail-closed —
+///
+/// - the runbook must declare a `target_glob` AND it must match the
+///   command's resolved target (a globless runbook never pre-approves:
+///   operator knowledge about one system must not silently apply to every
+///   system);
+/// - the runbook must declare at least one non-empty keyword AND at least
+///   one must appear in the composed command line (case-insensitive
+///   substring) — a keywordless runbook must not blanket-pre-approve every
+///   command that happens to land on its targets.
+///
+/// Alert categories deliberately do NOT count here: they describe signals,
+/// not commands, and a category hit says nothing about whether THIS command
+/// is the remediation the runbook's author pre-approved.
+///
+/// SECURITY INVARIANT: callers compute this from the loaded store plus the
+/// code-composed command and the dispatcher-resolved target — never from
+/// model output, which could otherwise grant itself pre-approval by naming
+/// a runbook (see `tools::executor::run_command`).
+fn command_score(runbook: &Runbook, command: &str, target_path: &str) -> Option<u32> {
+    let trigger = &runbook.front_matter.trigger;
+    // Fail closed: no glob → no pre-approval, ever.
+    let glob = trigger.target_glob.as_deref()?;
+    if !glob_matches(glob, target_path) {
+        return None;
+    }
+    // Only non-empty keywords count — `haystack.contains("")` is always
+    // true, so a stray `""` in the keyword list would otherwise match every
+    // command (the blanket-pre-approval this matcher exists to refuse).
+    let haystack = command.to_ascii_lowercase();
+    let hits = trigger
+        .keywords
+        .iter()
+        .filter(|kw| !kw.trim().is_empty())
+        .filter(|kw| haystack.contains(&kw.to_ascii_lowercase()))
+        .count() as u32;
+    if hits == 0 {
+        // Covers both "no keywords declared" and "none matched" — fail
+        // closed either way.
+        return None;
+    }
+    // Same specificity ranking as `score`: a tighter glob outranks a
+    // broader one, more keyword hits outrank fewer.
+    let wildcard_segments = glob.split("::").filter(|seg| *seg == "*").count() as u32;
+    let segments = glob.split("::").count() as u32;
+    Some(100 + (segments.saturating_sub(wildcard_segments)) * 10 + hits * 5)
+}
+
+/// Pick the best pre-approving runbook for a composed command against a
+/// resolved target, per [`command_score`]'s conjunctive fail-closed rule.
+/// `None` when nothing pre-approves — at `act_on_known` that means the
+/// command queues for a human instead of executing, which is the safe
+/// default this whole module is built around.
+pub fn best_command_match<'a>(
+    runbooks: &'a [Runbook],
+    command: &str,
+    target: &FqTarget,
+) -> Option<&'a Runbook> {
+    let path = target_path(target);
+    runbooks
+        .iter()
+        .filter_map(|rb| command_score(rb, command, &path).map(|s| (s, rb)))
+        .max_by_key(|(s, _)| *s)
+        .map(|(_, rb)| rb)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +320,177 @@ mod tests {
         let candidates = [one_hit, rb.clone()];
         let picked = best_match(&candidates, &ctx).unwrap();
         assert_eq!(picked.front_matter.title, rb.front_matter.title);
+    }
+
+    // ---- the command-path (pre-approval) matcher --------------------------
+
+    fn titled_runbook(title: &str, toml_trigger: &str) -> Runbook {
+        let src = format!("+++\ntitle = \"{title}\"\n\n{toml_trigger}\n+++\n- step one\n");
+        Runbook::parse(&src).unwrap()
+    }
+
+    fn prod_target() -> FqTarget {
+        FqTarget::new("remundo", "prod", "web-1")
+    }
+
+    #[test]
+    fn command_match_requires_glob_and_keyword_together() {
+        let rb =
+            runbook("[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::prod::web-1\"");
+        let hit = best_command_match(
+            std::slice::from_ref(&rb),
+            "systemctl restart nginx",
+            &prod_target(),
+        );
+        assert!(hit.is_some());
+    }
+
+    #[test]
+    fn command_match_glob_mismatch_vetoes_despite_keyword_hit() {
+        let rb = runbook("[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::prod::*\"");
+        let other = FqTarget::new("remundo", "staging", "web-1");
+        assert!(
+            best_command_match(std::slice::from_ref(&rb), "systemctl restart nginx", &other)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn command_match_keyword_miss_vetoes_despite_glob_hit() {
+        let rb = runbook("[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"");
+        assert!(
+            best_command_match(
+                std::slice::from_ref(&rb),
+                "systemctl restart postgres",
+                &prod_target()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn command_match_fails_closed_without_a_glob() {
+        // A globless runbook must never pre-approve, even on a keyword hit —
+        // operator knowledge about one system must not apply to every system.
+        let rb = runbook("[trigger]\nkeywords = [\"nginx\"]");
+        assert!(
+            best_command_match(
+                std::slice::from_ref(&rb),
+                "systemctl restart nginx",
+                &prod_target()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn command_match_fails_closed_without_keywords() {
+        // A keywordless runbook must not blanket-pre-approve every command
+        // that lands on its targets.
+        let rb = runbook("[trigger]\ntarget_glob = \"remundo::*::*\"");
+        assert!(
+            best_command_match(
+                std::slice::from_ref(&rb),
+                "systemctl restart nginx",
+                &prod_target()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn command_match_empty_keyword_string_is_not_a_blanket_match() {
+        // `haystack.contains("")` is always true — a stray empty keyword
+        // must not turn into "pre-approve everything on these targets".
+        let rb = runbook("[trigger]\nkeywords = [\"\"]\ntarget_glob = \"remundo::*::*\"");
+        assert!(
+            best_command_match(
+                std::slice::from_ref(&rb),
+                "systemctl restart nginx",
+                &prod_target()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn command_match_categories_alone_never_pre_approve() {
+        // Categories describe signals, not commands — a category-only
+        // trigger can fire the SIGNAL matcher but never the command matcher.
+        let rb = runbook(
+            "[trigger]\nalert_categories = [\"dlq_backlog\"]\ntarget_glob = \"remundo::*::*\"",
+        );
+        assert!(
+            best_command_match(
+                std::slice::from_ref(&rb),
+                "restart the dlq reprocessor",
+                &prod_target()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn command_match_keyword_is_case_insensitive() {
+        let rb = runbook("[trigger]\nkeywords = [\"NGINX\"]\ntarget_glob = \"remundo::*::*\"");
+        assert!(
+            best_command_match(
+                std::slice::from_ref(&rb),
+                "systemctl restart nginx",
+                &prod_target()
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn command_match_prefers_more_specific_glob() {
+        let broad = titled_runbook(
+            "broad",
+            "[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"",
+        );
+        let narrow = titled_runbook(
+            "narrow",
+            "[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::prod::web-1\"",
+        );
+        let candidates = [broad, narrow];
+        let picked =
+            best_command_match(&candidates, "systemctl restart nginx", &prod_target()).unwrap();
+        assert_eq!(picked.title(), "narrow");
+    }
+
+    #[test]
+    fn command_match_more_keyword_hits_outrank_fewer() {
+        let one = titled_runbook(
+            "one-hit",
+            "[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"",
+        );
+        let two = titled_runbook(
+            "two-hits",
+            "[trigger]\nkeywords = [\"nginx\", \"restart\"]\ntarget_glob = \"remundo::*::*\"",
+        );
+        let candidates = [one, two];
+        let picked =
+            best_command_match(&candidates, "systemctl restart nginx", &prod_target()).unwrap();
+        assert_eq!(picked.title(), "two-hits");
+    }
+
+    #[test]
+    fn command_match_resource_qualified_target_matches_on_base_path() {
+        // Endpoint mutations (e.g. an argocd rollback) carry a resource-
+        // qualified target; the glob grammar addresses the base
+        // project::env::target path, same as the signal matcher.
+        let rb =
+            runbook("[trigger]\nkeywords = [\"rollback\"]\ntarget_glob = \"remundo::prod::*\"");
+        let mut target = prod_target();
+        target.resource = Some((crate::domain::ResourceType::Argocd, "main".into()));
+        assert!(
+            best_command_match(
+                std::slice::from_ref(&rb),
+                "argocd app rollback guestbook 7",
+                &target
+            )
+            .is_some()
+        );
     }
 }

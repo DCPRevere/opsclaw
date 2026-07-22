@@ -22,7 +22,11 @@
 //! - [`steps`] — body parsing into [`steps::Step`]s (list items, fenced `sh`
 //!   command blocks, `(on-fail: ...)` markers, `{placeholder}` extraction).
 //! - [`matching`] — [`matching::MatchContext`], `target_glob` wildcard
-//!   matching, [`Runbook::matches`] and [`matching::best_match`].
+//!   matching, [`Runbook::matches`] and [`matching::best_match`] for
+//!   SIGNALS; [`matching::best_command_match`] for the agent COMMAND path
+//!   (the conjunctive, fail-closed pre-approval matcher that
+//!   `tools::executor::run_command` consults — see its doc for why the two
+//!   matchers have different strictness).
 //! - [`render`] — `{placeholder}` substitution with clear missing-value
 //!   errors.
 //! - [`history`] — [`history::RunbookRun`] / [`history::StepOutcome`] and the
@@ -48,8 +52,11 @@ use crate::domain::FqTarget;
 use crate::error::Result;
 
 pub use frontmatter::{FrontMatter, Trigger};
-pub use history::{RunbookRun, StepOutcome, StepStatus, low_success, success_rate};
-pub use matching::{MatchContext, best_match, glob_matches};
+pub use history::{
+    RunbookRun, StepOutcome, StepStatus, low_success, low_success_from_rate, low_success_marker,
+    success_rate,
+};
+pub use matching::{MatchContext, best_command_match, best_match, glob_matches};
 pub use steps::{OnFail, Step};
 pub use store::{LoadError, LoadedRunbook, RunbookStore};
 pub use template::INIT_TEMPLATE;

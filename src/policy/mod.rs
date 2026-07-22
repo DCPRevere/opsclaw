@@ -61,9 +61,13 @@ pub struct CommandRequest {
     /// Current working hypothesis, threaded into approval requests so a human
     /// can decide from a phone.
     pub hypothesis: Option<String>,
-    /// Name of the matched runbook, set by the runbook engine (trusted
-    /// positional context, like `principal`). A runbook match is the
-    /// pre-approval that unlocks execution at `act_on_known` (DESIGN §4).
+    /// Name of the matched runbook — the pre-approval that unlocks
+    /// execution at `act_on_known` (DESIGN §4). Trusted positional context,
+    /// like `principal`: set ONLY by code — the deterministic store matcher
+    /// in `tools::executor::run_command` (glob AND keyword, fail-closed;
+    /// see `runbooks::matching::best_command_match`) or the operator-driven
+    /// CLI `runbook run` path (`cli::runbook_cmd`) — never from model
+    /// output, which would let the model grant itself pre-approval.
     #[serde(default)]
     pub runbook: Option<String>,
 }
@@ -296,6 +300,15 @@ impl Policy {
         let autonomy =
             self.config.autonomy_for(&req.target.project, &req.target.env, &req.target.target);
 
+        // TRUST CHAIN for `req.runbook` (the `act_on_known` unlock): the
+        // gate consumes it without re-deriving because its only writers are
+        // code — the deterministic store matcher in
+        // `tools::executor::run_command` (computed from the loaded runbook
+        // store + the tool-composed command + the dispatcher-resolved
+        // target) and the operator-driven `cli::runbook_cmd::run` path
+        // (a human naming an authored runbook by title). Model text never
+        // reaches this field; if a new `CommandRequest` construction site
+        // appears, it must preserve that property.
         match gate(risk, autonomy, req.runbook.is_some()) {
             Gate::Block => {
                 // The audit record IS the dry-run log: what would have run,

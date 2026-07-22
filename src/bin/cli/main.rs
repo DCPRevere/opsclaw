@@ -582,7 +582,18 @@ async fn dispatch(
                 println!("wrote {}", path.display());
             }
             RunbookCommand::List { json } => {
-                let summaries = opsclaw::cli::runbook_cmd::list(home)?;
+                // The success-rate join is best-effort (brief §7: "low
+                // scorers surfaced for review"): a host that has never run
+                // the daemon has no DB, and `runbook list` must keep
+                // working there — an unopenable DB just means no rate
+                // notes, not a failed listing.
+                let summaries = match open_db(cfg_path).await {
+                    Ok(db) => {
+                        let runs: std::sync::Arc<dyn opsclaw::db::RunbookRunRepo> = db.repos();
+                        opsclaw::cli::runbook_cmd::list_with_history(home, &runs).await?
+                    }
+                    Err(_) => opsclaw::cli::runbook_cmd::list(home)?,
+                };
                 if json {
                     opsclaw::cli::output::print_json(&summaries);
                 } else if summaries.is_empty() {
@@ -593,7 +604,17 @@ async fn dispatch(
                 } else {
                     for s in &summaries {
                         match s {
-                            Ok(s) => println!("{}: {:?} ({} step(s))", s.file, s.title, s.steps),
+                            Ok(s) => {
+                                let marker = s
+                                    .success
+                                    .as_ref()
+                                    .and_then(|x| {
+                                        opsclaw::runbooks::low_success_marker(x.total_runs, x.rate)
+                                    })
+                                    .map(|m| format!(" {m}"))
+                                    .unwrap_or_default();
+                                println!("{}: {:?} ({} step(s)){marker}", s.file, s.title, s.steps);
+                            }
                             Err(e) => println!("ERROR: {e}"),
                         }
                     }

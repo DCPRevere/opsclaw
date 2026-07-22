@@ -303,18 +303,43 @@ impl TargetCfg {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceCfg {
-    #[serde(rename = "type")]
-    pub rtype: ResourceType,
+/// One declared resource, typed PER KIND (brief §4): each variant carries
+/// exactly the fields that kind of resource can use, so an ArgoCD
+/// declaration cannot silently carry an ES-only `username` and a missing
+/// required field (`url`, ArgoCD's `credential`) is a parse-time error
+/// naming the resource — not a boot-time warning three modules later.
+///
+/// The TOML shape is unchanged (`type = "..."` is the tag, same field names
+/// as ever): parsing goes through the flat [`RawResourceCfg`], which keeps
+/// `deny_unknown_fields` — serde's internally-tagged enums silently swallow
+/// unknown fields, which is exactly what a config typo must not do — and
+/// [`TryFrom`] then enforces the per-kind shape.
+#[derive(Debug, Clone)]
+pub enum ResourceCfg {
+    Elasticsearch(EsResourceCfg),
+    Prometheus(PromResourceCfg),
+    Argocd(ArgocdResourceCfg),
+    Eventstore(EventstoreResourceCfg),
+    AzureServiceBus(AsbResourceCfg),
+    /// A declared resource whose tool is still a trait stub (postgres,
+    /// rabbitmq, cloudflare, github, pagerduty, loki, jaeger, sentry,
+    /// posthog — DESIGN §7 decision 7). Declarable ahead of the tool with
+    /// the permissive flat shape; each gets its own variant when its tool
+    /// is actually built and the real connection shape is known.
+    Stub(StubResourceCfg),
+}
+
+/// Elasticsearch (brief: remundo ships logs via Filebeat into ES). Auth is
+/// either basic (`username` + `credential` as the password — ECK's
+/// operator-generated `elastic` user) or bearer/API key (`username` unset).
+#[derive(Debug, Clone)]
+pub struct EsResourceCfg {
     pub name: String,
-    pub url: Option<String>,
-    pub credential: Option<SecretRef>,
-    /// Set ⇒ HTTP basic auth: this username + `credential` as the password
-    /// (ECK Elasticsearch: `elastic` + the operator-generated password).
-    /// Unset ⇒ `credential` is a bearer token (the original behaviour).
+    pub url: String,
+    /// Set ⇒ HTTP basic auth with `credential` as the password. Unset ⇒
+    /// `credential` (if any) is a bearer token / API key.
     pub username: Option<String>,
+    pub credential: Option<SecretRef>,
     /// Extra trusted root CA (PEM file path) for this resource only — an
     /// in-cluster ECK Elasticsearch presents a self-signed CA that must not
     /// pollute global trust.
@@ -322,8 +347,395 @@ pub struct ResourceCfg {
     /// Disable certificate verification for THIS resource. Loudly warned at
     /// boot; acceptable only for a localhost port-forward hop where the
     /// hostname can never match the cert. Never a default.
-    #[serde(default)]
     pub insecure_tls: bool,
+}
+
+/// Prometheus. The server itself is unauthenticated; a reverse proxy in
+/// front adds basic auth (`username` set) or a bearer token (`username`
+/// unset) — both optional because plain in-cluster HTTP is the common case.
+#[derive(Debug, Clone)]
+pub struct PromResourceCfg {
+    pub name: String,
+    pub url: String,
+    pub username: Option<String>,
+    pub credential: Option<SecretRef>,
+    pub ca_cert_path: Option<PathBuf>,
+    pub insecure_tls: bool,
+}
+
+/// ArgoCD. Auth is always an API bearer token (`argocd account
+/// generate-token`), so `credential` is REQUIRED and there is no username.
+#[derive(Debug, Clone)]
+pub struct ArgocdResourceCfg {
+    pub name: String,
+    pub url: String,
+    pub credential: SecretRef,
+    pub ca_cert_path: Option<PathBuf>,
+    pub insecure_tls: bool,
+}
+
+/// EventStore/KurrentDB. Basic auth (`admin` + password) is the norm;
+/// both optional because a dev-mode `--insecure` node has no auth at all.
+#[derive(Debug, Clone)]
+pub struct EventstoreResourceCfg {
+    pub name: String,
+    pub url: String,
+    pub username: Option<String>,
+    pub credential: Option<SecretRef>,
+    pub ca_cert_path: Option<PathBuf>,
+    pub insecure_tls: bool,
+}
+
+/// Azure Service Bus. `url` is the namespace endpoint
+/// (`https://<ns>.servicebus.windows.net`), `credential` a SAS token by
+/// reference — REQUIRED, Service Bus has no anonymous access. No TLS knobs:
+/// the endpoint always presents a real, publicly-trusted Azure certificate.
+#[derive(Debug, Clone)]
+pub struct AsbResourceCfg {
+    pub name: String,
+    pub url: String,
+    pub credential: SecretRef,
+}
+
+/// The permissive flat shape for stub-tool resource types (see
+/// [`ResourceCfg::Stub`]).
+#[derive(Debug, Clone)]
+pub struct StubResourceCfg {
+    pub rtype: ResourceType,
+    pub name: String,
+    pub url: Option<String>,
+    pub credential: Option<SecretRef>,
+    pub username: Option<String>,
+    pub ca_cert_path: Option<PathBuf>,
+    pub insecure_tls: bool,
+}
+
+/// Borrowed connection view over any URL-backed resource — what the
+/// endpoint registry and executor wiring actually consume, so those loops
+/// stay one arm instead of six. `None` when the resource has no URL to
+/// speak to (only possible for [`ResourceCfg::Stub`]; every built-out kind
+/// requires `url` at parse time).
+#[derive(Debug, Clone, Copy)]
+pub struct EndpointCfg<'a> {
+    pub url: &'a str,
+    pub credential: Option<&'a SecretRef>,
+    pub username: Option<&'a str>,
+    pub ca_cert_path: Option<&'a Path>,
+    pub insecure_tls: bool,
+}
+
+impl ResourceCfg {
+    pub fn rtype(&self) -> ResourceType {
+        match self {
+            Self::Elasticsearch(_) => ResourceType::Elasticsearch,
+            Self::Prometheus(_) => ResourceType::Prometheus,
+            Self::Argocd(_) => ResourceType::Argocd,
+            Self::Eventstore(_) => ResourceType::Eventstore,
+            Self::AzureServiceBus(_) => ResourceType::AzureServiceBus,
+            Self::Stub(s) => s.rtype,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Elasticsearch(r) => &r.name,
+            Self::Prometheus(r) => &r.name,
+            Self::Argocd(r) => &r.name,
+            Self::Eventstore(r) => &r.name,
+            Self::AzureServiceBus(r) => &r.name,
+            Self::Stub(r) => &r.name,
+        }
+    }
+
+    /// The declared credential reference, if any (doctor resolves these).
+    pub fn credential(&self) -> Option<&SecretRef> {
+        match self {
+            Self::Elasticsearch(r) => r.credential.as_ref(),
+            Self::Prometheus(r) => r.credential.as_ref(),
+            Self::Argocd(r) => Some(&r.credential),
+            Self::Eventstore(r) => r.credential.as_ref(),
+            Self::AzureServiceBus(r) => Some(&r.credential),
+            Self::Stub(r) => r.credential.as_ref(),
+        }
+    }
+
+    /// Uniform connection view for wiring/registry code. See [`EndpointCfg`].
+    pub fn endpoint(&self) -> Option<EndpointCfg<'_>> {
+        match self {
+            Self::Elasticsearch(r) => Some(EndpointCfg {
+                url: &r.url,
+                credential: r.credential.as_ref(),
+                username: r.username.as_deref(),
+                ca_cert_path: r.ca_cert_path.as_deref(),
+                insecure_tls: r.insecure_tls,
+            }),
+            Self::Prometheus(r) => Some(EndpointCfg {
+                url: &r.url,
+                credential: r.credential.as_ref(),
+                username: r.username.as_deref(),
+                ca_cert_path: r.ca_cert_path.as_deref(),
+                insecure_tls: r.insecure_tls,
+            }),
+            Self::Argocd(r) => Some(EndpointCfg {
+                url: &r.url,
+                credential: Some(&r.credential),
+                username: None,
+                ca_cert_path: r.ca_cert_path.as_deref(),
+                insecure_tls: r.insecure_tls,
+            }),
+            Self::Eventstore(r) => Some(EndpointCfg {
+                url: &r.url,
+                credential: r.credential.as_ref(),
+                username: r.username.as_deref(),
+                ca_cert_path: r.ca_cert_path.as_deref(),
+                insecure_tls: r.insecure_tls,
+            }),
+            Self::AzureServiceBus(r) => Some(EndpointCfg {
+                url: &r.url,
+                credential: Some(&r.credential),
+                username: None,
+                ca_cert_path: None,
+                insecure_tls: false,
+            }),
+            Self::Stub(r) => r.url.as_deref().map(|url| EndpointCfg {
+                url,
+                credential: r.credential.as_ref(),
+                username: r.username.as_deref(),
+                ca_cert_path: r.ca_cert_path.as_deref(),
+                insecure_tls: r.insecure_tls,
+            }),
+        }
+    }
+
+    fn to_raw(&self) -> RawResourceCfg {
+        let rtype = self.rtype();
+        match self {
+            Self::Elasticsearch(EsResourceCfg {
+                name,
+                url,
+                username,
+                credential,
+                ca_cert_path,
+                insecure_tls,
+            })
+            | Self::Prometheus(PromResourceCfg {
+                name,
+                url,
+                username,
+                credential,
+                ca_cert_path,
+                insecure_tls,
+            })
+            | Self::Eventstore(EventstoreResourceCfg {
+                name,
+                url,
+                username,
+                credential,
+                ca_cert_path,
+                insecure_tls,
+            }) => RawResourceCfg {
+                rtype,
+                name: name.clone(),
+                url: Some(url.clone()),
+                credential: credential.clone(),
+                username: username.clone(),
+                ca_cert_path: ca_cert_path.clone(),
+                insecure_tls: *insecure_tls,
+            },
+            Self::Argocd(r) => RawResourceCfg {
+                rtype,
+                name: r.name.clone(),
+                url: Some(r.url.clone()),
+                credential: Some(r.credential.clone()),
+                username: None,
+                ca_cert_path: r.ca_cert_path.clone(),
+                insecure_tls: r.insecure_tls,
+            },
+            Self::AzureServiceBus(r) => RawResourceCfg {
+                rtype,
+                name: r.name.clone(),
+                url: Some(r.url.clone()),
+                credential: Some(r.credential.clone()),
+                username: None,
+                ca_cert_path: None,
+                insecure_tls: false,
+            },
+            Self::Stub(r) => RawResourceCfg {
+                rtype: r.rtype,
+                name: r.name.clone(),
+                url: r.url.clone(),
+                credential: r.credential.clone(),
+                username: r.username.clone(),
+                ca_cert_path: r.ca_cert_path.clone(),
+                insecure_tls: r.insecure_tls,
+            },
+        }
+    }
+}
+
+/// The on-disk (TOML) shape of a resource — a superset of every kind's
+/// fields, kept PRIVATE so all construction funnels through the per-kind
+/// validation in `TryFrom`. `deny_unknown_fields` lives here because it
+/// cannot live on an internally-tagged enum (serde buffers the content and
+/// ignores strays — a typo'd key would vanish silently).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawResourceCfg {
+    #[serde(rename = "type")]
+    rtype: ResourceType,
+    name: String,
+    url: Option<String>,
+    credential: Option<SecretRef>,
+    username: Option<String>,
+    ca_cert_path: Option<PathBuf>,
+    #[serde(default)]
+    insecure_tls: bool,
+}
+
+impl TryFrom<RawResourceCfg> for ResourceCfg {
+    type Error = String;
+
+    fn try_from(raw: RawResourceCfg) -> std::result::Result<Self, String> {
+        let RawResourceCfg { rtype, name, url, credential, username, ca_cert_path, insecure_tls } =
+            raw;
+
+        fn required(rtype: ResourceType, name: &str, field: &str, why: &str) -> String {
+            format!("{rtype} resource {name:?} has no `{field}` — {why}")
+        }
+        fn unused(rtype: ResourceType, name: &str, field: &str, why: &str) -> String {
+            format!("{rtype} resource {name:?}: `{field}` is not used by {rtype} resources — {why}")
+        }
+        let need_url = |why: &str| {
+            url.clone().ok_or_else(|| required(rtype, &name, "url", why))
+        };
+
+        match rtype {
+            ResourceType::Elasticsearch => {
+                let url = need_url("the base url (e.g. https://localhost:9201) is how the tool reaches it")?;
+                Ok(Self::Elasticsearch(EsResourceCfg {
+                    name,
+                    url,
+                    username,
+                    credential,
+                    ca_cert_path,
+                    insecure_tls,
+                }))
+            }
+            ResourceType::Prometheus => {
+                let url = need_url("the base url (e.g. http://localhost:9090) is how the tool reaches it")?;
+                Ok(Self::Prometheus(PromResourceCfg {
+                    name,
+                    url,
+                    username,
+                    credential,
+                    ca_cert_path,
+                    insecure_tls,
+                }))
+            }
+            ResourceType::Eventstore => {
+                let url = need_url("the HTTP API url (e.g. https://esdb.example:2113) is how the tool reaches it")?;
+                Ok(Self::Eventstore(EventstoreResourceCfg {
+                    name,
+                    url,
+                    username,
+                    credential,
+                    ca_cert_path,
+                    insecure_tls,
+                }))
+            }
+            ResourceType::Argocd => {
+                if username.is_some() {
+                    return Err(unused(
+                        rtype,
+                        &name,
+                        "username",
+                        "ArgoCD auth is a bearer token; set `credential` only",
+                    ));
+                }
+                let url = need_url("the API url (e.g. https://argocd.example) is how the tool reaches it")?;
+                let credential = credential.ok_or_else(|| {
+                    required(
+                        rtype,
+                        &name,
+                        "credential",
+                        "the ArgoCD API requires a token (`argocd account generate-token`), by reference",
+                    )
+                })?;
+                Ok(Self::Argocd(ArgocdResourceCfg {
+                    name,
+                    url,
+                    credential,
+                    ca_cert_path,
+                    insecure_tls,
+                }))
+            }
+            ResourceType::AzureServiceBus => {
+                if username.is_some() {
+                    return Err(unused(
+                        rtype,
+                        &name,
+                        "username",
+                        "Service Bus auth is a SAS token; set `credential` only",
+                    ));
+                }
+                if ca_cert_path.is_some() {
+                    return Err(unused(
+                        rtype,
+                        &name,
+                        "ca_cert_path",
+                        "the namespace endpoint presents a publicly-trusted Azure certificate",
+                    ));
+                }
+                if insecure_tls {
+                    return Err(unused(
+                        rtype,
+                        &name,
+                        "insecure_tls",
+                        "the namespace endpoint presents a publicly-trusted Azure certificate",
+                    ));
+                }
+                let url = need_url("the namespace endpoint, e.g. https://<ns>.servicebus.windows.net")?;
+                let credential = credential.ok_or_else(|| {
+                    required(
+                        rtype,
+                        &name,
+                        "credential",
+                        "Service Bus has no anonymous access — a SAS token by reference",
+                    )
+                })?;
+                Ok(Self::AzureServiceBus(AsbResourceCfg { name, url, credential }))
+            }
+            // Everything else is a stub tool: keep the permissive shape.
+            _ => Ok(Self::Stub(StubResourceCfg {
+                rtype,
+                name,
+                url,
+                credential,
+                username,
+                ca_cert_path,
+                insecure_tls,
+            })),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ResourceCfg {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawResourceCfg::deserialize(deserializer)?;
+        ResourceCfg::try_from(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for ResourceCfg {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_raw().serialize(serializer)
+    }
 }
 
 impl Config {
@@ -740,5 +1152,159 @@ mod tests {
 
         store.set("jwt", "a-sufficiently-long-and-random-secret-value").unwrap();
         cfg.resolve_jwt_secret(&store).unwrap();
+    }
+
+    // --- ResourceCfg union type: per-kind shapes enforced at parse time ---
+
+    fn parse_resource(toml_fields: &str) -> std::result::Result<ResourceCfg, String> {
+        let cfg: std::result::Result<Config, _> = toml::from_str(&format!(
+            r#"
+            [[project]]
+            name = "p"
+            [[project.env]]
+            name = "e"
+            [[project.env.target]]
+            name = "t"
+            kind = "local"
+            [[project.env.target.resource]]
+            {toml_fields}
+            "#
+        ));
+        cfg.map(|c| c.projects[0].envs[0].targets[0].resources[0].clone())
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn resource_es_parses_into_its_variant_with_basic_auth() {
+        let r = parse_resource(
+            r#"type = "elasticsearch"
+            name = "logs"
+            url = "https://localhost:9201"
+            username = "elastic"
+            credential = "store:es-password"
+            insecure_tls = true"#,
+        )
+        .unwrap();
+        assert_eq!(r.rtype(), ResourceType::Elasticsearch);
+        assert_eq!(r.name(), "logs");
+        let ep = r.endpoint().expect("es always has an endpoint view");
+        assert_eq!(ep.url, "https://localhost:9201");
+        assert_eq!(ep.username, Some("elastic"));
+        assert!(ep.insecure_tls);
+    }
+
+    #[test]
+    fn resource_url_is_required_for_built_out_kinds() {
+        for (fields, kind) in [
+            (r#"type = "prometheus"
+                name = "metrics""#, "prometheus"),
+            (r#"type = "elasticsearch"
+                name = "logs""#, "elasticsearch"),
+            (r#"type = "eventstore"
+                name = "main""#, "eventstore"),
+        ] {
+            let err = parse_resource(fields).unwrap_err();
+            assert!(err.contains("has no `url`"), "{kind}: {err}");
+            assert!(err.contains(kind), "error names the kind: {err}");
+        }
+    }
+
+    #[test]
+    fn resource_argocd_requires_credential_and_refuses_username() {
+        let err = parse_resource(
+            r#"type = "argocd"
+            name = "main"
+            url = "https://argocd.example""#,
+        )
+        .unwrap_err();
+        assert!(err.contains("has no `credential`"), "{err}");
+
+        let err = parse_resource(
+            r#"type = "argocd"
+            name = "main"
+            url = "https://argocd.example"
+            credential = "env:ARGOCD_TOKEN"
+            username = "admin""#,
+        )
+        .unwrap_err();
+        assert!(err.contains("`username` is not used"), "{err}");
+    }
+
+    #[test]
+    fn resource_service_bus_requires_sas_and_refuses_tls_knobs() {
+        let ok = parse_resource(
+            r#"type = "azure_service_bus"
+            name = "bus"
+            url = "https://ns.servicebus.windows.net"
+            credential = "env:ASB_SAS""#,
+        )
+        .unwrap();
+        assert!(matches!(ok, ResourceCfg::AzureServiceBus(_)));
+
+        let err = parse_resource(
+            r#"type = "azure_service_bus"
+            name = "bus"
+            url = "https://ns.servicebus.windows.net""#,
+        )
+        .unwrap_err();
+        assert!(err.contains("has no `credential`"), "{err}");
+
+        let err = parse_resource(
+            r#"type = "azure_service_bus"
+            name = "bus"
+            url = "https://ns.servicebus.windows.net"
+            credential = "env:ASB_SAS"
+            insecure_tls = true"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("`insecure_tls` is not used"), "{err}");
+    }
+
+    #[test]
+    fn resource_stub_kind_keeps_the_permissive_shape() {
+        // postgres has no built tool yet — declarable ahead of it, url and
+        // credential both optional.
+        let r = parse_resource(
+            r#"type = "postgres"
+            name = "primary""#,
+        )
+        .unwrap();
+        let ResourceCfg::Stub(s) = &r else { panic!("expected Stub, got {r:?}") };
+        assert_eq!(s.rtype, ResourceType::Postgres);
+        assert!(r.endpoint().is_none(), "no url -> no endpoint view");
+    }
+
+    #[test]
+    fn resource_unknown_field_is_still_rejected() {
+        // deny_unknown_fields must survive the union type (serde's
+        // internally-tagged enums would swallow this typo silently).
+        let err = parse_resource(
+            r#"type = "prometheus"
+            name = "metrics"
+            url = "http://localhost:9090"
+            insecure_tsl = true"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("insecure_tsl"), "{err}");
+    }
+
+    #[test]
+    fn resource_round_trips_through_toml() {
+        let r = parse_resource(
+            r#"type = "elasticsearch"
+            name = "logs"
+            url = "https://localhost:9201"
+            username = "elastic"
+            credential = "store:es-password""#,
+        )
+        .unwrap();
+        let serialized = toml::to_string(&r.to_raw()).unwrap();
+        let reparsed: ResourceCfg =
+            ResourceCfg::try_from(toml::from_str::<RawResourceCfg>(&serialized).unwrap()).unwrap();
+        assert_eq!(reparsed.name(), r.name());
+        assert_eq!(reparsed.rtype(), r.rtype());
+        let (a, b) = (r.endpoint().unwrap(), reparsed.endpoint().unwrap());
+        assert_eq!(a.url, b.url);
+        assert_eq!(a.username, b.username);
     }
 }

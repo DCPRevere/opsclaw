@@ -124,7 +124,7 @@ pub(crate) fn known_targets_from_config(config: &Config) -> Vec<FqTarget> {
                 let base = FqTarget::new(&project.name, &env.name, &target.name);
                 for resource in &target.resources {
                     let mut fq = base.clone();
-                    fq.resource = Some((resource.rtype, resource.name.clone()));
+                    fq.resource = Some((resource.rtype(), resource.name().to_string()));
                     targets.push(fq);
                 }
                 targets.push(base);
@@ -465,7 +465,7 @@ mod tests {
     use crate::channels::recording::RecordingChannel;
     use crate::config::{DaemonCfg, EnvCfg, ProjectCfg, ResourceCfg, TargetCfg, TargetKindName};
     use crate::db::memory::InMemoryDb;
-    use crate::domain::{IncidentState, Payload, ResourceType, Severity};
+    use crate::domain::{IncidentState, Payload, Severity};
     use crate::llm::ScriptedLlm;
     use crate::policy::{CommandRequest, PolicyOutcome};
     use serde_json::json;
@@ -520,15 +520,18 @@ mod tests {
                         ssh_user: None,
                         ssh_known_hosts_path: None,
                         ssh_strict_host_key_checking: None,
-                        resources: vec![ResourceCfg {
-                            rtype: ResourceType::Prometheus,
-                            name: "metrics".into(),
-                            url: None, // no url -> endpoint registry skips it; fine for these tests
-                            credential: None,
-                            username: None,
-                            ca_cert_path: None,
-                            insecure_tls: false,
-                        }],
+                        resources: vec![ResourceCfg::Prometheus(
+                            crate::config::PromResourceCfg {
+                                name: "metrics".into(),
+                                // Nothing in these tests connects — the url
+                                // just satisfies the typed variant.
+                                url: "http://localhost:9090".into(),
+                                credential: None,
+                                username: None,
+                                ca_cert_path: None,
+                                insecure_tls: false,
+                            },
+                        )],
                     }],
                 }],
             }],

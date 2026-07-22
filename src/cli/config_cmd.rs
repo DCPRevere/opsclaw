@@ -211,44 +211,69 @@ pub fn wizard_project(p: &mut dyn Prompter) -> Result<ProjectCfg> {
 /// Prompt for one new resource, TYPE-AWARE: each resource kind asks only
 /// the questions that make sense for it (an ECK Elasticsearch defaults to
 /// basic auth as `elastic` behind a self-signed CA; ArgoCD/Prometheus/
-/// Service Bus/EventStore take a bearer/SAS token). The connection SHAPE is
-/// the same flat `ResourceCfg` for every kind — the per-type knowledge
-/// lives here, at intake, where an operator actually needs it.
+/// Service Bus/EventStore take a bearer/SAS token), and each kind builds
+/// its own `ResourceCfg` variant — the per-type connection shape lives in
+/// the type; this wizard just fills it in at intake.
 fn wizard_resource(p: &mut dyn Prompter) -> Result<ResourceCfg> {
+    use crate::config::{
+        ArgocdResourceCfg, AsbResourceCfg, EsResourceCfg, EventstoreResourceCfg, PromResourceCfg,
+    };
+    use crate::domain::ResourceType;
+
     let type_str = ask_choice(
         p,
         "resource type",
         &["elasticsearch", "prometheus", "argocd", "azure_service_bus", "eventstore"],
         "elasticsearch",
     )?;
-    let rtype: crate::domain::ResourceType = type_str
+    let rtype: ResourceType = type_str
         .parse()
         .map_err(|()| crate::Error::Config(format!("unknown resource type {type_str:?}")))?;
     let name = p.ask("resource name (e.g. logs, metrics, main)", None)?;
-    let url = {
-        let u = p.ask("base url (e.g. https://localhost:9201)", None)?;
-        if u.is_empty() { None } else { Some(u) }
+    // Every kind this wizard offers requires a url (the union type refuses
+    // to parse without one) — insist here rather than fail at validate.
+    let url_hint = match rtype {
+        ResourceType::AzureServiceBus => "namespace endpoint (https://<ns>.servicebus.windows.net)",
+        ResourceType::Prometheus => "base url (e.g. http://localhost:9090)",
+        _ => "base url (e.g. https://localhost:9201)",
+    };
+    let url = loop {
+        let u = p.ask(url_hint, None)?;
+        if !u.is_empty() {
+            break u;
+        }
+        p.say("  a url is required for this resource type");
     };
 
-    // Auth scheme per type: Elasticsearch (ECK) is basic-auth; everything
-    // else here is bearer/SAS. Blank username on ES = bearer after all (an
-    // ES behind an API-key proxy exists).
-    let username = if rtype == crate::domain::ResourceType::Elasticsearch {
-        let u = p.ask("basic-auth username (blank for bearer-token auth)", Some("elastic"))?;
-        if u.is_empty() { None } else { Some(u) }
-    } else {
-        None
+    // Auth scheme per type: Elasticsearch (ECK) and EventStore are
+    // basic-auth by default; ArgoCD/Prometheus/Service Bus are bearer/SAS.
+    // Blank username = bearer after all (an ES behind an API-key proxy
+    // exists; a dev-mode EventStore has no auth).
+    let username = match rtype {
+        ResourceType::Elasticsearch => {
+            let u = p.ask("basic-auth username (blank for bearer-token auth)", Some("elastic"))?;
+            if u.is_empty() { None } else { Some(u) }
+        }
+        ResourceType::Eventstore => {
+            let u = p.ask("basic-auth username (blank for no auth)", Some("admin"))?;
+            if u.is_empty() { None } else { Some(u) }
+        }
+        _ => None,
     };
-    let cred_question = if username.is_some() {
-        "password reference (env:VAR or store:KEY)"
-    } else {
-        "token reference (env:VAR or store:KEY; blank for no auth)"
+    // ArgoCD and Service Bus cannot function unauthenticated — their
+    // variants make `credential` mandatory, so the wizard must too.
+    let cred_required = username.is_some()
+        || matches!(rtype, ResourceType::Argocd | ResourceType::AzureServiceBus);
+    let cred_question = match (username.is_some(), cred_required) {
+        (true, _) => "password reference (env:VAR or store:KEY)",
+        (false, true) => "token reference (env:VAR or store:KEY)",
+        (false, false) => "token reference (env:VAR or store:KEY; blank for no auth)",
     };
     let credential = loop {
         let raw = p.ask(cred_question, None)?;
         if raw.is_empty() {
-            if username.is_some() {
-                p.say("  basic auth needs a password — enter a reference");
+            if cred_required {
+                p.say("  this resource type needs a credential — enter a reference");
                 continue;
             }
             break None;
@@ -261,9 +286,11 @@ fn wizard_resource(p: &mut dyn Prompter) -> Result<ResourceCfg> {
 
     // TLS trust: worth asking whenever the endpoint is https — in-cluster
     // endpoints (ECK's self-signed CA) are the norm for ES, possible for
-    // any of them. Skipped entirely for plain http.
-    let is_https = url.as_deref().is_some_and(|u| u.starts_with("https://"));
-    let (ca_cert_path, insecure_tls) = if is_https {
+    // most of them. Skipped for plain http, and for Service Bus (always a
+    // publicly-trusted Azure certificate; its variant has no TLS knobs).
+    let ask_tls =
+        url.starts_with("https://") && rtype != ResourceType::AzureServiceBus;
+    let (ca_cert_path, insecure_tls) = if ask_tls {
         let ca = p.ask("custom CA certificate path (PEM; blank for system trust)", None)?;
         let ca_cert_path =
             if ca.is_empty() { None } else { Some(std::path::PathBuf::from(ca)) };
@@ -280,7 +307,49 @@ fn wizard_resource(p: &mut dyn Prompter) -> Result<ResourceCfg> {
         (None, false)
     };
 
-    Ok(ResourceCfg { rtype, name, url, credential, username, ca_cert_path, insecure_tls })
+    Ok(match rtype {
+        ResourceType::Elasticsearch => ResourceCfg::Elasticsearch(EsResourceCfg {
+            name,
+            url,
+            username,
+            credential,
+            ca_cert_path,
+            insecure_tls,
+        }),
+        ResourceType::Prometheus => ResourceCfg::Prometheus(PromResourceCfg {
+            name,
+            url,
+            username,
+            credential,
+            ca_cert_path,
+            insecure_tls,
+        }),
+        ResourceType::Eventstore => ResourceCfg::Eventstore(EventstoreResourceCfg {
+            name,
+            url,
+            username,
+            credential,
+            ca_cert_path,
+            insecure_tls,
+        }),
+        ResourceType::Argocd => ResourceCfg::Argocd(ArgocdResourceCfg {
+            name,
+            url,
+            credential: credential.expect("cred_required loop guarantees a value"),
+            ca_cert_path,
+            insecure_tls,
+        }),
+        ResourceType::AzureServiceBus => ResourceCfg::AzureServiceBus(AsbResourceCfg {
+            name,
+            url,
+            credential: credential.expect("cred_required loop guarantees a value"),
+        }),
+        other => {
+            return Err(crate::Error::Config(format!(
+                "resource type {other} is not offered by this wizard"
+            )));
+        }
+    })
 }
 
 /// `config resource add`: pick an existing `project::env::target`, run the
@@ -316,10 +385,15 @@ pub fn add_resource(p: &mut dyn Prompter, config_path: &Path) -> Result<(String,
         .and_then(|pr| pr.envs.iter_mut().find(|e| e.name == env))
         .and_then(|e| e.targets.iter_mut().find(|t| t.name == tgt))
         .expect("chosen from the listed paths");
-    if target.resources.iter().any(|r| r.rtype == resource.rtype && r.name == resource.name) {
+    if target
+        .resources
+        .iter()
+        .any(|r| r.rtype() == resource.rtype() && r.name() == resource.name())
+    {
         return Err(crate::Error::Config(format!(
             "resource {}::{} already exists on {chosen} — edit it by hand or pick another name",
-            resource.rtype, resource.name
+            resource.rtype(),
+            resource.name()
         )));
     }
     target.resources.push(resource.clone());
@@ -512,15 +586,24 @@ mod tests {
         ]);
         let (target, resource) = add_resource(&mut p, &config_path).unwrap();
         assert_eq!(target, "remundo::sandbox::cluster");
-        assert_eq!(resource.username.as_deref(), Some("elastic"));
-        assert!(resource.insecure_tls);
+        let ResourceCfg::Elasticsearch(es) = &resource else {
+            panic!("expected an Elasticsearch variant, got {resource:?}");
+        };
+        assert_eq!(es.username.as_deref(), Some("elastic"));
+        assert!(es.insecure_tls);
 
         let reloaded = Config::load(Some(&config_path)).unwrap();
         let r = &reloaded.projects[0].envs[0].targets[0].resources[0];
-        assert_eq!(r.name, "logs");
-        assert_eq!(r.username.as_deref(), Some("elastic"));
-        assert_eq!(r.credential.as_ref().map(|c| c.to_string()), Some("store:es-password".into()));
-        assert!(r.insecure_tls);
+        let ResourceCfg::Elasticsearch(es) = r else {
+            panic!("expected an Elasticsearch variant after reload, got {r:?}");
+        };
+        assert_eq!(es.name, "logs");
+        assert_eq!(es.username.as_deref(), Some("elastic"));
+        assert_eq!(
+            es.credential.as_ref().map(|c| c.to_string()),
+            Some("store:es-password".into())
+        );
+        assert!(es.insecure_tls);
         reloaded.validate().unwrap();
     }
 
@@ -538,10 +621,13 @@ mod tests {
             "", // token: none
         ]);
         let (_, resource) = add_resource(&mut p, &config_path).unwrap();
-        assert_eq!(resource.rtype, crate::domain::ResourceType::Prometheus);
-        assert!(resource.username.is_none());
-        assert!(resource.credential.is_none());
-        assert!(!resource.insecure_tls);
+        assert_eq!(resource.rtype(), crate::domain::ResourceType::Prometheus);
+        let ResourceCfg::Prometheus(prom) = &resource else {
+            panic!("expected a Prometheus variant, got {resource:?}");
+        };
+        assert!(prom.username.is_none());
+        assert!(prom.credential.is_none());
+        assert!(!prom.insecure_tls);
     }
 
     #[test]

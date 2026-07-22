@@ -133,11 +133,11 @@ fn check_secrets(cfg: &Config, opsclaw_home: &std::path::Path) -> Result<Vec<Che
                     ));
                 }
                 for res in &target.resources {
-                    if let Some(r) = &res.credential {
+                    if let Some(r) = res.credential() {
                         refs.push((
                             format!(
                                 "resource {}::{}::{}/{}",
-                                project.name, env.name, target.name, res.name
+                                project.name, env.name, target.name, res.name()
                             ),
                             r.clone(),
                         ));

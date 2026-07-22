@@ -501,8 +501,8 @@ async fn dispatch(
                     opsclaw::cli::config_cmd::add_resource(&mut prompter, cfg_path)?;
                 println!(
                     "added {}::{} to {target} in {} (restart the daemon to pick it up)",
-                    resource.rtype,
-                    resource.name,
+                    resource.rtype(),
+                    resource.name(),
                     cfg_path.display()
                 );
             }

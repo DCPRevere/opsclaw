@@ -97,22 +97,29 @@ pub fn build_executors(
                 map.insert(base.to_string(), executor_for_target(target, store)?);
 
                 for resource in &target.resources {
-                    let Some(url) = &resource.url else {
+                    // Only a Stub resource can lack a url (built-out kinds
+                    // require one at parse time) — declared ahead of its
+                    // tool, nothing to wire yet.
+                    let Some(ep) = resource.endpoint() else {
                         warnings.push(format!(
                             "resource {}::{}::{}::{}::{} has no url — its tools will not \
                              register and no executor is wired",
-                            project.name, env.name, target.name, resource.rtype, resource.name
+                            project.name,
+                            env.name,
+                            target.name,
+                            resource.rtype(),
+                            resource.name()
                         ));
                         continue;
                     };
-                    let token = match &resource.credential {
+                    let token = match ep.credential {
                         Some(r) => {
                             let value = r.resolve(store)?;
                             // Register BEFORE any executor that could echo it
                             // exists: an endpoint error body or env dump must
                             // come back `<redacted:...>`.
                             scrubber.register(
-                                &format!("{}_{}_TOKEN", resource.rtype, resource.name),
+                                &format!("{}_{}_TOKEN", resource.rtype(), resource.name()),
                                 &value,
                             );
                             Some(value)
@@ -120,10 +127,10 @@ pub fn build_executors(
                         None => None,
                     };
                     let mut fq = base.clone();
-                    fq.resource = Some((resource.rtype, resource.name.clone()));
+                    fq.resource = Some((resource.rtype(), resource.name().to_string()));
                     map.insert(
                         fq.to_string(),
-                        Arc::new(EndpointExecutor::new(resource.rtype, url, token)),
+                        Arc::new(EndpointExecutor::new(resource.rtype(), ep.url, token)),
                     );
                 }
             }
@@ -178,6 +185,9 @@ mod tests {
 
     #[test]
     fn resource_without_url_is_a_warning_not_an_executor() {
+        // Only a stub-tool resource type can be declared without a url
+        // (built-out kinds require one at parse time), so the warning path
+        // is exercised with one.
         let config = config_from(
             r#"
             [[project]]
@@ -188,8 +198,8 @@ mod tests {
             name = "t"
             kind = "local"
             [[project.env.target.resource]]
-            type = "prometheus"
-            name = "prom"
+            type = "loki"
+            name = "logs"
             "#,
         );
         let (_dir, store) = store();

@@ -2,24 +2,18 @@
 //! item 2): protocol/HTTP clients against declared `Resource`s
 //! (elasticsearch, azure_service_bus, eventstore, prometheus, argocd).
 //!
-//! ## Credential resolution — NOT wired yet, documented gap
+//! ## Credential resolution
 //!
-//! `config::ResourceCfg` already carries `url: Option<String>` and
-//! `credential: Option<SecretRef>` (config/mod.rs) — the config-side
-//! declaration exists. What does NOT exist yet is the daemon-wiring code
-//! that resolves each declared resource's `SecretRef` to an actual value
-//! (via `SecretStore`), registers that value with the policy layer's output
-//! `Scrubber` (`policy::scrub::Scrubber`, so a leaked token in a response
-//! body gets redacted the same way a leaked ssh credential does), and hands
-//! the RESOLVED [`EndpointAuth`] to `ToolCtx`. That wiring lives wherever
-//! `AppState`/the daemon boot path constructs `ToolCtx` — out of scope for
-//! `tools/` (this module has no `SecretStore` or `Scrubber` access, and
-//! shouldn't: a tool holding a `SecretRef` would have to resolve it itself
-//! on every call, duplicating scrubber registration per tool instead of
-//! once at boot). Until that wiring lands, `ToolCtx.endpoints` is `None` and
-//! every endpoint-backed tool in this module is absent from the registry
-//! (see `tools::registry`'s gating) — same fail-closed shape as
-//! `ctx.memory`/`ctx.incidents` being `None` today.
+//! `config::ResourceCfg` is a per-kind union; [`registry_from_config`]
+//! consumes each resource's uniform [`config::EndpointCfg`] view
+//! (`resource.endpoint()`), resolves its `SecretRef` via `SecretStore`, and
+//! builds the RESOLVED [`EndpointAuth`] handed to `ToolCtx` at boot.
+//! Scrubber registration for the resolved value happens in
+//! `targets::wiring::build_executors` (see the note on
+//! [`registry_from_config`]), so a leaked token in a response body gets
+//! redacted the same way a leaked ssh credential does. A resource with no
+//! endpoint view (a url-less stub declaration) simply never registers —
+//! fail-closed, same shape as `ctx.memory`/`ctx.incidents` being `None`.
 //!
 //! ## Shape
 //!
@@ -215,20 +209,20 @@ pub fn registry_from_config(
             for target in &env.targets {
                 let base = FqTarget::new(&project.name, &env.name, &target.name);
                 for resource in &target.resources {
-                    let Some(url) = &resource.url else {
-                        continue; // no url -> no executor either; nothing to wire here
+                    let Some(ep) = resource.endpoint() else {
+                        continue; // url-less stub -> no executor either; nothing to wire here
                     };
-                    let token = match &resource.credential {
+                    let token = match ep.credential {
                         Some(r) => Some(r.resolve(store)?),
                         None => None,
                     };
                     let mut fq = base.clone();
-                    fq.resource = Some((resource.rtype, resource.name.clone()));
-                    let mut auth = EndpointAuth::new(url, token);
-                    if let Some(user) = &resource.username {
+                    fq.resource = Some((resource.rtype(), resource.name().to_string()));
+                    let mut auth = EndpointAuth::new(ep.url, token);
+                    if let Some(user) = ep.username {
                         auth = auth.with_basic_user(user);
                     }
-                    if resource.insecure_tls {
+                    if ep.insecure_tls {
                         // Loud, once per offending resource, at boot — the
                         // same "never a silent degrade" rule as FakeLlm.
                         tracing::warn!(
@@ -237,8 +231,7 @@ pub fn registry_from_config(
                              this resource; acceptable only for a localhost port-forward hop"
                         );
                     }
-                    auth = auth
-                        .with_tls_options(resource.ca_cert_path.as_deref(), resource.insecure_tls)?;
+                    auth = auth.with_tls_options(ep.ca_cert_path, ep.insecure_tls)?;
                     registry.insert(&fq, auth);
                 }
             }
@@ -607,6 +600,8 @@ mod tests {
 
     #[test]
     fn registry_from_config_skips_a_resource_with_no_url() {
+        // A url-less declaration only parses for stub-tool types — built-out
+        // kinds require `url` in their `ResourceCfg` variant.
         let config = config_from(
             r#"
             [[project]]
@@ -617,8 +612,8 @@ mod tests {
             name = "t"
             kind = "local"
             [[project.env.target.resource]]
-            type = "prometheus"
-            name = "prom"
+            type = "loki"
+            name = "logs"
             "#,
         );
         let (_dir, store) = secret_store();

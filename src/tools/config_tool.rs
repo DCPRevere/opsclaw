@@ -93,7 +93,7 @@ fn render_inventory(config: &crate::config::Config) -> String {
                         .unwrap_or_else(|| " (inherits env)".to_string())
                 ));
                 for r in &t.resources {
-                    out.push_str(&format!("      resource {} type={:?}\n", r.name, r.rtype));
+                    out.push_str(&format!("      resource {} type={:?}\n", r.name(), r.rtype()));
                 }
             }
         }

@@ -32,6 +32,27 @@ impl crate::db::IncidentRepo for InMemoryDb {
             .cloned())
     }
 
+    async fn find_expired_by_fingerprint(&self, fingerprint: &str) -> Result<Option<Incident>> {
+        let store = self.store.lock().unwrap();
+        Ok(store
+            .incidents
+            .values()
+            .filter(|i| i.fingerprint == fingerprint && i.state == IncidentState::Expired)
+            .max_by_key(|i| i.opened_at)
+            .cloned())
+    }
+
+    async fn reopen(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+        let mut store = self.store.lock().unwrap();
+        if let Some(i) = store.incidents.get_mut(&id) {
+            i.state = IncidentState::Active;
+            i.reopened_at = Some(at);
+            i.escalation_step = 0;
+            i.step_started_at = None;
+        }
+        Ok(())
+    }
+
     async fn set_state(&self, id: Uuid, state: IncidentState, by: Option<Uuid>) -> Result<()> {
         let mut store = self.store.lock().unwrap();
         if let Some(i) = store.incidents.get_mut(&id) {

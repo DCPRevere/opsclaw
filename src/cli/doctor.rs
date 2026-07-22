@@ -166,6 +166,25 @@ fn check_secrets(cfg: &Config, opsclaw_home: &std::path::Path) -> Result<Vec<Che
             },
         });
     }
+
+    // VAPID pair check — the same guard boot enforces, surfaced here so a
+    // mismatched pair (browsers subscribe with one key, the daemon signs
+    // with another → every push 403s) is diagnosable before a restart. The
+    // resolved private key is used only for the check, never printed.
+    if let (Some(private_ref), Some(public_key)) =
+        (&cfg.push.vapid_private_key, &cfg.push.vapid_public_key)
+        && let Ok(private_key) = private_ref.resolve(&store)
+    {
+        let result = crate::channels::push::validate_vapid_pair(&private_key, public_key);
+        out.push(CheckResult {
+            name: "push: VAPID pair".into(),
+            ok: result.is_ok(),
+            detail: match result {
+                Ok(()) => "public key is the pair of the private key".into(),
+                Err(e) => e,
+            },
+        });
+    }
     Ok(out)
 }
 

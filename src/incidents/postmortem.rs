@@ -155,6 +155,7 @@ mod tests {
             hypothesis: "Runaway worker process consuming a full core.".into(),
             recommended_action: Some("Restart the worker pool.".into()),
             opened_at: opened,
+            reopened_at: None,
             acked_at: Some(opened + Duration::minutes(2)),
             acked_by: Some(Uuid::nil()),
             resolved_at: Some(opened + Duration::minutes(17)),

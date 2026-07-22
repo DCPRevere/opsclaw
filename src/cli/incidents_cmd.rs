@@ -85,6 +85,7 @@ mod tests {
             hypothesis: "runaway process".into(),
             recommended_action: None,
             opened_at: chrono::Utc::now(),
+            reopened_at: None,
             acked_at: None,
             acked_by: None,
             resolved_at: None,

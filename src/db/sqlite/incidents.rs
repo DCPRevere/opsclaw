@@ -60,6 +60,9 @@ fn row_to_incident(row: &SqliteRow) -> Incident {
         hypothesis: row.get("hypothesis"),
         recommended_action: row.get("recommended_action"),
         opened_at: row.get::<String, _>("opened_at").parse().expect("stored rfc3339"),
+        reopened_at: row
+            .get::<Option<String>, _>("reopened_at")
+            .map(|s| s.parse::<DateTime<Utc>>().expect("stored rfc3339")),
         acked_at: row
             .get::<Option<String>, _>("acked_at")
             .map(|s| s.parse::<DateTime<Utc>>().expect("stored rfc3339")),
@@ -86,10 +89,10 @@ impl crate::db::IncidentRepo for SqliteDb {
         sqlx::query(
             "INSERT INTO incidents
                (id, fingerprint, fault_class, target, severity, state, signals,
-                hypothesis, recommended_action, opened_at, acked_at, acked_by,
-                resolved_at, last_notified_at, notify_count, escalation_step,
-                step_started_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                hypothesis, recommended_action, opened_at, reopened_at,
+                acked_at, acked_by, resolved_at, last_notified_at,
+                notify_count, escalation_step, step_started_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(incident.id.to_string())
         .bind(&incident.fingerprint)
@@ -101,6 +104,7 @@ impl crate::db::IncidentRepo for SqliteDb {
         .bind(&incident.hypothesis)
         .bind(&incident.recommended_action)
         .bind(incident.opened_at.to_rfc3339())
+        .bind(incident.reopened_at.map(|t| t.to_rfc3339()))
         .bind(incident.acked_at.map(|t| t.to_rfc3339()))
         .bind(incident.acked_by.map(|u| u.to_string()))
         .bind(incident.resolved_at.map(|t| t.to_rfc3339()))
@@ -131,6 +135,31 @@ impl crate::db::IncidentRepo for SqliteDb {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.as_ref().map(row_to_incident))
+    }
+
+    async fn find_expired_by_fingerprint(&self, fingerprint: &str) -> Result<Option<Incident>> {
+        let row = sqlx::query(
+            "SELECT * FROM incidents
+             WHERE fingerprint = ? AND state = 'expired'
+             ORDER BY opened_at DESC LIMIT 1",
+        )
+        .bind(fingerprint)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_incident))
+    }
+
+    async fn reopen(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+        sqlx::query(
+            "UPDATE incidents SET state = 'active', reopened_at = ?,
+                    escalation_step = 0, step_started_at = NULL
+             WHERE id = ?",
+        )
+        .bind(at.to_rfc3339())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn set_state(&self, id: Uuid, state: IncidentState, by: Option<Uuid>) -> Result<()> {

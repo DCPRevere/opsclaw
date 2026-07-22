@@ -19,11 +19,16 @@ use crate::domain::IncidentState;
 /// - `Acknowledged -> Resolved`
 /// - `Acknowledged -> Active` (a re-occurrence after ack but before
 ///   resolution — the fault is still live)
+/// - `Expired -> Active` (the SAME fault re-detected after the chain
+///   exhausted — the incident re-opens rather than duplicating; see
+///   `IncidentRepo::reopen`)
 ///
-/// `Resolved` and `Expired` are terminal: nothing transitions out of them.
-/// A fresh detection matching a resolved/expired incident's fingerprint
-/// opens a NEW incident (see `IncidentRepo::find_open_by_fingerprint`,
-/// which only looks at Active/Acknowledged) rather than reopening this one.
+/// `Resolved` is terminal: nothing transitions out of it. A fresh detection
+/// matching a RESOLVED incident's fingerprint opens a NEW incident (a fault
+/// that came back after being fixed is genuinely new), whereas one matching
+/// an EXPIRED incident re-opens it (the fault never went away — nobody ever
+/// acked it, so a new row would just churn a fresh notification cycle for
+/// the same long-standing problem).
 pub fn validate_transition(from: IncidentState, to: IncidentState) -> crate::Result<()> {
     use IncidentState::*;
     let valid = matches!(
@@ -33,6 +38,7 @@ pub fn validate_transition(from: IncidentState, to: IncidentState) -> crate::Res
             | (Active, Expired)
             | (Acknowledged, Resolved)
             | (Acknowledged, Active)
+            | (Expired, Active)
     );
     if valid {
         Ok(())
@@ -41,9 +47,11 @@ pub fn validate_transition(from: IncidentState, to: IncidentState) -> crate::Res
     }
 }
 
-/// True once an incident is in a terminal state (Resolved/Expired) — no
-/// further transitions are valid, and per-occurrence claims for it should
-/// stop being made.
+/// True once an incident is in a closed state (Resolved/Expired) — the
+/// notification chain has stopped and per-occurrence claims for it should
+/// stop being made. Expired is closed but not sealed: a re-detection of the
+/// same fingerprint re-opens it (`Expired -> Active` above); Resolved never
+/// re-opens.
 pub fn is_terminal(state: IncidentState) -> bool {
     matches!(state, IncidentState::Resolved | IncidentState::Expired)
 }
@@ -123,8 +131,11 @@ mod tests {
     }
 
     #[test]
-    fn expired_is_terminal() {
-        assert!(validate_transition(Expired, Active).is_err());
+    fn expired_reopens_only_to_active() {
+        // Re-detection of an expired incident's fingerprint re-opens it —
+        // but only back to Active (the chain restarts from the top); there
+        // is no path from Expired straight to Acknowledged or Resolved.
+        assert!(validate_transition(Expired, Active).is_ok());
         assert!(validate_transition(Expired, Acknowledged).is_err());
         assert!(validate_transition(Expired, Resolved).is_err());
     }

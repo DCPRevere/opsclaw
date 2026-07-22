@@ -198,6 +198,17 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     if let Some(private_key_ref) = &state.config.push.vapid_private_key {
         let private_key = private_key_ref.resolve(&secret_store)?;
         scrubber.register("VAPID_PRIVATE_KEY", &private_key);
+        // Pair check at boot (`validate_vapid_pair`'s whole reason to
+        // exist): a public key that isn't the private key's pair makes the
+        // push service 403 every send — silently, from the operator's side
+        // — so it must fail HERE, loudly, not as a slow invisible outage.
+        // Config::validate can't do this (the private key is a SecretRef,
+        // unresolved until this point).
+        if let Some(public_key) = &state.config.push.vapid_public_key
+            && let Err(e) = crate::channels::push::validate_vapid_pair(&private_key, public_key)
+        {
+            return Err(crate::Error::Config(format!("push: {e}")));
+        }
         let sender = Arc::new(WebPushSender::new(&private_key)?);
         channels.push(Arc::new(PushChannel::new(state.repos.clone(), sender)));
     }

@@ -73,6 +73,7 @@ mod tests {
             hypothesis: "runaway process".into(),
             recommended_action: Some("restart the service".into()),
             opened_at: Utc::now() - chrono::Duration::minutes(10),
+            reopened_at: None,
             acked_at: None,
             acked_by: None,
             resolved_at: Some(Utc::now()),

@@ -19,6 +19,19 @@ pub trait IncidentRepo: Send + Sync {
     /// Open incident (Active/Acknowledged) matching this fingerprint, if any —
     /// the anti-spam lookup.
     async fn find_open_by_fingerprint(&self, fingerprint: &str) -> Result<Option<Incident>>;
+    /// Expired (chain exhausted, never acked) incident matching this
+    /// fingerprint, if any — the re-open lookup, checked after
+    /// `find_open_by_fingerprint` misses. Resolved incidents are deliberately
+    /// excluded: a fault that returns after a fix is genuinely new; one that
+    /// outlived its chain unacked is the same long-standing fault.
+    async fn find_expired_by_fingerprint(&self, fingerprint: &str) -> Result<Option<Incident>>;
+    /// Re-open an Expired incident on re-detection (`Expired -> Active`,
+    /// `lifecycle::validate_transition`): `reopened_at = at`, escalation
+    /// chain reset to the top (`escalation_step = 0`, `step_started_at =
+    /// NULL`) so the driver notifies once and only walks the chain if still
+    /// unacked. `id`, `opened_at` (age-tracking) and `notify_count`
+    /// (cumulative; keeps claim-key occurrences unique) are preserved.
+    async fn reopen(&self, id: Uuid, at: DateTime<Utc>) -> Result<()>;
     async fn set_state(&self, id: Uuid, state: IncidentState, by: Option<Uuid>) -> Result<()>;
     /// Record one escalation-chain send atomically: `last_notified_at = at`,
     /// `notify_count += 1`, and the chain position (`escalation_step`,

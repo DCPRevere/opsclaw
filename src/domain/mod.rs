@@ -259,6 +259,12 @@ pub struct Incident {
     pub hypothesis: String,
     pub recommended_action: Option<String>,
     pub opened_at: DateTime<Utc>,
+    /// When the incident was last re-opened out of `Expired` (the same fault
+    /// re-detected after its chain exhausted unacked — see
+    /// `IncidentRepo::reopen`). `opened_at` keeps the ORIGINAL detection for
+    /// age-tracking; `None` on incidents never re-opened.
+    #[serde(default)]
+    pub reopened_at: Option<DateTime<Utc>>,
     pub acked_at: Option<DateTime<Utc>>,
     pub acked_by: Option<Uuid>,
     pub resolved_at: Option<DateTime<Utc>>,

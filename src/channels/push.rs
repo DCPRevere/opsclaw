@@ -18,10 +18,9 @@
 //!   - The notification payload carries `title`/`body`/`url` (not just
 //!     `body`) so the service worker can deep-link into the right PWA screen
 //!     (`/approvals`, `/incidents`, …) rather than always opening `/app`.
-//!     `OutboundMessage` has no structured "kind" today, so `PushChannel`
-//!     infers the target url from the message body via [`infer_deep_link`] —
-//!     a narrow, explicitly-documented heuristic (see that function) rather
-//!     than a silent guess.
+//!     The target url comes from the structured `OutboundMessage.meta`
+//!     `"kind"` when the sender attached one ([`deep_link`]), with
+//!     [`infer_deep_link`]'s body heuristic as the meta-less fallback.
 //!   - Push is BEST-EFFORT by design (DESIGN §3 decision 5: "Telegram/webhook
 //!     are the guaranteed escalation paths; push is the convenient one") —
 //!     `send` never returns an error for an individual subscription's
@@ -212,15 +211,25 @@ impl PushChannel {
 const BODY_CHAR_BUDGET: usize = 360;
 const BODY_CHAR_CUT: usize = 340;
 
-/// Best-effort heuristic for which PWA screen a push should deep-link into
-/// (brief: "approvals → /approvals etc."). `OutboundMessage` carries no
-/// structured "this is an approval/incident" tag today (that would need a
-/// broader message-typing change out of scope for this task — flagged here
-/// rather than silently invented), so this keys off a case-insensitive
-/// substring of the body, which is how the agent's own composed messages
-/// are worded (see `incidents::` / `policy::` message templates). Falls
-/// back to the app shell itself when nothing matches — always a safe
-/// landing spot.
+/// Which PWA screen a push should deep-link into (brief: "approvals →
+/// /approvals etc."). The escalation driver and approval announcer both
+/// attach a structured twin (`OutboundMessage.meta` with `"kind":
+/// "incident"` / `"kind": "approval"` — `scheduler::escalations::drive_one`,
+/// `policy::announce_approval`), which is authoritative when present;
+/// meta-less senders fall back to [`infer_deep_link`]'s body heuristic.
+fn deep_link(meta: Option<&serde_json::Value>, body: &str) -> &'static str {
+    match meta.and_then(|m| m.get("kind")).and_then(|k| k.as_str()) {
+        Some("incident") => "/app#incidents",
+        Some("approval") => "/app#approvals",
+        _ => infer_deep_link(body),
+    }
+}
+
+/// Best-effort fallback for messages with no structured `meta.kind`: keys
+/// off a case-insensitive substring of the body, which is how the agent's
+/// own composed messages are worded (see `incidents::` / `policy::` message
+/// templates). Falls back to the app shell itself when nothing matches —
+/// always a safe landing spot.
 fn infer_deep_link(body: &str) -> &'static str {
     let lower = body.to_ascii_lowercase();
     if lower.contains("approval") {
@@ -262,7 +271,7 @@ impl Channel for PushChannel {
         } else {
             msg.body.clone()
         };
-        let url = infer_deep_link(&msg.body);
+        let url = deep_link(msg.meta.as_ref(), &msg.body);
         let payload =
             serde_json::json!({ "title": "OpsClaw", "body": body, "url": url }).to_string();
         for sub in subs {
@@ -325,6 +334,20 @@ mod tests {
         assert_eq!(infer_deep_link("New approval requested: restart web-1"), "/app#approvals");
         assert_eq!(infer_deep_link("Incident opened: cpu 98% on cluster"), "/app#incidents");
         assert_eq!(infer_deep_link("hello from the agent"), "/app");
+    }
+
+    #[test]
+    fn structured_meta_kind_is_authoritative_over_the_body_heuristic() {
+        // The escalation driver / approval announcer attach meta.kind; it
+        // wins even when the body wording would infer differently.
+        let incident = serde_json::json!({ "kind": "incident" });
+        let approval = serde_json::json!({ "kind": "approval" });
+        assert_eq!(deep_link(Some(&incident), "needs approval soon"), "/app#incidents");
+        assert_eq!(deep_link(Some(&approval), "incident context here"), "/app#approvals");
+        // Unknown kinds and absent meta fall back to the body heuristic.
+        let other = serde_json::json!({ "kind": "digest" });
+        assert_eq!(deep_link(Some(&other), "Incident opened"), "/app#incidents");
+        assert_eq!(deep_link(None, "hello"), "/app");
     }
 
     fn sub(endpoint: &str) -> PushSubscription {

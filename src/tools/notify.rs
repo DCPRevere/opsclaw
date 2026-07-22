@@ -9,8 +9,12 @@
 //! (`incidents::fingerprint_for`) and looks for an already-open incident
 //! (`IncidentRepo::find_open_by_fingerprint`) — a matching open incident
 //! means this is a new OCCURRENCE of the same problem, so the tool reports
-//! that plainly rather than opening a duplicate. Only a genuinely new
-//! fingerprint opens a new `Incident` row. Escalation-chain delivery (who
+//! that plainly rather than opening a duplicate. An EXPIRED match
+//! (`IncidentRepo::find_expired_by_fingerprint`) means the chain exhausted
+//! unacked and the fault is still standing — the incident RE-OPENS
+//! (`IncidentRepo::reopen`) instead of duplicating. Only a genuinely new
+//! fingerprint (including a resolved one's — a fault back after a fix is
+//! new) opens a new `Incident` row. Escalation-chain delivery (who
 //! gets notified, ack_timeout, repeat_interval) is the scheduler's job
 //! (`incidents::escalation`) once the incident exists — this tool's
 //! responsibility ends at "the incident now exists (or already did)".
@@ -136,6 +140,30 @@ impl Tool for NotifyTool {
             });
         }
 
+        // An EXPIRED match (chain exhausted, never acked) re-opens rather
+        // than duplicates: the fault never went away, so a fresh row would
+        // churn a full notification cycle per re-detection forever. Only a
+        // RESOLVED incident's fingerprint opens a genuinely new incident.
+        let expired = repo
+            .find_expired_by_fingerprint(&fingerprint)
+            .await
+            .map_err(|e| ToolError::Internal(format!("incident lookup failed: {e}")))?;
+        if let Some(incident) = expired {
+            repo.reopen(incident.id, Utc::now())
+                .await
+                .map_err(|e| ToolError::Internal(format!("incident reopen failed: {e}")))?;
+            return Ok(ToolResult {
+                output: format!(
+                    "re-opened incident {} (originally opened {}, expired unacknowledged after \
+                     {} notifications) — same fault re-detected; a single re-open notification \
+                     goes out, then the escalation chain resumes only if still unacknowledged.",
+                    incident.id,
+                    incident.opened_at.to_rfc3339(),
+                    incident.notify_count
+                ),
+            });
+        }
+
         let now = Utc::now();
         let incident = Incident {
             id: Uuid::new_v4(),
@@ -148,6 +176,7 @@ impl Tool for NotifyTool {
             hypothesis: hypothesis.to_string(),
             recommended_action,
             opened_at: now,
+            reopened_at: None,
             acked_at: None,
             acked_by: None,
             resolved_at: None,
@@ -246,6 +275,50 @@ mod tests {
 
         let all = db.list(true, 100).await.unwrap();
         assert_eq!(all.len(), 1, "must not create a second incident row");
+    }
+
+    #[tokio::test]
+    async fn expired_incident_is_reopened_not_duplicated() {
+        let db: Arc<dyn IncidentRepo> = Arc::new(InMemoryDb::new());
+        let ctx = ctx_with(db.clone());
+        NotifyTool.call(&ctx, base_args()).await.unwrap();
+        let fp = fingerprint_for(&target(), "cpu_saturation", "");
+        let original = db.find_open_by_fingerprint(&fp).await.unwrap().unwrap();
+        db.set_state(original.id, IncidentState::Expired, None).await.unwrap();
+
+        let r = NotifyTool.call(&ctx, base_args()).await.unwrap();
+        assert!(r.output.contains("re-opened incident"), "{}", r.output);
+
+        let all = db.list(true, 100).await.unwrap();
+        assert_eq!(all.len(), 1, "the expired row re-opens; no second incident row");
+        let reopened = db.find_open_by_fingerprint(&fp).await.unwrap().unwrap();
+        assert_eq!(reopened.id, original.id, "same incident id preserved");
+        assert_eq!(reopened.state, IncidentState::Active);
+        assert!(reopened.reopened_at.is_some());
+        assert_eq!(
+            reopened.opened_at, original.opened_at,
+            "opened_at keeps the original detection for age-tracking"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_incident_produces_a_fresh_incident_on_redetection() {
+        let db: Arc<dyn IncidentRepo> = Arc::new(InMemoryDb::new());
+        let ctx = ctx_with(db.clone());
+        NotifyTool.call(&ctx, base_args()).await.unwrap();
+        let fp = fingerprint_for(&target(), "cpu_saturation", "");
+        let original = db.find_open_by_fingerprint(&fp).await.unwrap().unwrap();
+        db.set_state(original.id, IncidentState::Resolved, None).await.unwrap();
+
+        // A fault back after a FIX is genuinely new — a fresh row, never a
+        // re-open of the resolved one.
+        let r = NotifyTool.call(&ctx, base_args()).await.unwrap();
+        assert!(r.output.contains("opened incident"), "{}", r.output);
+        let all = db.list(true, 100).await.unwrap();
+        assert_eq!(all.len(), 2);
+        let reopened = db.find_open_by_fingerprint(&fp).await.unwrap().unwrap();
+        assert_ne!(reopened.id, original.id);
+        assert!(reopened.reopened_at.is_none());
     }
 
     #[tokio::test]

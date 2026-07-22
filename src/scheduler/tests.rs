@@ -755,6 +755,7 @@ fn active_incident(fingerprint: &str, opened_at: DateTime<Utc>) -> crate::domain
         hypothesis: "dapr sentry CA expired, control plane crashlooping".into(),
         recommended_action: Some("rotate the sentry CA".into()),
         opened_at,
+        reopened_at: None,
         acked_at: None,
         acked_by: None,
         resolved_at: None,
@@ -833,6 +834,82 @@ async fn escalation_renotifies_then_expires_on_the_default_chain() {
     // An Expired incident is closed: nothing further ever happens.
     escalations::drive(&deps, &handle, t0 + Duration::minutes(90)).await.unwrap();
     assert_eq!(channel.sent().len(), 2);
+}
+
+#[tokio::test]
+async fn escalation_reopened_incident_pages_once_then_resumes_only_if_unacked() {
+    use crate::config::EscalationStepCfg;
+    let db = Arc::new(InMemoryDb::new());
+    let channel = Arc::new(RecordingChannel::new());
+    let mut cfg = Config::default();
+    cfg.escalation.steps = vec![
+        EscalationStepCfg {
+            contact: "*".into(),
+            ack_timeout_minutes: 15,
+            repeat_interval_minutes: 5,
+        },
+        EscalationStepCfg {
+            contact: "*".into(),
+            ack_timeout_minutes: 15,
+            repeat_interval_minutes: 5,
+        },
+    ];
+    let deps = SchedulerDeps {
+        jobs: db.clone(),
+        control: db.clone(),
+        incidents: db.clone(),
+        approvals: db.clone(),
+        channel: channel.clone(),
+        named_channels: vec![],
+        composer: Arc::new(NoopComposer),
+        config: Arc::new(cfg),
+    };
+    let handle = SchedulerHandle::new(60_000);
+    let t0 = t(9, 0);
+    let incident = active_incident("fp-reopen", t0);
+    insert_incident(&db, &incident).await;
+
+    // Exhaust the whole chain unacked: notify step 0, escalate to step 1,
+    // expire past step 1's window.
+    escalations::drive(&deps, &handle, t0).await.unwrap();
+    escalations::drive(&deps, &handle, t0 + Duration::minutes(16)).await.unwrap();
+    escalations::drive(&deps, &handle, t0 + Duration::minutes(32)).await.unwrap();
+    assert_eq!(get_incident(&db, incident.id).await.state, crate::domain::IncidentState::Expired);
+    let baseline = channel.sent().len();
+
+    // The same fault re-detected: `opsclaw_notify`'s path re-opens the SAME
+    // row rather than inserting a duplicate.
+    let t1 = t0 + Duration::minutes(60);
+    crate::db::IncidentRepo::reopen(db.as_ref(), incident.id, t1).await.unwrap();
+
+    // Exactly one gentler page for the re-open…
+    escalations::drive(&deps, &handle, t1).await.unwrap();
+    let sent = channel.sent();
+    assert_eq!(sent.len(), baseline + 1);
+    assert!(sent.last().unwrap().body.contains("RE-OPENED"), "{}", sent.last().unwrap().body);
+
+    // …and NO reminder inside step 0's window, where a fresh incident
+    // would have re-notified (repeat 5m < 6m < ack_timeout 15m).
+    assert_eq!(
+        channel.sent().len(),
+        baseline + 1,
+        "re-opened incidents do not re-notify at step 0"
+    );
+    escalations::drive(&deps, &handle, t1 + Duration::minutes(6)).await.unwrap();
+    assert_eq!(channel.sent().len(), baseline + 1);
+
+    // Still unacked past step 0's window: the chain resumes normally —
+    // escalate to step 1…
+    escalations::drive(&deps, &handle, t1 + Duration::minutes(16)).await.unwrap();
+    let sent = channel.sent();
+    assert_eq!(sent.len(), baseline + 2);
+    assert!(sent.last().unwrap().body.contains("ESCALATION"), "{}", sent.last().unwrap().body);
+
+    // …with step 1's normal re-notify cadence back in force.
+    escalations::drive(&deps, &handle, t1 + Duration::minutes(22)).await.unwrap();
+    let sent = channel.sent();
+    assert_eq!(sent.len(), baseline + 3);
+    assert!(sent.last().unwrap().body.contains("REMINDER"), "{}", sent.last().unwrap().body);
 }
 
 #[tokio::test]

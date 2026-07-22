@@ -126,6 +126,7 @@ fn incident(id: Uuid, fingerprint: &str) -> Incident {
         hypothesis: "runaway process".into(),
         recommended_action: Some("restart service".into()),
         opened_at: Utc::now(),
+        reopened_at: None,
         acked_at: None,
         acked_by: None,
         resolved_at: None,
@@ -258,6 +259,60 @@ incident_find_open_by_fingerprint_is_dedup_lookup => |db| {
     assert!(db.find_open_by_fingerprint(fp).await.unwrap().is_none());
 
     assert!(db.find_open_by_fingerprint("no-such-fp").await.unwrap().is_none());
+}
+
+incident_find_expired_by_fingerprint_excludes_open_and_resolved => |db| {
+    let fp = "fp-expired-lookup";
+    let active = incident(Uuid::new_v4(), fp);
+    IncidentRepo::insert(db, &active).await.unwrap();
+
+    // Open: the re-open lookup must miss (find_open_by_fingerprint owns it).
+    assert!(db.find_expired_by_fingerprint(fp).await.unwrap().is_none());
+
+    // Expired: found.
+    db.set_state(active.id, IncidentState::Expired, None).await.unwrap();
+    let found = db.find_expired_by_fingerprint(fp).await.unwrap().unwrap();
+    assert_eq!(found.id, active.id);
+    assert_eq!(found.state, IncidentState::Expired);
+
+    // Resolved: excluded — a fault back after a fix opens a NEW incident,
+    // never re-opens the old row.
+    let resolved = incident(Uuid::new_v4(), "fp-resolved-lookup");
+    IncidentRepo::insert(db, &resolved).await.unwrap();
+    db.set_state(resolved.id, IncidentState::Resolved, None).await.unwrap();
+    assert!(db.find_expired_by_fingerprint("fp-resolved-lookup").await.unwrap().is_none());
+
+    assert!(db.find_expired_by_fingerprint("no-such-fp").await.unwrap().is_none());
+}
+
+incident_reopen_reactivates_and_resets_the_chain_preserving_identity => |db| {
+    let id = Uuid::new_v4();
+    let mut row = incident(id, "fp-reopen");
+    row.notify_count = 3;
+    row.escalation_step = 1;
+    row.last_notified_at = Some(Utc::now());
+    row.step_started_at = Some(Utc::now());
+    IncidentRepo::insert(db, &row).await.unwrap();
+    db.set_state(id, IncidentState::Expired, None).await.unwrap();
+
+    let at = Utc::now();
+    db.reopen(id, at).await.unwrap();
+
+    let got = IncidentRepo::get(db, id).await.unwrap().unwrap();
+    assert_eq!(got.state, IncidentState::Active);
+    assert_eq!(got.reopened_at.unwrap().timestamp(), at.timestamp());
+    // Chain reset to the top: the driver's next action is a single Notify.
+    assert_eq!(got.escalation_step, 0);
+    assert!(got.step_started_at.is_none());
+    // Identity and history preserved: same row, original opened_at for
+    // age-tracking, cumulative notify_count (keeps claim keys unique).
+    assert_eq!(got.opened_at.timestamp(), row.opened_at.timestamp());
+    assert_eq!(got.notify_count, 3);
+
+    // Re-opened means open again: the anti-spam lookup finds it, the
+    // re-open lookup no longer does.
+    assert!(db.find_open_by_fingerprint("fp-reopen").await.unwrap().is_some());
+    assert!(db.find_expired_by_fingerprint("fp-reopen").await.unwrap().is_none());
 }
 
 incident_set_state_stamps_ack_and_resolve => |db| {

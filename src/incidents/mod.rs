@@ -11,9 +11,10 @@
 //!   (`IncidentRepo::find_open_by_fingerprint`) attaches as an occurrence on
 //!   that incident, never a new row.
 //! - [`lifecycle`] — the `Active -> Acknowledged -> Resolved | Expired`
-//!   transition rules (invalid moves error, never silently coerce) and the
-//!   claim-key convention (`lifecycle::claim_key`) that suppresses trailing
-//!   alerts once an incident is resolved.
+//!   transition rules (invalid moves error, never silently coerce; `Expired
+//!   -> Active` re-opens on re-detection) and the claim-key convention
+//!   (`lifecycle::claim_key`) that suppresses trailing alerts once an
+//!   incident is resolved.
 //! - [`escalation`] — the ordered contact chain data model
 //!   (`EscalationChain`/`EscalationStep`) and the pure
 //!   [`escalation::next_escalation`] function the scheduler drives every

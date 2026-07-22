@@ -119,6 +119,7 @@ async fn daemon_boots_serves_drains_on_the_shutdown_token_and_persists_across_re
         hypothesis: "log rotation stopped".into(),
         recommended_action: None,
         opened_at: chrono::Utc::now(),
+        reopened_at: None,
         acked_at: None,
         acked_by: None,
         resolved_at: None,

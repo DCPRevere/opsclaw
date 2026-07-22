@@ -18,7 +18,12 @@
 //!   `next_escalation`'s contract), a Resolved/Expired one is not even
 //!   listed — resolution produces silence, never trailing alerts;
 //! - a chain exhausted unacknowledged transitions the incident to
-//!   `Expired` exactly once (guarded by the same state filter).
+//!   `Expired` exactly once (guarded by the same state filter);
+//! - a RE-OPENED incident (Expired, then re-detected —
+//!   `IncidentRepo::reopen`) pages once and then stays silent through its
+//!   step-0 window: the fault is known and long-standing, the full chain
+//!   already ran once, so the chain only resumes if it stays unacked past
+//!   ack_timeout (normal cadence from the Escalate onward).
 //!
 //! The driver also reconciles the adaptive cadence (DESIGN §3 scheduler):
 //! any open incident ⇒ [`SchedulerHandle::set_incident_pressure`] tightens
@@ -99,7 +104,21 @@ async fn drive_one(
             );
             return Ok(());
         }
+        // A Notify with `reopened_at` set IS the re-open notification:
+        // `IncidentRepo::reopen` reset the chain to the top with
+        // `step_started_at = NULL`, and Notify only fires from that state.
+        EscalationAction::Notify { step } if incident.reopened_at.is_some() => {
+            ("RE-OPENED — expired incident re-detected", step)
+        }
         EscalationAction::Notify { step } => ("INCIDENT", step),
+        // Gentler cadence for a re-opened incident (the fault is known and
+        // long-standing — the full chain already ran once): the single
+        // re-open notification above is NOT repeated while its step-0
+        // window runs; the chain only resumes (Escalate onward, normal
+        // cadence from there) if it stays unacknowledged past ack_timeout.
+        EscalationAction::Renotify { step: 0 } if incident.reopened_at.is_some() => {
+            return Ok(());
+        }
         EscalationAction::Renotify { step } => ("REMINDER — unacknowledged incident", step),
         EscalationAction::Escalate { step } => ("ESCALATION — still unacknowledged", step),
     };

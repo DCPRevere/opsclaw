@@ -37,19 +37,34 @@ async fn status(State(state): State<AppState>, Authed(_ctx): Authed) -> Result<J
     // name so the rendered listing is stable across polls.
     let mut jobs = JobRepo::list(&*state.repos).await?;
     jobs.sort_by(|a, b| a.name.cmp(&b.name));
-    let jobs: Vec<Value> = jobs
-        .iter()
-        .map(|j| {
-            json!({
-                "name": j.name,
-                "kind": j.payload.kind_label(),
-                "enabled": j.enabled,
-                "system": j.system,
-                "next_run_at": j.next_run_at,
-                "last_run_at": j.last_run_at,
-            })
-        })
-        .collect();
+    // Failure visibility per job: `last_run_at` advances even when every
+    // fire fails (the schedule moves on regardless), so without the streak
+    // and last error this surface showed a 20-hour scan outage as a
+    // healthy, on-cadence job — the journal was the only witness.
+    let mut rows: Vec<Value> = Vec::with_capacity(jobs.len());
+    for j in &jobs {
+        let streak = JobRepo::count_job_failures(&*state.repos, j.id).await.unwrap_or(0);
+        let last_error = if streak > 0 {
+            JobRepo::latest_job_failure(&*state.repos, j.id)
+                .await
+                .ok()
+                .flatten()
+                .map(|f| crate::policy::Scrubber::global().scrub(&f.last_error))
+        } else {
+            None
+        };
+        rows.push(json!({
+            "name": j.name,
+            "kind": j.payload.kind_label(),
+            "enabled": j.enabled,
+            "system": j.system,
+            "next_run_at": j.next_run_at,
+            "last_run_at": j.last_run_at,
+            "consecutive_failures": streak,
+            "last_error": last_error,
+        }));
+    }
+    let jobs = rows;
     Ok(Json(json!({
         "version": crate::version(),
         "fakes_mode": state.config.fully_faked(),

@@ -88,4 +88,26 @@ impl crate::db::JobRepo for InMemoryDb {
         store.job_failures.remove(&(job_id, occurrence_key.to_string()));
         Ok(())
     }
+
+    async fn count_job_failures(&self, job_id: Uuid) -> Result<i64> {
+        let store = self.store.lock().unwrap();
+        Ok(store.job_failures.keys().filter(|(id, _)| *id == job_id).count() as i64)
+    }
+
+    async fn clear_job_failures_for_job(&self, job_id: Uuid) -> Result<()> {
+        let mut store = self.store.lock().unwrap();
+        store.job_failures.retain(|(id, _), _| *id != job_id);
+        Ok(())
+    }
+
+    async fn latest_job_failure(&self, job_id: Uuid) -> Result<Option<JobFailure>> {
+        let store = self.store.lock().unwrap();
+        Ok(store
+            .job_failures
+            .iter()
+            .filter(|((id, _), _)| *id == job_id)
+            .map(|(_, f)| f)
+            .max_by_key(|f| f.last_failed_at)
+            .cloned())
+    }
 }

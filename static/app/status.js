@@ -10,14 +10,32 @@ let pollTimer = null;
 // Timestamps render as the raw server value (RFC3339 / ISO) escaped, same
 // as the incidents and settings views — one idiom everywhere.
 function jobRow(j) {
+  // "Health" is the failure streak, not last_run_at: the schedule advances
+  // past failed fires, so last_run_at looks fresh through a total outage.
+  const failing = (j.consecutive_failures || 0) > 0;
+  const health = failing
+    ? `<span class="badge severity-critical" title="${escapeHtml(j.last_error || '')}">${j.consecutive_failures} failed</span>`
+    : '<span class="badge ok">ok</span>';
   return `
     <tr>
       <td>${escapeHtml(j.name)}${j.system ? ' <span class="muted">(system)</span>' : ''}</td>
       <td>${escapeHtml(j.kind)}</td>
       <td>${j.enabled ? 'enabled' : 'paused'}</td>
+      <td>${health}</td>
       <td>${j.next_run_at ? escapeHtml(j.next_run_at) : '—'}</td>
       <td>${j.last_run_at ? escapeHtml(j.last_run_at) : 'never'}</td>
     </tr>`;
+}
+
+// A failing-jobs strip above the tables: streaks are the one status fact an
+// operator must not have to open a tab to notice (a dead LLM key silenced
+// scans for 20h while the UI showed every row on-cadence).
+function failingStrip(jobs) {
+  const failing = jobs.filter((j) => (j.consecutive_failures || 0) >= 3);
+  if (failing.length === 0) return '';
+  return `<div class="jobfail-banner">${failing.map((j) =>
+    `⚠ ${escapeHtml(j.name)}: ${j.consecutive_failures} consecutive failures — ${escapeHtml(j.last_error || 'no error recorded')}`
+  ).join('<br>')}</div>`;
 }
 
 async function refresh() {
@@ -42,10 +60,11 @@ async function refresh() {
         <button class="danger" id="estop-engage-btn" ${r.data.estop_engaged ? 'disabled' : ''}>Engage e-stop</button>
         <button class="primary" id="estop-resume-btn" ${!r.data.estop_engaged ? 'disabled' : ''}>Resume</button>
       </div>
+      ${failingStrip(jobs)}
       <h2>Scheduled jobs</h2>
       ${jobs.length === 0 ? '<p class="muted">No scheduled jobs.</p>' : `
       <table>
-        <tr><th>Job</th><th>Kind</th><th>State</th><th>Next run</th><th>Last run</th></tr>
+        <tr><th>Job</th><th>Kind</th><th>State</th><th>Health</th><th>Next run</th><th>Last run</th></tr>
         ${jobs.map(jobRow).join('')}
       </table>`}
     `;

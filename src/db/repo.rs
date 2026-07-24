@@ -177,6 +177,22 @@ pub trait JobRepo: Send + Sync {
     /// Clear a job occurrence's failure record (called on successful fire,
     /// or when the occurrence is given up on).
     async fn clear_job_failure(&self, job_id: Uuid, occurrence_key: &str) -> Result<()>;
+    /// How many failure records this JOB currently holds, across all
+    /// occurrence keys. With `clear_job_failures_for_job` wiping the slate on
+    /// every successful fire, this is the job's CONSECUTIVE-failed-occurrence
+    /// streak — the signal a RECURRING job's outage alert needs: each
+    /// occurrence of one fails at most once before the schedule advances
+    /// past it, so the per-occurrence `attempts` budget can never cross an
+    /// alert threshold no matter how long the job has been down.
+    async fn count_job_failures(&self, job_id: Uuid) -> Result<i64>;
+    /// Clear EVERY failure record for a job (called on successful fire — a
+    /// success ends the streak `count_job_failures` measures, including the
+    /// abandoned records of occurrences the schedule already advanced past).
+    async fn clear_job_failures_for_job(&self, job_id: Uuid) -> Result<()>;
+    /// The job's most recent failure record across all occurrence keys (by
+    /// `last_failed_at`), or `None` if the job has no failures on record —
+    /// the operator-facing "what is it dying of" for the status surface.
+    async fn latest_job_failure(&self, job_id: Uuid) -> Result<Option<JobFailure>>;
 }
 
 // Runbook run history uses the canonical domain types from `runbooks::history`

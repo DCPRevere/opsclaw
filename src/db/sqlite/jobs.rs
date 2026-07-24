@@ -189,4 +189,30 @@ impl crate::db::JobRepo for SqliteDb {
             .await?;
         Ok(())
     }
+
+    async fn count_job_failures(&self, job_id: Uuid) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM job_failures WHERE job_id = ?")
+            .bind(job_id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
+    async fn clear_job_failures_for_job(&self, job_id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM job_failures WHERE job_id = ?")
+            .bind(job_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn latest_job_failure(&self, job_id: Uuid) -> Result<Option<JobFailure>> {
+        let row = sqlx::query(
+            "SELECT * FROM job_failures WHERE job_id = ? ORDER BY last_failed_at DESC LIMIT 1",
+        )
+        .bind(job_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_failure))
+    }
 }

@@ -89,6 +89,33 @@ impl JobComposer for FailingComposer {
     }
 }
 
+/// Plays a fixed script of per-call outcomes (Err = compose failure,
+/// Ok(body) = success) — the streak-reset fixture.
+struct ScriptedComposer(
+    std::sync::Mutex<std::collections::VecDeque<std::result::Result<String, ()>>>,
+);
+
+impl ScriptedComposer {
+    fn new(script: Vec<std::result::Result<String, ()>>) -> Self {
+        Self(std::sync::Mutex::new(script.into()))
+    }
+}
+
+#[async_trait]
+impl JobComposer for ScriptedComposer {
+    async fn compose(
+        &self,
+        _job: &Job,
+        _prompt: &str,
+        _now_utc: DateTime<Utc>,
+    ) -> Result<Option<String>> {
+        match self.0.lock().unwrap().pop_front() {
+            Some(Ok(body)) => Ok(Some(body)),
+            Some(Err(())) | None => Err(crate::Error::other("composer boom")),
+        }
+    }
+}
+
 /// Composes a fixed body, and re-inserts a fresh due `Once` job on every
 /// call — the spawn-integration fixture for "one due job per tick forever"
 /// (see `spawn_ticks_on_the_adaptive_interval_and_tighten_speeds_it_up`).
@@ -304,6 +331,62 @@ async fn recurring_job_does_not_accumulate_a_retry_budget_it_just_advances() {
     assert!(
         stored.next_run_at.unwrap() > now,
         "a recurring job advances even after a failed compose"
+    );
+}
+
+#[tokio::test]
+async fn recurring_job_outage_pages_at_three_consecutive_failed_occurrences() {
+    // Each occurrence of a recurring job fails at most once before the
+    // schedule advances past it, so the per-occurrence attempts budget can
+    // never cross the ≥3 alert threshold — a 20h live scan outage (an LLM
+    // key at its monthly limit) paged nobody. The outage signal is the
+    // consecutive-failed-OCCURRENCE streak, reset by any success.
+    let (deps, db, channel) = deps_with(Arc::new(FailingComposer));
+    let mut job = prompt_job("recurring-outage", Schedule::Interval { every_minutes: 30 });
+    job.next_run_at = Some(t(9, 0));
+    db.insert(&job).await.unwrap();
+
+    // Two failed occurrences: no page yet.
+    jobs::run_due_jobs(&deps, t(9, 0)).await.unwrap();
+    jobs::run_due_jobs(&deps, t(9, 30)).await.unwrap();
+    assert!(channel.sent().is_empty(), "streak of 2 must not page");
+
+    // Third consecutive failure crosses the threshold: exactly one page
+    // (the 6h rate-limit claim absorbs the fourth failure's re-alert).
+    jobs::run_due_jobs(&deps, t(10, 0)).await.unwrap();
+    jobs::run_due_jobs(&deps, t(10, 30)).await.unwrap();
+    let sent = channel.sent();
+    assert_eq!(sent.len(), 1, "one outage page, rate-limited thereafter");
+    assert!(sent[0].body.contains("3 consecutive runs"), "{}", sent[0].body);
+    assert_eq!(db.count_job_failures(job.id).await.unwrap(), 4);
+}
+
+#[tokio::test]
+async fn a_successful_fire_resets_the_recurring_failure_streak() {
+    // Two failures, then success, then two more failures: the success wipes
+    // the streak, so the trailing failures sit at 2 and never page.
+    let flaky = Arc::new(ScriptedComposer::new(vec![
+        Err(()),
+        Err(()),
+        Ok("all clear".to_string()),
+        Err(()),
+        Err(()),
+    ]));
+    let (deps, db, channel) = deps_with(flaky);
+    let mut job = prompt_job("recurring-recovers", Schedule::Interval { every_minutes: 30 });
+    job.next_run_at = Some(t(9, 0));
+    db.insert(&job).await.unwrap();
+
+    for i in 0..5 {
+        jobs::run_due_jobs(&deps, t(9, 0) + Duration::minutes(30 * i)).await.unwrap();
+    }
+    let sent = channel.sent();
+    assert_eq!(sent.len(), 1, "only the successful fire's real message, no outage page");
+    assert_eq!(sent[0].body, "all clear");
+    assert_eq!(
+        db.count_job_failures(job.id).await.unwrap(),
+        2,
+        "success cleared the first streak; only the trailing failures remain"
     );
 }
 

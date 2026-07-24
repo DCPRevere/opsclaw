@@ -690,6 +690,38 @@ job_failure_lifecycle => |db| {
     assert!(db.job_failure_state(job_id, "2026-07-21T10:05").await.unwrap().is_none());
 }
 
+job_failure_streak_counts_and_clears_per_job => |db| {
+    let job_id = Uuid::new_v4();
+    let other_job = Uuid::new_v4();
+    assert_eq!(db.count_job_failures(job_id).await.unwrap(), 0);
+
+    // Three distinct failed occurrences of one job (the recurring-outage
+    // shape: schedule advances past each, records left behind at attempts=1)
+    // plus an unrelated job's failure that must not pollute the count.
+    for occ in ["10:00", "10:30", "11:00"] {
+        db.record_job_failure(job_id, occ, "llm 403", Utc::now()).await.unwrap();
+    }
+    db.record_job_failure(other_job, "10:00", "unrelated", Utc::now()).await.unwrap();
+    assert_eq!(db.count_job_failures(job_id).await.unwrap(), 3);
+    assert_eq!(db.count_job_failures(other_job).await.unwrap(), 1);
+
+    // Re-failing an EXISTING occurrence bumps attempts, not the streak.
+    db.record_job_failure(job_id, "11:00", "llm 403 again", Utc::now()).await.unwrap();
+    assert_eq!(db.count_job_failures(job_id).await.unwrap(), 3);
+
+    // The latest failure (by last_failed_at) carries the freshest error.
+    let latest = db.latest_job_failure(job_id).await.unwrap().unwrap();
+    assert_eq!(latest.occurrence_key, "11:00");
+    assert_eq!(latest.last_error, "llm 403 again");
+    assert!(db.latest_job_failure(Uuid::new_v4()).await.unwrap().is_none());
+
+    // The per-job wipe ends the streak and leaves other jobs untouched.
+    db.clear_job_failures_for_job(job_id).await.unwrap();
+    assert_eq!(db.count_job_failures(job_id).await.unwrap(), 0);
+    assert!(db.job_failure_state(job_id, "10:00").await.unwrap().is_none());
+    assert_eq!(db.count_job_failures(other_job).await.unwrap(), 1);
+}
+
 // ---- Runbook runs ----
 
 runbook_run_record_and_list => |db| {

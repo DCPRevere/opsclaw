@@ -426,14 +426,18 @@ fn sentinel_path() -> PathBuf {
     opsclaw_home().join(opsclaw::policy::estop::SENTINEL_FILE)
 }
 
-/// The daemon's own db_path resolution, mirrored here: load config (if any)
-/// and use `daemon.db_path` if set, else `None` — commands that need a DB
-/// then skip cleanly or report why, never guess a path the daemon wouldn't
-/// actually use.
+/// The daemon's own db_path resolution, mirrored here — INCLUDING the
+/// fallback: `boot::daemon_state` defaults to `$OPSCLAW_HOME/opsclaw.sqlite3`
+/// when `daemon.db_path` is unset, and onboarded deployments never set it
+/// explicitly, so a CLI that required the key couldn't read ANY default
+/// deployment's DB (found live: `jobs`/`incidents`/`audit` all refused
+/// "no daemon.db_path configured" against a running daemon). `None` only
+/// when the config file itself is absent/unreadable — then nothing has run
+/// here and there is genuinely no DB to guess at.
 fn resolve_db_path(config_path: &std::path::Path) -> Option<String> {
     opsclaw::config::Config::load(Some(config_path))
         .ok()
-        .and_then(|c| c.daemon.db_path)
+        .map(|c| c.daemon.db_path.unwrap_or_else(|| opsclaw_home().join("opsclaw.sqlite3")))
         .map(|p| p.display().to_string())
 }
 

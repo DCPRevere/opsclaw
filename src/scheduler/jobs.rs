@@ -260,9 +260,13 @@ async fn fire_one_job(deps: &SchedulerDeps, job: &mut Job, now_utc: DateTime<Utc
             Ok(()) => {
                 sent = true;
                 tracing::info!(job = %job.id, name = %job.name, body_len = body.len(), "job fired");
-                // A successful send resets the retry budget for this
-                // occurrence (no-op if it never failed).
-                let _ = deps.jobs.clear_job_failure(job.id, &claim_key).await;
+                // A successful send resets the retry budget for the WHOLE
+                // job, not just this occurrence: a recurring job's schedule
+                // advances past each failed occurrence (abandoning its
+                // record at attempts=1), so those orphan rows are the
+                // consecutive-outage streak `count_job_failures` measures —
+                // and a success is what ends the streak.
+                let _ = deps.jobs.clear_job_failures_for_job(job.id).await;
             }
             Err(e) => {
                 return handle_fire_failure(
@@ -359,8 +363,39 @@ async fn record_and_triage_failure(
         let _ = deps.jobs.clear_job_failure(job.id, occurrence_key).await;
         return true;
     }
-    if f.attempts >= 3 {
-        alert_failing(deps, job, f.attempts, error, now_utc).await;
+    if job.schedule.is_recurring() {
+        // A recurring job's schedule advances past each failed occurrence,
+        // so per-occurrence `attempts` stays at 1 forever and the threshold
+        // below can never fire — a 20-hour total scan outage (41 failed
+        // occurrences, found live 2026-07-24 when an LLM key hit its
+        // monthly limit) paged nobody. The outage signal for recurring jobs
+        // is the CONSECUTIVE-failed-occurrence streak, reset by any success.
+        let streak = deps.jobs.count_job_failures(job.id).await.unwrap_or(0);
+        if streak >= 3 {
+            alert_failing(
+                deps,
+                job,
+                format!(
+                    "Scheduled job '{}' has failed {streak} consecutive runs and is still \
+                     retrying on its normal cadence. Last error: {error}.",
+                    job.name
+                ),
+                now_utc,
+            )
+            .await;
+        }
+    } else if f.attempts >= 3 {
+        alert_failing(
+            deps,
+            job,
+            format!(
+                "Scheduled job '{}' has failed {} times and is retrying with backoff. \
+                 Last error: {error}.",
+                job.name, f.attempts
+            ),
+            now_utc,
+        )
+        .await;
     }
     tracing::warn!(job = %job.id, name = %job.name, attempts = f.attempts, "job occurrence failed (retrying with backoff): {error}");
     false
@@ -391,13 +426,7 @@ async fn alert_deadletter(
         .ok();
 }
 
-async fn alert_failing(
-    deps: &SchedulerDeps,
-    job: &Job,
-    attempts: i64,
-    error: &str,
-    now_utc: DateTime<Utc>,
-) {
+async fn alert_failing(deps: &SchedulerDeps, job: &Job, body: String, now_utc: DateTime<Utc>) {
     // Bucketed by job + coarse time window so a job stuck failing every
     // backoff interval pages again after the window rather than once ever.
     let bucket = super::rate_limit_bucket(now_utc, chrono::Duration::hours(6));
@@ -405,18 +434,7 @@ async fn alert_failing(
     if !deps.control.claim(CLAIM_KIND_JOB_FAILING, &key, now_utc).await.unwrap_or(true) {
         return;
     }
-    deps.channel
-        .send(OutboundMessage {
-            operator: None,
-            meta: None,
-            body: format!(
-                "Scheduled job '{}' has failed {attempts} times and is retrying with backoff. \
-                 Last error: {error}.",
-                job.name
-            ),
-        })
-        .await
-        .ok();
+    deps.channel.send(OutboundMessage { operator: None, meta: None, body }).await.ok();
 }
 
 async fn advance_and_save(deps: &SchedulerDeps, job: &mut Job, now: DateTime<Utc>) {

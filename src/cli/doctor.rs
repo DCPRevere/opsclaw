@@ -9,7 +9,8 @@
 //! targets — `NotImplementedExecutor` reports itself honestly rather than
 //! doctor treating "not built yet" as a target-specific outage); the DB
 //! opens and migrates; Hindsight reachability when `memory.hindsight_url` is
-//! set. Exits nonzero (via the caller checking `Report::ok()`) on any
+//! set; the identity provider is reachable when one is configured. Exits
+//! nonzero (via the caller checking `Report::ok()`) on any
 //! check's failure — a green `doctor` is meant to be a real precondition for
 //! `daemon`, not a lint that's easy to ignore.
 
@@ -101,6 +102,9 @@ pub async fn run(config_path: &std::path::Path, opsclaw_home: &std::path::Path) 
     if let Some(url) = &cfg.memory.hindsight_url {
         checks.push(check_hindsight(url).await);
     }
+
+    // 6. Identity provider reachability.
+    checks.push(check_auth_provider(&cfg).await);
 
     Ok(Report { checks })
 }
@@ -266,6 +270,52 @@ async fn check_hindsight(url: &str) -> CheckResult {
     }
 }
 
+/// Is the configured identity provider actually there? Under `local` there
+/// is nothing external to reach, so this reports skipped rather than
+/// inventing a check.
+///
+/// Under `hanko` the probe is `GET {api_url}/.well-known/jwks.json`, not the
+/// `POST /sessions/validate` the daemon really uses: validate needs a live
+/// session token, which doctor has no way to obtain, while the JWKS document
+/// is unauthenticated and served by the same public port — so reaching it
+/// proves exactly what doctor can prove here (the URL is right and the
+/// project is up), and nothing more.
+///
+/// Never fatal to the RUN: a failure is one red line beside the others, and
+/// every other check still executes. Doctor reports, it does not refuse.
+async fn check_auth_provider(cfg: &Config) -> CheckResult {
+    const NAME: &str = "auth provider";
+    let result = |ok: bool, detail: String| CheckResult { name: NAME.into(), ok, detail };
+
+    if cfg.auth.provider == crate::config::AuthProvider::Local {
+        return result(true, "local password sign-in — skipped (no external provider)".into());
+    }
+    let Some(base) = cfg.auth.api_base() else {
+        // validate() already refuses this; saying it again here means a
+        // config that failed check 1 still names WHY sign-in is broken.
+        return result(false, "auth.provider is \"hanko\" but auth.api_url is unset".into());
+    };
+
+    let url = format!("{base}/.well-known/jwks.json");
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build()
+    {
+        Ok(c) => c,
+        Err(e) => return result(false, format!("could not build an HTTP client: {e}")),
+    };
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => result(true, format!("hanko: {url} reachable")),
+        Ok(resp) => result(
+            false,
+            format!(
+                "hanko: {url} answered HTTP {} — check auth.api_url names the PUBLIC Hanko port, \
+                 not the admin port",
+                resp.status().as_u16()
+            ),
+        ),
+        Err(e) => result(false, format!("hanko: {url} unreachable: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +410,97 @@ mod tests {
         // Never leaks a value, because there is none to leak, and the
         // reference form itself carries no secret material.
         assert!(secret_check.detail.contains("env:OPSCLAW_DOCTOR_TEST_MISSING_KEY"));
+    }
+
+    /// A hanko config needs a real jwt secret (`requires_real_jwt_secret`),
+    /// so every hanko doctor test seeds one rather than tripping check 1 on
+    /// an unrelated failure.
+    fn hanko_config(api_url: &str) -> String {
+        format!(
+            r#"
+                [http]
+                jwt_secret = "env:OPSCLAW_DOCTOR_TEST_JWT"
+                [auth]
+                provider = "hanko"
+                api_url = "{api_url}"
+                audience = ["ops.example.com"]
+            "#
+        )
+    }
+
+    fn set_test_jwt() {
+        unsafe {
+            std::env::set_var("OPSCLAW_DOCTOR_TEST_JWT", "0123456789abcdef0123456789abcdef0123")
+        };
+    }
+
+    #[tokio::test]
+    async fn local_provider_reports_the_auth_check_as_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let report = run(&config_path, dir.path()).await.unwrap();
+        let check = report.checks.iter().find(|c| c.name == "auth provider").unwrap();
+        assert!(check.ok, "{check:?}");
+        assert!(check.detail.contains("skipped"), "{check:?}");
+        assert!(report.ok(), "{:#?}", report.checks);
+    }
+
+    #[tokio::test]
+    async fn hanko_jwks_reachable_is_green() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/.well-known/jwks.json"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "keys": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        set_test_jwt();
+        std::fs::write(&config_path, hanko_config(&server.uri())).unwrap();
+
+        let report = run(&config_path, dir.path()).await.unwrap();
+        let check = report.checks.iter().find(|c| c.name == "auth provider").unwrap();
+        assert!(check.ok, "{check:?}");
+        assert!(check.detail.contains("reachable"), "{check:?}");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_wrong_hanko_url_is_reported_without_stopping_the_other_checks() {
+        // The server is up but serves no JWKS — the shape of "api_url points
+        // at something that is not a Hanko public port".
+        let server = wiremock::MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        set_test_jwt();
+        std::fs::write(&config_path, hanko_config(&server.uri())).unwrap();
+
+        let report = run(&config_path, dir.path()).await.unwrap();
+        let check = report.checks.iter().find(|c| c.name == "auth provider").unwrap();
+        assert!(!check.ok, "{check:?}");
+        assert!(check.detail.contains("404"), "{check:?}");
+        // Reported, not fatal: doctor still ran (and still reports) the rest.
+        assert!(report.checks.iter().any(|c| c.name == "config"), "{:#?}", report.checks);
+        assert!(report.checks.iter().any(|c| c.name == "database"), "{:#?}", report.checks);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_hanko_is_reported_not_a_doctor_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        set_test_jwt();
+        // Port 1 is reserved and never listening: connection refused.
+        std::fs::write(&config_path, hanko_config("http://127.0.0.1:1")).unwrap();
+
+        let report = run(&config_path, dir.path()).await.unwrap();
+        let check = report.checks.iter().find(|c| c.name == "auth provider").unwrap();
+        assert!(!check.ok, "{check:?}");
+        assert!(check.detail.contains("unreachable"), "{check:?}");
     }
 
     #[tokio::test]

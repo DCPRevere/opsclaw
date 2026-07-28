@@ -20,6 +20,50 @@ jwt_secret = "store:jwt-secret"
 # Plain http on localhost — the browser won't send a Secure cookie.
 cookies_secure = false
 
+# Who proves an operator is who they say they are AT LOGIN. Omitting the
+# whole section means provider = "local": argon2 password + the daemon's own
+# HS256 session cookie. The cookie, `token_version` revocation and the `ops_`
+# CLI bearer are identical under both providers — only the front door moves.
+#   [auth]
+#   provider = "local"
+#
+# The hanko provider replaces the password form with a passkey widget and
+# verifies each sign-in against the Hanko API server-side. It needs TLS on
+# this daemon (WebAuthn only runs in a secure context, so it cannot work on
+# the plain-http sandbox listener above) and operator rows already linked to
+# Hanko user ids (`opsclaw-cli account create --hanko-subject <id>`).
+#   [auth]
+#   provider = "hanko"
+#   # Hanko Cloud, or a self-hosted backend's PUBLIC port (8000), never the
+#   # admin port (8001). Must be https:// outside fakes mode.
+#   api_url = "https://<tenant>.hanko.io"
+#   # The `aud` a session token must carry. Not inferable — see below.
+#   audience = ["opsclaw.example.com"]
+#
+# HANKO-SIDE SETTINGS. Each of these fails silently or confusingly, so set
+# them deliberately on the Hanko project/config before flipping the provider:
+#
+#   cors.allow_origins — must contain this daemon's origin, or the browser
+#     widget's calls are blocked with nothing useful in the daemon log. This
+#     key is TOP-LEVEL on Hanko backend v3.x; on v2.x it was
+#     server.public.cors.allow_origins. Pin the image tag so a silent
+#     rename cannot arrive with a rebuild.
+#   webauthn.relying_party.id — the bare effective DOMAIN, no scheme and no
+#     port ("opsclaw.example.com"). ONE-WAY DOOR: passkeys are
+#     cryptographically bound to it, so changing it later orphans every
+#     enrolled passkey and every operator must re-enrol. Pick the domain you
+#     intend to keep.
+#   webauthn.relying_party.origins — full origins WITH protocol
+#     ("https://opsclaw.example.com"), unlike the id above.
+#   session.audience — must match auth.audience in this file. Hanko defaults
+#     it to webauthn.relying_party.id, which is a different string from the
+#     origin, so this is the easiest one to get wrong.
+#   session.enable_auth_token_header = true — REQUIRED when the Hanko API is
+#     on a different domain from opsclaw. The widget reads its session token
+#     from sessionStorage, which is only populated from the X-Auth-Token
+#     response header this flag enables; without it sign-in completes at
+#     Hanko and then stalls here with no token to exchange.
+
 [llm]
 api_key = "env:OPENROUTER_API_KEY"
 models = ["deepseek/deepseek-v4-pro"]

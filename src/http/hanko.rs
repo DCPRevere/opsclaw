@@ -7,20 +7,26 @@
 //! `POST /sessions/validate` rather than fetching the JWKS and checking the
 //! signature locally, because:
 //!
-//! - Hanko keeps server-side session rows. A token can be cryptographically
-//!   valid while its session has been revoked, has idled out, or has been
-//!   pushed out by `session.limit` (default 5). A signature check cannot see
-//!   any of that; `/sessions/validate` can.
 //! - There is no key handling, so no JWKS cache, no `kid` rotation, and no
 //!   algorithm-confusion foot-gun. Nothing here can be tricked into treating
-//!   a public key as an HMAC secret.
-//! - Availability costs nothing: the browser has just talked to the same API
-//!   to mint the token, so Hanko is necessarily reachable at this moment.
+//!   a public key as an HMAC secret. This is the load-bearing reason.
+//! - It sees Hanko's server-side session state (revocation, idle timeout,
+//!   `session.limit`), which a signature check cannot. Do NOT overstate this:
+//!   verification happens ONCE, at login, and the daemon then issues its own
+//!   7-day sliding cookie, so revoking at Hanko closes a window about one
+//!   round trip wide. Ending a signed-in operator's access here is
+//!   `opsclaw-cli account revoke-sessions`, not anything Hanko does.
 //!
-//! Verification happens ONCE, at login. Everything downstream — `Authed`, the
-//! `ops_` CLI bearer, SSE stream tickets, `token_version` revocation — runs on
-//! opsclaw's own HS256 cookie exactly as it does under the local provider, so
-//! there is no per-request round trip to Hanko.
+//! The cost is a hard dependency on Hanko being reachable FROM THE DAEMON on
+//! the login path — not merely from the operator's browser. In a cluster
+//! with no egress that is a real new requirement; `opsclaw-cli doctor`
+//! probes it, but doctor runs where the CLI runs, which may not be where the
+//! daemon runs.
+//!
+//! Everything downstream — `Authed`, the `ops_` CLI bearer, SSE stream
+//! tickets, `token_version` revocation — runs on opsclaw's own HS256 cookie
+//! exactly as it does under the local provider, so there is no per-request
+//! round trip to Hanko.
 //!
 //! Two traps this module encodes, both verified against Hanko backend v3.0.4:
 //!
@@ -99,8 +105,8 @@ impl HankoClient {
     /// Verify a session token and return the identity it proves.
     ///
     /// Every rejection is the SAME `Unauthorized` message: the distinguishing
-    /// reason is logged at debug and never returned, so this endpoint cannot
-    /// be used to probe which identities exist. A transport failure is
+    /// reason is logged (never returned), so this endpoint cannot be used to
+    /// probe which identities exist. A transport failure is
     /// `Unavailable` (503) instead, so a Hanko outage does not read to the
     /// operator as "your passkey was rejected".
     pub async fn verify(&self, session_token: &str) -> Result<VerifiedIdentity> {
@@ -146,9 +152,15 @@ impl HankoClient {
         // rather than sending `[]`.
         let audience = claims.audience.unwrap_or_default();
         if !audience.iter().any(|a| self.audience.contains(a)) {
-            tracing::debug!(
+            // WARN, not debug: this is the single easiest thing to get
+            // wrong in a Hanko deployment (its `session.audience` defaults
+            // to `webauthn.relying_party.id`), the values are not
+            // sensitive, and at 3am an operator otherwise sees the same
+            // opaque rejection for a misconfiguration as for a forgery.
+            tracing::warn!(
                 got = ?audience, expected = ?self.audience,
-                "hanko token audience does not match auth.audience"
+                "hanko token audience does not match auth.audience — check Hanko's \
+                 session.audience against auth.audience"
             );
             return Err(rejected());
         }

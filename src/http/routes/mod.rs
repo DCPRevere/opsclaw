@@ -174,25 +174,57 @@ fn cors_layer() -> CorsLayer {
 /// vendored and served from this daemon (`static/vendor/`), so it is
 /// same-origin like every other module. There is no `frame-src` exception
 /// either; nothing is framed.
+/// The directives, as data. Built from a list rather than a string with a
+/// `replace` on it: a substitution keyed on the literal `"connect-src
+/// 'self'"` silently no-ops if that substring is ever reworded or reordered,
+/// and the failure is invisible — the header stays a valid CSP, nothing
+/// errors, and login breaks in the browser with a console violation nobody
+/// sees until an operator reports it.
+/// The policy exactly as it shipped before `[auth]` existed. Kept as a
+/// frozen literal for two jobs: it is the golden value
+/// `csp_is_unchanged_under_the_local_provider` asserts the built policy
+/// still equals (a golden, not a tautology — the built value comes from
+/// [`CSP_DIRECTIVES`]), and it is the `'static` fallback if a policy ever
+/// fails to become a header value.
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 script-src 'self'; style-src 'self' 'unsafe-inline'; \
 img-src 'self' data:; connect-src 'self'; \
 worker-src 'self'; manifest-src 'self'; \
 object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
 
-/// The policy for a given config. Byte-identical to
-/// [`CONTENT_SECURITY_POLICY`] under the local provider — a deployment that
-/// does not use an external identity provider gets exactly the policy it got
-/// before this setting existed.
+const CSP_DIRECTIVES: &[(&str, &str)] = &[
+    ("default-src", "'self'"),
+    ("script-src", "'self'"),
+    ("style-src", "'self' 'unsafe-inline'"),
+    ("img-src", "'self' data:"),
+    ("connect-src", "'self'"),
+    ("worker-src", "'self'"),
+    ("manifest-src", "'self'"),
+    ("object-src", "'none'"),
+    ("base-uri", "'self'"),
+    ("form-action", "'self'"),
+    ("frame-ancestors", "'none'"),
+];
+
+/// The policy for a given config. Byte-identical under the local provider to
+/// what shipped before this setting existed — a deployment not using an
+/// external identity provider sees no change at all.
 ///
 /// Only the ORIGIN of `auth.api_url` is added, never the full URL: a CSP
 /// source expression matches on origin, and a path there is at best ignored.
 pub(crate) fn content_security_policy(config: &crate::config::Config) -> String {
-    match (config.auth.provider, config.auth.api_origin()) {
-        (crate::config::AuthProvider::Hanko, Some(origin)) => CONTENT_SECURITY_POLICY
-            .replace("connect-src 'self'", &format!("connect-src 'self' {origin}")),
-        _ => CONTENT_SECURITY_POLICY.to_string(),
-    }
+    let extra_connect = match (config.auth.provider, config.auth.api_origin()) {
+        (crate::config::AuthProvider::Hanko, Some(origin)) => Some(origin),
+        _ => None,
+    };
+    CSP_DIRECTIVES
+        .iter()
+        .map(|(name, sources)| match (*name, extra_connect.as_deref()) {
+            ("connect-src", Some(origin)) => format!("{name} {sources} {origin}"),
+            _ => format!("{name} {sources}"),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn csp_header_value(config: &crate::config::Config) -> axum::http::HeaderValue {

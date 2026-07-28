@@ -103,8 +103,13 @@ pub async fn run(config_path: &std::path::Path, opsclaw_home: &std::path::Path) 
         checks.push(check_hindsight(url).await);
     }
 
-    // 6. Identity provider reachability.
+    // 6. Identity provider reachability, and whether the operator roster is
+    // ready for the configured provider — the precondition an auth.provider
+    // flip stakes everything on.
     checks.push(check_auth_provider(&cfg).await);
+    checks.push(
+        check_account_linkage(&cfg, cfg.daemon.db_path.as_deref().and_then(|p| p.to_str())).await,
+    );
 
     Ok(Report { checks })
 }
@@ -296,23 +301,127 @@ async fn check_auth_provider(cfg: &Config) -> CheckResult {
         return result(false, "auth.provider is \"hanko\" but auth.api_url is unset".into());
     };
 
-    let url = format!("{base}/.well-known/jwks.json");
+    // Probe the endpoint the daemon ACTUALLY calls, with a deliberately
+    // bogus token. It is unauthenticated, and a correctly configured Hanko
+    // answers HTTP 200 `{"is_valid": false}` — so this proves the public
+    // API, the exact path, and the response shape all at once. The JWKS
+    // endpoint would only prove that some host serves something at a
+    // well-known path: it would pass against the admin port, against a v2
+    // backend, and against an entirely different tenant.
+    let url = format!("{base}/sessions/validate");
     let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build()
     {
         Ok(c) => c,
         Err(e) => return result(false, format!("could not build an HTTP client: {e}")),
     };
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => result(true, format!("hanko: {url} reachable")),
-        Ok(resp) => result(
+    let resp = match client
+        .post(&url)
+        .json(&serde_json::json!({ "session_token": "opsclaw-doctor-probe" }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return result(false, format!("hanko: {url} unreachable: {e}")),
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        return result(
             false,
             format!(
-                "hanko: {url} answered HTTP {} — check auth.api_url names the PUBLIC Hanko port, \
+                "hanko: {url} answered HTTP {} — check auth.api_url names the PUBLIC Hanko API, \
                  not the admin port",
-                resp.status().as_u16()
+                status.as_u16()
+            ),
+        );
+    }
+    match resp.json::<serde_json::Value>().await {
+        Ok(v) if v.get("is_valid").and_then(serde_json::Value::as_bool) == Some(false) => {
+            result(true, format!("hanko: {url} answers as expected"))
+        }
+        Ok(v) => result(
+            false,
+            format!(
+                "hanko: {url} answered 200 but not the expected {{\"is_valid\": false}} shape \
+                 (got {v}) — is this a Hanko public API?"
             ),
         ),
-        Err(e) => result(false, format!("hanko: {url} unreachable: {e}")),
+        Err(e) => result(false, format!("hanko: {url} returned an unreadable body: {e}")),
+    }
+}
+
+/// Whether the operator roster is ready for the configured provider. The
+/// provider flip stakes everything on "every operator is linked", and
+/// nothing else can answer it: `by_external_subject` is the only lookup the
+/// exchange route uses, so an unlinked account is refused forever and the
+/// first symptom is a locked-out operator at the worst moment.
+async fn check_account_linkage(cfg: &Config, db_path: Option<&str>) -> CheckResult {
+    const NAME: &str = "operator linkage";
+    let result = |ok: bool, detail: String| CheckResult { name: NAME.into(), ok, detail };
+    let hanko = cfg.auth.provider == crate::config::AuthProvider::Hanko;
+
+    let Some(path) = db_path else {
+        return result(true, "no daemon.db_path configured — no roster to check".into());
+    };
+    let db = match crate::db::Db::connect(path).await {
+        Ok(db) => db,
+        Err(e) => return result(false, format!("{path}: {e}")),
+    };
+    let accounts = match crate::db::AccountRepo::list(&*db.repos()).await {
+        Ok(a) => a,
+        Err(e) => return result(false, format!("could not read accounts: {e}")),
+    };
+    if accounts.is_empty() {
+        return result(true, "no operator accounts yet".into());
+    }
+    let (linked, unlinked): (Vec<_>, Vec<_>) =
+        accounts.iter().partition(|a| a.external_subject.is_some());
+
+    if hanko {
+        if unlinked.is_empty() {
+            return result(true, format!("all {} operator account(s) linked", linked.len()));
+        }
+        let names: Vec<&str> = unlinked.iter().map(|a| a.email.as_str()).collect();
+        result(
+            false,
+            format!(
+                "{} of {} operator account(s) are not linked and will be refused at sign-in: {} \
+                 — run `opsclaw-cli account link <email> --hanko-subject <id>`",
+                unlinked.len(),
+                accounts.len(),
+                names.join(", ")
+            ),
+        )
+    } else if linked.is_empty() {
+        result(true, format!("{} local operator account(s)", accounts.len()))
+    } else {
+        // The converse warning: mid-migration, and the danger is real if
+        // any of them were linked with --drop-password.
+        let stuck: Vec<&str> = linked
+            .iter()
+            .filter(|a| a.password_hash == crate::http::auth::NO_PASSWORD)
+            .map(|a| a.email.as_str())
+            .collect();
+        if stuck.is_empty() {
+            result(
+                true,
+                format!(
+                    "{} of {} account(s) already linked, ready for auth.provider = \"hanko\"",
+                    linked.len(),
+                    accounts.len()
+                ),
+            )
+        } else {
+            result(
+                false,
+                format!(
+                    "{} account(s) are linked AND have no password, but auth.provider is still \
+                     \"local\" — they cannot sign in by either method: {} — either complete the \
+                     flip or run `opsclaw-cli account set-password <email>`",
+                    stuck.len(),
+                    stuck.join(", ")
+                ),
+            )
+        }
     }
 }
 
@@ -446,13 +555,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hanko_jwks_reachable_is_green() {
+    async fn hanko_validate_endpoint_answering_correctly_is_green() {
+        // The probe hits the endpoint the DAEMON calls, not the JWKS one:
+        // a wrong tenant, the admin port, or a v2 backend all serve
+        // something at /.well-known/jwks.json but cannot answer this.
         let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/.well-known/jwks.json"))
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/sessions/validate"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "keys": [] })),
+                    .set_body_json(serde_json::json!({ "is_valid": false })),
             )
             .expect(1)
             .mount(&server)
@@ -466,8 +578,31 @@ mod tests {
         let report = run(&config_path, dir.path()).await.unwrap();
         let check = report.checks.iter().find(|c| c.name == "auth provider").unwrap();
         assert!(check.ok, "{check:?}");
-        assert!(check.detail.contains("reachable"), "{check:?}");
         server.verify().await;
+    }
+
+    /// A host that is up and answers 200, but is not a Hanko public API, must
+    /// be reported red rather than passing on reachability alone.
+    #[tokio::test]
+    async fn a_200_that_is_not_the_hanko_shape_is_reported_red() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/sessions/validate"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "something": "else" })),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        set_test_jwt();
+        std::fs::write(&config_path, hanko_config(&server.uri())).unwrap();
+
+        let report = run(&config_path, dir.path()).await.unwrap();
+        let check = report.checks.iter().find(|c| c.name == "auth provider").unwrap();
+        assert!(!check.ok, "{check:?}");
     }
 
     #[tokio::test]

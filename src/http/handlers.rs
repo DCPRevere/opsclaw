@@ -102,7 +102,11 @@ pub(crate) async fn authenticate(state: &AppState, headers: &HeaderMap) -> Resul
     if let Ok(token) = bearer(headers)
         && token.starts_with(super::cli_auth::TOKEN_PREFIX)
     {
-        let (account_id, _token_id) = state
+        // `find_cli_token` returns `(token_id, account_id)` in that order
+        // (see `CliTokenRepo::find_cli_token`) — binding it the other way
+        // round hands every `Authed` route the TOKEN row's uuid as the
+        // operator identity, which `by_id` then fails to resolve.
+        let (_token_id, account_id) = state
             .repos
             .find_cli_token(&super::cli_auth::token_hash(token))
             .await?

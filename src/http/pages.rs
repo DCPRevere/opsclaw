@@ -64,6 +64,11 @@ const APP_APPROVALS_JS: &str = include_str!("../../static/app/approvals.js");
 const APP_STATUS_JS: &str = include_str!("../../static/app/status.js");
 const APP_SETTINGS_JS: &str = include_str!("../../static/app/settings.js");
 const APP_MAIN_JS: &str = include_str!("../../static/app/main.js");
+const APP_HANKO_JS: &str = include_str!("../../static/app/hanko.js");
+/// The vendored Hanko widget (`static/vendor/`, MIT, pinned + hashed in its
+/// own header). Served from this registry like any other module so the
+/// page's `script-src 'self'` never has to widen to a CDN.
+const APP_HANKO_ELEMENTS_JS: &str = include_str!("../../static/vendor/hanko-elements.js");
 
 /// GET /app/{name} — the shell's ES modules. Each is `include_str!`'d
 /// (never read from disk at runtime — see this module's doc comment), so
@@ -82,6 +87,8 @@ pub async fn app_module(Path(name): Path<String>) -> Response {
         "status.js" => Some(APP_STATUS_JS),
         "settings.js" => Some(APP_SETTINGS_JS),
         "main.js" => Some(APP_MAIN_JS),
+        "hanko.js" => Some(APP_HANKO_JS),
+        "hanko-elements.js" => Some(APP_HANKO_ELEMENTS_JS),
         _ => None,
     };
     match body {
@@ -186,8 +193,13 @@ mod tests {
 
     #[tokio::test]
     async fn known_modules_serve_as_javascript_with_no_cache() {
+        // Every registered module. A name missing here 404s at runtime with
+        // no compile error, so this list is the only thing that catches a
+        // registry gap — `format.js` was registered and precached but absent
+        // from this list until the auth-provider work added to it.
         for name in [
             "state.js",
+            "format.js",
             "api.js",
             "auth.js",
             "chat.js",
@@ -196,6 +208,8 @@ mod tests {
             "status.js",
             "settings.js",
             "main.js",
+            "hanko.js",
+            "hanko-elements.js",
         ] {
             let resp = app_module(Path(name.to_string())).await;
             assert_eq!(resp.status(), StatusCode::OK, "{name}");

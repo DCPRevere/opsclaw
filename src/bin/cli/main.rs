@@ -265,7 +265,17 @@ enum AccountCommand {
         email: String,
         #[arg(long)]
         hanko_subject: String,
+        /// Also clear the account's password. Off by default: linking runs
+        /// while the daemon is still on `local`, where the hanko route
+        /// refuses everything, so dropping the password here would leave
+        /// the operator unable to sign in by either method until the flip.
+        #[arg(long)]
+        drop_password: bool,
     },
+    /// Set an operator's password (hidden prompt or piped stdin, never
+    /// argv). The way back off an external provider, and the recovery path
+    /// for an account linked with --drop-password.
+    SetPassword { email: String },
     /// Revoke every outstanding session for an operator: all web session
     /// cookies and all `ops_` CLI tokens. Use when offboarding — removing
     /// someone at the identity provider does not reach this daemon.
@@ -986,14 +996,43 @@ async fn dispatch(
                     .await?;
                 println!("created operator {} ({}) — sign in at the web UI", out.email, out.id);
             }
-            AccountCommand::Link { email, hanko_subject } => {
+            AccountCommand::Link { email, hanko_subject, drop_password } => {
                 let db = open_or_create_db(cfg_path, home).await?;
-                let out =
-                    opsclaw::cli::account_cmd::link_hanko(&db, &email, &hanko_subject).await?;
-                println!(
-                    "linked {} ({}) to hanko subject {hanko_subject} — its password no longer works",
-                    out.email, out.id
-                );
+                let out = opsclaw::cli::account_cmd::link_hanko(
+                    &db,
+                    &email,
+                    &hanko_subject,
+                    drop_password,
+                )
+                .await?;
+                println!("linked {} ({}) to hanko subject {hanko_subject}", out.email, out.id);
+                if drop_password {
+                    println!(
+                        "  its password is cleared — until auth.provider is \"hanko\", this \
+                         operator cannot sign in at all"
+                    );
+                } else {
+                    println!("  its password still works until auth.provider is \"hanko\"");
+                }
+            }
+            AccountCommand::SetPassword { email } => {
+                // The warning below turns on the DAEMON's configured
+                // provider, not the account's: an account linked to Hanko on
+                // a daemon still running `local` can absolutely use a
+                // password, and that combination is the normal mid-migration
+                // state. Reading it off the account row would tell the
+                // operator their password does not work when it does.
+                let provider = Config::load(Some(cfg_path))?.auth.provider;
+                let db = open_or_create_db(cfg_path, home).await?;
+                let password = read_password_confirmed()?;
+                let out = opsclaw::cli::account_cmd::set_password(&db, &email, &password).await?;
+                println!("set the password for {} ({})", out.email, out.id);
+                if provider != opsclaw::config::AuthProvider::Local {
+                    println!(
+                        "  note: auth.provider is not \"local\", so password sign-in is refused \
+                         until it is set back"
+                    );
+                }
             }
             AccountCommand::RevokeSessions { email } => {
                 let db = open_or_create_db(cfg_path, home).await?;
@@ -1011,8 +1050,15 @@ async fn dispatch(
                 } else if accounts.is_empty() {
                     println!("(no operator accounts — run `opsclaw-cli account create <email>`)");
                 } else {
+                    // Linkage is shown because it is the one thing an
+                    // auth.provider flip depends on, and it was otherwise
+                    // only inspectable by opening the database by hand.
                     for a in accounts {
-                        println!("{}  {}  {}", a.id, a.email, a.display_name);
+                        let link = match (&a.auth_provider, &a.external_subject) {
+                            (p, Some(s)) => format!("{p}:{s}"),
+                            (p, None) => format!("{p} (not linked)"),
+                        };
+                        println!("{}  {}  {}  {link}", a.id, a.email, a.display_name);
                     }
                 }
             }
@@ -1335,6 +1381,17 @@ mod tests {
                 "6f1c0e64-0000-4000-8000-000000000001",
             ],
             &["opsclaw-cli", "account", "revoke-sessions", "ops@example.com"],
+            &["opsclaw-cli", "account", "link", "ops@example.com", "--hanko-subject", "sub-1"],
+            &[
+                "opsclaw-cli",
+                "account",
+                "link",
+                "ops@example.com",
+                "--hanko-subject",
+                "sub-1",
+                "--drop-password",
+            ],
+            &["opsclaw-cli", "account", "set-password", "ops@example.com"],
             &["opsclaw-cli", "account", "list", "--json"],
             &["opsclaw-cli", "secret", "set", "es-password"],
             &["opsclaw-cli", "secret", "set", "es-password", "--from-env", "ES_PASSWORD"],
@@ -1398,6 +1455,11 @@ mod tests {
     #[test]
     fn account_revoke_sessions_requires_an_email() {
         assert!(Cli::try_parse_from(["opsclaw-cli", "account", "revoke-sessions"]).is_err());
+        assert!(Cli::try_parse_from(["opsclaw-cli", "account", "set-password"]).is_err());
+        // --hanko-subject carries the identity; link without it is meaningless.
+        assert!(
+            Cli::try_parse_from(["opsclaw-cli", "account", "link", "ops@example.com"]).is_err()
+        );
     }
 
     #[test]

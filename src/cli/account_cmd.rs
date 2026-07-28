@@ -20,6 +20,28 @@ pub struct CreateOutcome {
     pub id: Uuid,
     pub email: String,
     pub display_name: String,
+    /// Which provider this account signs in through. Carried so
+    /// `account list` can answer the one question the provider flip depends
+    /// on — "is every operator linked yet?" — which was otherwise
+    /// unanswerable without opening the database by hand.
+    pub auth_provider: String,
+    pub external_subject: Option<String>,
+}
+
+fn outcome(
+    id: Uuid,
+    email: String,
+    display_name: String,
+    auth_provider: &str,
+    external_subject: Option<&str>,
+) -> CreateOutcome {
+    CreateOutcome {
+        id,
+        email,
+        display_name,
+        auth_provider: auth_provider.to_string(),
+        external_subject: external_subject.map(str::to_string),
+    }
 }
 
 /// How the new account will prove its identity at login.
@@ -93,20 +115,41 @@ pub async fn create(
         external_subject,
     };
     AccountRepo::insert(&*db.repos(), &account).await?;
-    Ok(CreateOutcome { id: account.id, email, display_name: account.display_name })
+    Ok(outcome(
+        account.id,
+        email,
+        account.display_name,
+        auth_provider,
+        account.external_subject.as_deref(),
+    ))
 }
 
-/// Link an EXISTING operator account to a Hanko subject, dropping its
-/// password.
+/// Link an EXISTING operator account to a Hanko subject.
 ///
 /// This is the pre-flip migration step. Operator rows created under the
-/// local provider carry no external subject, and
-/// `POST /api/auth/hanko/exchange` resolves accounts by subject alone — so
-/// without this, switching `auth.provider` to hanko locks out every
-/// existing operator and there is no way back in but a CLI token.
+/// local provider carry no external subject, and the hanko exchange route
+/// resolves accounts by subject alone — so without this, switching
+/// `auth.provider` to hanko locks out every existing operator.
 /// Deliberately usable while the daemon is still on `local`: linking is
 /// preparation, done before the switch, not after it.
-pub async fn link_hanko(db: &Db, email: &str, subject: &str) -> Result<CreateOutcome> {
+///
+/// The password is KEPT by default. That is the whole point of the
+/// ordering: linking happens while the daemon is still on `local`, where
+/// the hanko route refuses every request, so an account whose password was
+/// dropped at link time could sign in by neither method until the flip
+/// completed — a self-inflicted outage lasting as long as the rollout.
+/// Under `hanko` the surviving hash is unreachable anyway (`/api/login` is
+/// gated on the handler), so keeping it costs no security and is what makes
+/// a rollback a config edit rather than a database restore.
+///
+/// `drop_password` forces the sentinel for a deployment that wants the hash
+/// gone regardless.
+pub async fn link_hanko(
+    db: &Db,
+    email: &str,
+    subject: &str,
+    drop_password: bool,
+) -> Result<CreateOutcome> {
     let email = email.trim().to_ascii_lowercase();
     let subject = subject.trim();
     if subject.is_empty() {
@@ -124,10 +167,45 @@ pub async fn link_hanko(db: &Db, email: &str, subject: &str) -> Result<CreateOut
         account.id,
         crate::db::AUTH_PROVIDER_HANKO,
         subject,
-        auth::NO_PASSWORD,
+        drop_password.then_some(auth::NO_PASSWORD),
     )
     .await?;
-    Ok(CreateOutcome { id: account.id, email, display_name: account.display_name })
+    Ok(outcome(
+        account.id,
+        email,
+        account.display_name,
+        crate::db::AUTH_PROVIDER_HANKO,
+        Some(subject),
+    ))
+}
+
+/// Set an operator's password. The way back off an external provider, and
+/// the way to recover an account whose password was dropped at link time.
+/// Refuses to run while a non-local provider is configured only at the
+/// caller's discretion — the binary layer decides, since a password set
+/// while on `hanko` is legitimate preparation for rolling back.
+pub async fn set_password(db: &Db, email: &str, password: &str) -> Result<CreateOutcome> {
+    let email = email.trim().to_ascii_lowercase();
+    if password.len() < 12 {
+        return Err(crate::Error::validation(
+            "password must be at least 12 characters (it guards a daemon that can act on \
+             production systems)",
+        ));
+    }
+    let account = db
+        .repos()
+        .by_email(&email)
+        .await?
+        .ok_or_else(|| crate::Error::NotFound(format!("account for {email}")))?;
+    AccountRepo::set_password_hash(&*db.repos(), account.id, &auth::hash_password(password)?)
+        .await?;
+    Ok(outcome(
+        account.id,
+        email,
+        account.display_name,
+        &account.auth_provider,
+        account.external_subject.as_deref(),
+    ))
 }
 
 /// Revoke every outstanding session for an operator: bump `token_version`
@@ -160,7 +238,9 @@ pub async fn list(db: &Db) -> Result<Vec<CreateOutcome>> {
     Ok(AccountRepo::list(&*db.repos())
         .await?
         .into_iter()
-        .map(|a| CreateOutcome { id: a.id, email: a.email, display_name: a.display_name })
+        .map(|a| {
+            outcome(a.id, a.email, a.display_name, &a.auth_provider, a.external_subject.as_deref())
+        })
         .collect())
 }
 
@@ -201,5 +281,81 @@ mod tests {
                 .await
                 .unwrap_err();
         assert!(err.to_string().contains("already exists"), "{err}");
+    }
+
+    /// The lockout regression. Linking runs while the daemon is still on
+    /// `local`, where the hanko route refuses everything — so if linking
+    /// dropped the password, the operator could sign in by NEITHER method
+    /// until the flip completed.
+    #[tokio::test]
+    async fn linking_keeps_the_password_so_the_operator_is_never_locked_out() {
+        let db = Db::fake();
+        create(&db, "ops@example.com", "d", Credential::Password("a-long-enough-password"))
+            .await
+            .unwrap();
+        let out = link_hanko(&db, "ops@example.com", "sub-1", false).await.unwrap();
+        assert_eq!(out.auth_provider, crate::db::AUTH_PROVIDER_HANKO);
+        assert_eq!(out.external_subject.as_deref(), Some("sub-1"));
+
+        let stored = db.repos().by_email("ops@example.com").await.unwrap().unwrap();
+        assert!(
+            auth::verify_password("a-long-enough-password", &stored.password_hash).unwrap(),
+            "the password must still work until the provider actually changes"
+        );
+        // And the identity resolves, so the flip will find them.
+        assert!(
+            db.repos()
+                .by_external_subject(crate::db::AUTH_PROVIDER_HANKO, "sub-1")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_password_is_opt_in_and_set_password_recovers_it() {
+        let db = Db::fake();
+        create(&db, "ops@example.com", "d", Credential::Password("a-long-enough-password"))
+            .await
+            .unwrap();
+        link_hanko(&db, "ops@example.com", "sub-1", true).await.unwrap();
+        let stored = db.repos().by_email("ops@example.com").await.unwrap().unwrap();
+        assert_eq!(stored.password_hash, auth::NO_PASSWORD);
+        assert!(!auth::verify_password("a-long-enough-password", &stored.password_hash).unwrap());
+
+        // The recovery path: this is what makes rolling back off an external
+        // provider a config edit rather than a database restore.
+        set_password(&db, "ops@example.com", "another-long-password").await.unwrap();
+        let stored = db.repos().by_email("ops@example.com").await.unwrap().unwrap();
+        assert!(auth::verify_password("another-long-password", &stored.password_hash).unwrap());
+        // Linkage survives a password reset — the two are independent.
+        assert_eq!(stored.external_subject.as_deref(), Some("sub-1"));
+    }
+
+    #[tokio::test]
+    async fn set_password_enforces_the_length_rule_and_a_known_account() {
+        let db = Db::fake();
+        create(&db, "ops@example.com", "d", Credential::Password("a-long-enough-password"))
+            .await
+            .unwrap();
+        assert!(set_password(&db, "ops@example.com", "short").await.is_err());
+        assert!(set_password(&db, "nobody@example.com", "a-long-enough-password").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_reports_linkage_so_a_flip_can_be_checked() {
+        let db = Db::fake();
+        create(&db, "linked@example.com", "d", Credential::Password("a-long-enough-password"))
+            .await
+            .unwrap();
+        create(&db, "plain@example.com", "d", Credential::Password("a-long-enough-password"))
+            .await
+            .unwrap();
+        link_hanko(&db, "linked@example.com", "sub-1", false).await.unwrap();
+
+        let all = list(&db).await.unwrap();
+        let unlinked: Vec<_> =
+            all.iter().filter(|a| a.external_subject.is_none()).map(|a| &a.email).collect();
+        assert_eq!(unlinked, vec!["plain@example.com"], "the flip precondition must be visible");
     }
 }

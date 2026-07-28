@@ -597,25 +597,49 @@ account_by_external_subject_is_provider_scoped => |db| {
     // Linking an EXISTING local account is the pre-flip migration step:
     // without it, switching auth.provider locks out every operator who
     // already had a row.
-    AccountRepo::link_external_subject(db, local_id, AUTH_PROVIDER_HANKO, "sub-xyz", "!no-password")
+    let password_before =
+        AccountRepo::by_id(db, local_id).await.unwrap().unwrap().password_hash;
+    AccountRepo::link_external_subject(db, local_id, AUTH_PROVIDER_HANKO, "sub-xyz", None)
         .await
         .unwrap();
     let linked = db.by_external_subject(AUTH_PROVIDER_HANKO, "sub-xyz").await.unwrap().unwrap();
     assert_eq!(linked.id, local_id);
     assert_eq!(linked.auth_provider, AUTH_PROVIDER_HANKO);
-    assert_eq!(linked.password_hash, "!no-password", "the old password must not survive linking");
+    // `None` KEEPS the password. This is load-bearing: linking happens while
+    // the daemon is still on `local`, where the external path is refused, so
+    // dropping the password here would leave the operator unable to sign in
+    // by either method until the flip completed.
+    assert_eq!(linked.password_hash, password_before, "linking must not disarm the account");
+
+    // An explicit hash still replaces it, for a deployment that wants the
+    // password gone once the flip is done.
+    AccountRepo::link_external_subject(
+        db,
+        local_id,
+        AUTH_PROVIDER_HANKO,
+        "sub-xyz",
+        Some("!no-password"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        AccountRepo::by_id(db, local_id).await.unwrap().unwrap().password_hash,
+        "!no-password"
+    );
+
+    // And the recovery path puts a usable password back — what makes rolling
+    // off an external provider a config edit rather than a database restore.
+    AccountRepo::set_password_hash(db, local_id, "$argon2id$replaced").await.unwrap();
+    assert_eq!(
+        AccountRepo::by_id(db, local_id).await.unwrap().unwrap().password_hash,
+        "$argon2id$replaced"
+    );
 
     // And it honours the same one-operator-per-identity rule.
     assert!(
-        AccountRepo::link_external_subject(
-            db,
-            second_local,
-            AUTH_PROVIDER_HANKO,
-            "sub-xyz",
-            "!no-password"
-        )
-        .await
-        .is_err(),
+        AccountRepo::link_external_subject(db, second_local, AUTH_PROVIDER_HANKO, "sub-xyz", None)
+            .await
+            .is_err(),
         "linking a second account to a taken subject must be refused"
     );
 }
@@ -1111,13 +1135,14 @@ chat_log_pages_backward_from_a_seq_anchor => |db| {
 
 }
 
-/// The uniqueness half of migration 0009's index, pinned against SQLite alone
-/// because the two backends genuinely disagree here. The fake keys accounts by
-/// id and enforces no index, so the duplicate insert below returns `Ok(())`,
-/// leaves both rows, and lets `by_external_subject` resolve whichever the map
-/// iteration reaches first. SQLite is the spec (module doc), so this is the
-/// spec's behaviour and the fake is the one that owes a fix — tracked as a
-/// known divergence rather than silently written down to the weaker backend.
+/// Migration 0009's index, pinned against SQLite specifically for the ERROR
+/// SHAPE the fake cannot reproduce.
+///
+/// Both backends now refuse the duplicate — the parity case above asserts that
+/// on each — but only SQLite refuses it by hitting a real database constraint.
+/// This test is what proves the index exists in the migration at all, rather
+/// than the refusal being a Rust-side check that a hand-written SQL migration
+/// could quietly drop.
 #[tokio::test]
 async fn sqlite_refuses_a_second_account_on_the_same_external_identity() {
     let (db, _dir) = sqlite().await;

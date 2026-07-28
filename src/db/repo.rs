@@ -110,19 +110,28 @@ pub trait AccountRepo: Send + Sync {
     /// provider so a subject string minted by one provider can never
     /// resolve an account linked to another.
     async fn by_external_subject(&self, provider: &str, subject: &str) -> Result<Option<Account>>;
-    /// Point an EXISTING account at an external identity, replacing its
-    /// password with `http::auth::NO_PASSWORD`. This is the pre-flip
-    /// migration step: operators who already have accounts must be linked
-    /// to their provider subjects BEFORE `auth.provider` changes, or the
-    /// switch locks everyone out. Refuses (`Error::Conflict`) when another
-    /// account already holds that (provider, subject).
+    /// Point an EXISTING account at an external identity. This is the
+    /// pre-flip migration step: operators who already have accounts must be
+    /// linked to their provider subjects BEFORE `auth.provider` changes, or
+    /// the switch locks everyone out. Refuses (`Error::Conflict`) when
+    /// another account already holds that (provider, subject).
+    ///
+    /// `password_hash` is `None` to KEEP the existing password. Keeping it
+    /// is the default and matters: linking happens while the daemon is
+    /// still on `local`, where the external path is not yet accepted, so an
+    /// account whose password was dropped at link time can sign in by
+    /// neither method until the flip completes.
     async fn link_external_subject(
         &self,
         id: Uuid,
         provider: &str,
         subject: &str,
-        password_hash: &str,
+        password_hash: Option<&str>,
     ) -> Result<()>;
+    /// Replace an account's password hash. The recovery path: it is what
+    /// makes rolling a deployment back off an external provider a config
+    /// edit rather than a database restore.
+    async fn set_password_hash(&self, id: Uuid, password_hash: &str) -> Result<()>;
     async fn by_id(&self, id: Uuid) -> Result<Option<Account>>;
     async fn bump_token_version(&self, id: Uuid) -> Result<()>;
     async fn list(&self) -> Result<Vec<Account>>;

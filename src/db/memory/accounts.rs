@@ -49,12 +49,20 @@ impl crate::db::AccountRepo for InMemoryDb {
             .cloned())
     }
 
+    async fn set_password_hash(&self, id: Uuid, password_hash: &str) -> Result<()> {
+        let mut store = self.store.lock().unwrap();
+        if let Some(a) = store.accounts.get_mut(&id) {
+            a.password_hash = password_hash.to_string();
+        }
+        Ok(())
+    }
+
     async fn link_external_subject(
         &self,
         id: Uuid,
         provider: &str,
         subject: &str,
-        password_hash: &str,
+        password_hash: Option<&str>,
     ) -> Result<()> {
         let mut store = self.store.lock().unwrap();
         // Same uniqueness rule as the SQLite index — SQLite is the spec.
@@ -70,7 +78,10 @@ impl crate::db::AccountRepo for InMemoryDb {
         if let Some(a) = store.accounts.get_mut(&id) {
             a.auth_provider = provider.to_string();
             a.external_subject = Some(subject.to_string());
-            a.password_hash = password_hash.to_string();
+            // None keeps the existing hash — mirrors the SQLite COALESCE.
+            if let Some(h) = password_hash {
+                a.password_hash = h.to_string();
+            }
         }
         Ok(())
     }

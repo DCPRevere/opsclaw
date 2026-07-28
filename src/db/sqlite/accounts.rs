@@ -59,18 +59,32 @@ impl crate::db::AccountRepo for SqliteDb {
         Ok(row.as_ref().map(row_to_account))
     }
 
+    async fn set_password_hash(&self, id: Uuid, password_hash: &str) -> Result<()> {
+        sqlx::query("UPDATE accounts SET password_hash = ? WHERE id = ?")
+            .bind(password_hash)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn link_external_subject(
         &self,
         id: Uuid,
         provider: &str,
         subject: &str,
-        password_hash: &str,
+        password_hash: Option<&str>,
     ) -> Result<()> {
         // The partial unique index on (auth_provider, external_subject) is
         // what actually enforces one-operator-per-identity; translate its
         // violation into a Conflict rather than a raw 500.
+        //
+        // COALESCE keeps the existing hash when the caller passes None, so
+        // linking does not disarm the account's current way in.
         sqlx::query(
-            "UPDATE accounts SET auth_provider = ?, external_subject = ?, password_hash = ?
+            "UPDATE accounts
+                SET auth_provider = ?, external_subject = ?,
+                    password_hash = COALESCE(?, password_hash)
              WHERE id = ?",
         )
         .bind(provider)

@@ -72,22 +72,57 @@ pub trait AuditRepo: Send + Sync {
     async fn range(&self, from_seq: i64, limit: i64) -> Result<Vec<AuditRecord>>;
 }
 
+/// `Account::auth_provider` for an operator who signs in with a password.
+/// Matches `config::AuthProvider::Local`'s serde spelling, and is the
+/// column default in migration 0009 so every pre-existing row reads as this.
+pub const AUTH_PROVIDER_LOCAL: &str = "local";
+/// `Account::auth_provider` for an operator who signs in through Hanko.
+pub const AUTH_PROVIDER_HANKO: &str = "hanko";
+
 /// Operator accounts (web UI auth; Wave 4 fills the auth stack around this).
 #[derive(Debug, Clone)]
 pub struct Account {
     pub id: Uuid,
     pub email: String,
     pub display_name: String,
+    /// The argon2 PHC string, or `http::auth::NO_PASSWORD` for an account
+    /// that authenticates through an external provider (the column is NOT
+    /// NULL and migration 0001 is immutable, so a sentinel stands in for a
+    /// null — see migration 0009).
     pub password_hash: String,
     /// Bumping invalidates all outstanding JWTs (gianna's revocation).
     pub token_version: i64,
     pub created_at: DateTime<Utc>,
+    /// Which provider proves this operator's identity at login:
+    /// `"local"` (argon2 password) or `"hanko"`. Matches
+    /// `config::AuthProvider`'s serde spelling.
+    pub auth_provider: String,
+    /// The provider's immutable subject id for this operator — Hanko's
+    /// `sub`/`claims.subject` uuid. `None` for `local` accounts.
+    pub external_subject: Option<String>,
 }
 
 #[async_trait]
 pub trait AccountRepo: Send + Sync {
     async fn insert(&self, account: &Account) -> Result<()>;
     async fn by_email(&self, email: &str) -> Result<Option<Account>>;
+    /// Resolve an external identity to its operator account. Scoped by
+    /// provider so a subject string minted by one provider can never
+    /// resolve an account linked to another.
+    async fn by_external_subject(&self, provider: &str, subject: &str) -> Result<Option<Account>>;
+    /// Point an EXISTING account at an external identity, replacing its
+    /// password with `http::auth::NO_PASSWORD`. This is the pre-flip
+    /// migration step: operators who already have accounts must be linked
+    /// to their provider subjects BEFORE `auth.provider` changes, or the
+    /// switch locks everyone out. Refuses (`Error::Conflict`) when another
+    /// account already holds that (provider, subject).
+    async fn link_external_subject(
+        &self,
+        id: Uuid,
+        provider: &str,
+        subject: &str,
+        password_hash: &str,
+    ) -> Result<()>;
     async fn by_id(&self, id: Uuid) -> Result<Option<Account>>;
     async fn bump_token_version(&self, id: Uuid) -> Result<()>;
     async fn list(&self) -> Result<Vec<Account>>;

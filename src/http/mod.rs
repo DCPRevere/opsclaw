@@ -13,6 +13,7 @@
 pub mod auth;
 pub mod cli_auth;
 pub mod handlers;
+pub mod hanko;
 pub mod pages;
 pub mod ratelimit;
 pub mod routes;

@@ -29,9 +29,10 @@ use opsclaw::audit::{AuditOutcome, AuditRecord};
 use opsclaw::db::memory::InMemoryDb;
 use opsclaw::db::sqlite::SqliteDb;
 use opsclaw::db::{
-    Account, AccountRepo, ApprovalRepo, AuditRepo, ChannelStateRepo, ChatRepo, CliToken,
-    ControlRepo, IncidentRepo, Invite, InviteRepo, JobRepo, PushSubscription, PushSubscriptionRepo,
-    RunbookRun, RunbookRunRepo, StepOutcome, StepStatus, TokenRepo,
+    AUTH_PROVIDER_HANKO, AUTH_PROVIDER_LOCAL, Account, AccountRepo, ApprovalRepo, AuditRepo,
+    ChannelStateRepo, ChatRepo, CliToken, ControlRepo, IncidentRepo, Invite, InviteRepo, JobRepo,
+    PushSubscription, PushSubscriptionRepo, RunbookRun, RunbookRunRepo, StepOutcome, StepStatus,
+    TokenRepo,
 };
 use opsclaw::domain::{
     ApprovalRequest, ApprovalState, FqTarget, Incident, IncidentState, Job, Payload, Principal,
@@ -181,6 +182,8 @@ fn account(id: Uuid, email: &str) -> Account {
         password_hash: "x".into(),
         token_version: 0,
         created_at: Utc::now(),
+        auth_provider: "local".into(),
+        external_subject: None,
     }
 }
 
@@ -523,6 +526,98 @@ account_bump_token_version_invalidates_sessions => |db| {
     db.bump_token_version(id).await.unwrap();
     db.bump_token_version(id).await.unwrap();
     assert_eq!(AccountRepo::by_id(db, id).await.unwrap().unwrap().token_version, 2);
+}
+
+account_by_external_subject_is_provider_scoped => |db| {
+    // A hanko-linked operator. The binding is the provider's SUBJECT, not
+    // the email (migration 0009's header) — so the lookup is keyed on it.
+    let hanko_id = Uuid::new_v4();
+    let mut linked = account(hanko_id, "hanko@example.com");
+    linked.auth_provider = AUTH_PROVIDER_HANKO.into();
+    linked.external_subject = Some("sub-abc".into());
+    AccountRepo::insert(db, &linked).await.unwrap();
+
+    // An ordinary local operator, carrying no external identity at all.
+    let local_id = Uuid::new_v4();
+    AccountRepo::insert(db, &account(local_id, "local@example.com")).await.unwrap();
+
+    let found = db.by_external_subject(AUTH_PROVIDER_HANKO, "sub-abc").await.unwrap().unwrap();
+    assert_eq!(found.id, hanko_id);
+    assert_eq!(found.auth_provider, AUTH_PROVIDER_HANKO);
+    assert_eq!(found.external_subject.as_deref(), Some("sub-abc"));
+
+    // Provider-scoped: the SAME subject string under a different provider
+    // resolves nothing. A subject minted by one provider must never reach an
+    // account linked to another — otherwise a provider swap (or a second
+    // provider added later) would hand out someone else's session.
+    assert!(db.by_external_subject(AUTH_PROVIDER_LOCAL, "sub-abc").await.unwrap().is_none());
+
+    // An unknown subject under the right provider is a clean miss, not the
+    // first row of the table: this is what makes the exchange route answer
+    // 401 "no operator account is linked to this identity".
+    assert!(db.by_external_subject(AUTH_PROVIDER_HANKO, "nope").await.unwrap().is_none());
+
+    // Migration 0009's uniqueness index must never reach the local rows: any
+    // number of them share a NULL subject. Today two guards hold that up — the
+    // index predicate (`WHERE external_subject IS NOT NULL`) and SQLite's rule
+    // that NULLs compare distinct inside a unique index. Either one alone is
+    // enough, so this insert does NOT isolate the predicate; what it pins is
+    // the behaviour that matters — a second password operator still joins once
+    // Hanko is linked. It turns red the moment a later migration narrows the
+    // column (say NOT NULL with an '' sentinel) and collapses both guards.
+    let second_local = Uuid::new_v4();
+    AccountRepo::insert(db, &account(second_local, "local-2@example.com")).await.unwrap();
+    assert!(AccountRepo::by_id(db, second_local).await.unwrap().is_some());
+    assert_eq!(AccountRepo::list(db).await.unwrap().len(), 3);
+
+    // Those NULL-subject rows stay invisible to the external lookup. An empty
+    // subject is a miss, not a match on them — the sentinel-shaped mistake
+    // above would otherwise resolve an arbitrary local account.
+    assert!(db.by_external_subject(AUTH_PROVIDER_LOCAL, "").await.unwrap().is_none());
+
+    // One operator per external identity. Without this, two accounts can bind
+    // the same Hanko subject and the exchange route resolves whichever the
+    // store yields first — an arbitrary choice between two real operators.
+    let dupe = {
+        let mut a = account(Uuid::new_v4(), "dupe@example.com");
+        a.auth_provider = AUTH_PROVIDER_HANKO.into();
+        a.external_subject = Some("sub-abc".into());
+        a
+    };
+    assert!(
+        AccountRepo::insert(db, &dupe).await.is_err(),
+        "a second account on the same (provider, subject) must be refused"
+    );
+    // The rejected insert leaves the original binding intact.
+    assert_eq!(
+        db.by_external_subject(AUTH_PROVIDER_HANKO, "sub-abc").await.unwrap().unwrap().id,
+        hanko_id
+    );
+
+    // Linking an EXISTING local account is the pre-flip migration step:
+    // without it, switching auth.provider locks out every operator who
+    // already had a row.
+    AccountRepo::link_external_subject(db, local_id, AUTH_PROVIDER_HANKO, "sub-xyz", "!no-password")
+        .await
+        .unwrap();
+    let linked = db.by_external_subject(AUTH_PROVIDER_HANKO, "sub-xyz").await.unwrap().unwrap();
+    assert_eq!(linked.id, local_id);
+    assert_eq!(linked.auth_provider, AUTH_PROVIDER_HANKO);
+    assert_eq!(linked.password_hash, "!no-password", "the old password must not survive linking");
+
+    // And it honours the same one-operator-per-identity rule.
+    assert!(
+        AccountRepo::link_external_subject(
+            db,
+            second_local,
+            AUTH_PROVIDER_HANKO,
+            "sub-xyz",
+            "!no-password"
+        )
+        .await
+        .is_err(),
+        "linking a second account to a taken subject must be refused"
+    );
 }
 
 // ---- Control: e-stop + claims ----
@@ -1014,6 +1109,47 @@ chat_log_pages_backward_from_a_seq_anchor => |db| {
     assert!(db.before_chat(anchor, 0).await.unwrap().is_empty());
 }
 
+}
+
+/// The uniqueness half of migration 0009's index, pinned against SQLite alone
+/// because the two backends genuinely disagree here. The fake keys accounts by
+/// id and enforces no index, so the duplicate insert below returns `Ok(())`,
+/// leaves both rows, and lets `by_external_subject` resolve whichever the map
+/// iteration reaches first. SQLite is the spec (module doc), so this is the
+/// spec's behaviour and the fake is the one that owes a fix — tracked as a
+/// known divergence rather than silently written down to the weaker backend.
+#[tokio::test]
+async fn sqlite_refuses_a_second_account_on_the_same_external_identity() {
+    let (db, _dir) = sqlite().await;
+
+    let mut first = account(Uuid::new_v4(), "first@example.com");
+    first.auth_provider = AUTH_PROVIDER_HANKO.into();
+    first.external_subject = Some("sub-dupe".into());
+    AccountRepo::insert(&db, &first).await.unwrap();
+
+    // One operator per external identity. Without this, a second link of the
+    // same Hanko subject would fan an identity out across two accounts and the
+    // exchange lookup would resolve whichever row the planner reached first.
+    let mut second = account(Uuid::new_v4(), "second@example.com");
+    second.auth_provider = AUTH_PROVIDER_HANKO.into();
+    second.external_subject = Some("sub-dupe".into());
+    let err = AccountRepo::insert(&db, &second).await.unwrap_err();
+    assert!(matches!(err, opsclaw::Error::Database(_)), "expected Database, got {err:?}");
+    assert!(err.to_string().contains("UNIQUE constraint failed"), "{err}");
+
+    // The original binding survives the rejected insert untouched.
+    let found = db.by_external_subject(AUTH_PROVIDER_HANKO, "sub-dupe").await.unwrap().unwrap();
+    assert_eq!(found.id, first.id);
+
+    // The index key is the PAIR: the same subject under a different provider
+    // is a different identity and is accepted.
+    let mut other_provider = account(Uuid::new_v4(), "third@example.com");
+    other_provider.external_subject = Some("sub-dupe".into());
+    AccountRepo::insert(&db, &other_provider).await.unwrap();
+    assert_eq!(
+        db.by_external_subject(AUTH_PROVIDER_LOCAL, "sub-dupe").await.unwrap().unwrap().id,
+        other_provider.id
+    );
 }
 
 /// Not a parity behaviour (no in-memory analog) — pins that `SqliteDb::connect`

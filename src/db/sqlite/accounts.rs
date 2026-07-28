@@ -15,6 +15,8 @@ fn row_to_account(row: &SqliteRow) -> Account {
         password_hash: row.get("password_hash"),
         token_version: row.get("token_version"),
         created_at: row.get::<String, _>("created_at").parse().expect("stored rfc3339"),
+        auth_provider: row.get("auth_provider"),
+        external_subject: row.get("external_subject"),
     }
 }
 
@@ -22,8 +24,9 @@ fn row_to_account(row: &SqliteRow) -> Account {
 impl crate::db::AccountRepo for SqliteDb {
     async fn insert(&self, account: &Account) -> Result<()> {
         sqlx::query(
-            "INSERT INTO accounts (id, email, display_name, password_hash, token_version, created_at)
-             VALUES (?,?,?,?,?,?)",
+            "INSERT INTO accounts (id, email, display_name, password_hash, token_version,
+                                   created_at, auth_provider, external_subject)
+             VALUES (?,?,?,?,?,?,?,?)",
         )
         .bind(account.id.to_string())
         .bind(&account.email)
@@ -31,6 +34,8 @@ impl crate::db::AccountRepo for SqliteDb {
         .bind(&account.password_hash)
         .bind(account.token_version)
         .bind(account.created_at.to_rfc3339())
+        .bind(&account.auth_provider)
+        .bind(&account.external_subject)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -42,6 +47,48 @@ impl crate::db::AccountRepo for SqliteDb {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.as_ref().map(row_to_account))
+    }
+
+    async fn by_external_subject(&self, provider: &str, subject: &str) -> Result<Option<Account>> {
+        let row =
+            sqlx::query("SELECT * FROM accounts WHERE auth_provider = ? AND external_subject = ?")
+                .bind(provider)
+                .bind(subject)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.as_ref().map(row_to_account))
+    }
+
+    async fn link_external_subject(
+        &self,
+        id: Uuid,
+        provider: &str,
+        subject: &str,
+        password_hash: &str,
+    ) -> Result<()> {
+        // The partial unique index on (auth_provider, external_subject) is
+        // what actually enforces one-operator-per-identity; translate its
+        // violation into a Conflict rather than a raw 500.
+        sqlx::query(
+            "UPDATE accounts SET auth_provider = ?, external_subject = ?, password_hash = ?
+             WHERE id = ?",
+        )
+        .bind(provider)
+        .bind(subject)
+        .bind(password_hash)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            if e.as_database_error().is_some_and(|d| d.is_unique_violation()) {
+                crate::Error::Conflict(format!(
+                    "another account is already linked to {provider} subject {subject}"
+                ))
+            } else {
+                e.into()
+            }
+        })?;
+        Ok(())
     }
 
     async fn by_id(&self, id: Uuid) -> Result<Option<Account>> {

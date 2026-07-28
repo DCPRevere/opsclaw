@@ -104,6 +104,8 @@ async fn seed_account(state: &AppState, email: &str, password: &str) -> Uuid {
         password_hash: opsclaw::http::auth::hash_password(password).unwrap(),
         token_version: 0,
         created_at: chrono::Utc::now(),
+        auth_provider: "local".into(),
+        external_subject: None,
     };
     AccountRepo::insert(&*state.repos, &account).await.unwrap();
     id

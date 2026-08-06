@@ -102,7 +102,11 @@ pub(crate) async fn authenticate(state: &AppState, headers: &HeaderMap) -> Resul
     if let Ok(token) = bearer(headers)
         && token.starts_with(super::cli_auth::TOKEN_PREFIX)
     {
-        let (account_id, _token_id) = state
+        // `find_cli_token` returns `(token_id, account_id)` in that order
+        // (see `CliTokenRepo::find_cli_token`) — binding it the other way
+        // round hands every `Authed` route the TOKEN row's uuid as the
+        // operator identity, which `by_id` then fails to resolve.
+        let (_token_id, account_id) = state
             .repos
             .find_cli_token(&super::cli_auth::token_hash(token))
             .await?
@@ -161,11 +165,21 @@ pub(crate) fn check_auth_rate(state: &AppState, headers: &HeaderMap) -> Result<(
 /// POST /api/login — email + password, returning a fresh session cookie. A
 /// uniform error for both unknown-email and wrong-password avoids leaking
 /// which emails are registered operators.
+///
+/// Refused outright when an external provider is configured. The gate is
+/// HERE, on the handler, not merely in the UI: leaving the route live would
+/// mean every account created before the switch kept a working parallel
+/// password, making the provider setting advisory rather than authoritative.
+/// The break-glass for a provider outage is an `ops_` CLI token minted
+/// beforehand, which reaches every `Authed` route including e-stop.
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::Json(req): axum::Json<LoginReq>,
 ) -> Result<Response> {
+    if state.config.auth.provider != crate::config::AuthProvider::Local {
+        return Err(Error::validation("password sign-in is disabled — this daemon uses hanko"));
+    }
     check_auth_rate(&state, &headers)?;
     let invalid = || Error::unauthorized("invalid email or password");
     let account = state.repos.by_email(&req.email).await?.ok_or_else(invalid)?;

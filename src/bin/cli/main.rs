@@ -54,6 +54,19 @@ fn parse_var(s: &str) -> Result<(String, String), String> {
         .ok_or_else(|| format!("expected key=value, got {s:?}"))
 }
 
+/// Parse `onboard --auth-provider`. A `value_parser` (like [`parse_var`])
+/// rather than a string field the wizard interprets later: a typo must be
+/// refused at argv-parse time, because "loclal" silently becoming `local`
+/// would leave a scripted install accepting passwords the operator meant to
+/// turn off.
+fn parse_auth_provider(s: &str) -> Result<opsclaw::config::AuthProvider, String> {
+    match s {
+        "local" => Ok(opsclaw::config::AuthProvider::Local),
+        "hanko" => Ok(opsclaw::config::AuthProvider::Hanko),
+        other => Err(format!("expected \"local\" or \"hanko\", got {other:?}")),
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// First-run wizard: provider key, channels, memory, gateway.
@@ -72,6 +85,17 @@ enum Command {
         telegram_bot_token_env: Option<String>,
         #[arg(long)]
         deadman_url: Option<String>,
+        /// Which identity provider fronts sign-in: `local` (this daemon's
+        /// own password) or `hanko`. Unset leaves the existing config alone.
+        #[arg(long, value_parser = parse_auth_provider)]
+        auth_provider: Option<opsclaw::config::AuthProvider>,
+        /// Hanko API base URL — required with `--auth-provider hanko`.
+        #[arg(long)]
+        hanko_api_url: Option<String>,
+        /// Comma-separated `aud` values a Hanko session token must carry —
+        /// required with `--auth-provider hanko`.
+        #[arg(long, value_delimiter = ',')]
+        hanko_audience: Vec<String>,
     },
     /// Config + dependency health check.
     Doctor {
@@ -218,17 +242,44 @@ enum Command {
 #[derive(Subcommand)]
 enum AccountCommand {
     /// Create an operator account (password via hidden prompt or piped
-    /// stdin — never argv).
+    /// stdin — never argv). Under `auth.provider = "hanko"`, pass
+    /// `--hanko-subject` instead: no password is prompted or stored.
     Create {
         email: String,
         #[arg(long)]
         name: Option<String>,
+        /// The operator's Hanko user id (`claims.subject`, shown in the
+        /// Hanko console). Required under the hanko provider.
+        #[arg(long)]
+        hanko_subject: Option<String>,
     },
     /// List operator accounts.
     List {
         #[arg(long)]
         json: bool,
     },
+    /// Link an existing operator account to a Hanko user id, dropping its
+    /// password. Run this for every operator BEFORE switching
+    /// `auth.provider` to hanko, or the switch locks them all out.
+    Link {
+        email: String,
+        #[arg(long)]
+        hanko_subject: String,
+        /// Also clear the account's password. Off by default: linking runs
+        /// while the daemon is still on `local`, where the hanko route
+        /// refuses everything, so dropping the password here would leave
+        /// the operator unable to sign in by either method until the flip.
+        #[arg(long)]
+        drop_password: bool,
+    },
+    /// Set an operator's password (hidden prompt or piped stdin, never
+    /// argv). The way back off an external provider, and the recovery path
+    /// for an account linked with --drop-password.
+    SetPassword { email: String },
+    /// Revoke every outstanding session for an operator: all web session
+    /// cookies and all `ops_` CLI tokens. Use when offboarding — removing
+    /// someone at the identity provider does not reach this daemon.
+    RevokeSessions { email: String },
 }
 
 #[derive(Subcommand)]
@@ -491,6 +542,9 @@ async fn dispatch(
             hindsight_url,
             telegram_bot_token_env,
             deadman_url,
+            auth_provider,
+            hanko_api_url,
+            hanko_audience,
         } => {
             if yes {
                 let opts = opsclaw::cli::onboard::NonInteractiveOptions {
@@ -499,6 +553,9 @@ async fn dispatch(
                     hindsight_url,
                     telegram_bot_token_env,
                     deadman_url,
+                    auth_provider,
+                    hanko_api_url,
+                    hanko_audience,
                 };
                 let outcome =
                     opsclaw::cli::onboard::run_non_interactive(&opts, cfg_path, home).await?;
@@ -904,13 +961,86 @@ async fn dispatch(
         }
 
         Command::Account { command } => match command {
-            AccountCommand::Create { email, name } => {
+            AccountCommand::Create { email, name, hanko_subject } => {
+                // Resolve the configured provider BEFORE prompting. A
+                // password prompt under an external provider blocks the
+                // operator on a hidden read for a credential the daemon
+                // never checks — and on a non-TTY it silently swallows
+                // whatever is on stdin.
+                let provider = Config::load(Some(cfg_path))?.auth.provider;
                 let db = open_or_create_db(cfg_path, home).await?;
-                let display_name = name.unwrap_or_else(|| email.clone());
-                let password = read_password_confirmed()?;
-                let out = opsclaw::cli::account_cmd::create(&db, &email, &display_name, &password)
+                let display_name = name.clone().unwrap_or_else(|| email.clone());
+                use opsclaw::cli::account_cmd::Credential;
+                use opsclaw::config::AuthProvider;
+                let password;
+                let credential = match (provider, hanko_subject.as_deref()) {
+                    (AuthProvider::Local, None) => {
+                        password = read_password_confirmed()?;
+                        Credential::Password(&password)
+                    }
+                    (AuthProvider::Local, Some(_)) => {
+                        return Err(opsclaw::Error::validation(
+                            "this daemon uses password sign-in — drop --hanko-subject, or set \
+                             auth.provider = \"hanko\" in config.toml",
+                        ));
+                    }
+                    (AuthProvider::Hanko, Some(subject)) => Credential::HankoSubject(subject),
+                    (AuthProvider::Hanko, None) => {
+                        return Err(opsclaw::Error::validation(
+                            "this daemon uses hanko sign-in — pass --hanko-subject <id> (the user \
+                             id from the Hanko console); no password is stored",
+                        ));
+                    }
+                };
+                let out = opsclaw::cli::account_cmd::create(&db, &email, &display_name, credential)
                     .await?;
                 println!("created operator {} ({}) — sign in at the web UI", out.email, out.id);
+            }
+            AccountCommand::Link { email, hanko_subject, drop_password } => {
+                let db = open_or_create_db(cfg_path, home).await?;
+                let out = opsclaw::cli::account_cmd::link_hanko(
+                    &db,
+                    &email,
+                    &hanko_subject,
+                    drop_password,
+                )
+                .await?;
+                println!("linked {} ({}) to hanko subject {hanko_subject}", out.email, out.id);
+                if drop_password {
+                    println!(
+                        "  its password is cleared — until auth.provider is \"hanko\", this \
+                         operator cannot sign in at all"
+                    );
+                } else {
+                    println!("  its password still works until auth.provider is \"hanko\"");
+                }
+            }
+            AccountCommand::SetPassword { email } => {
+                // The warning below turns on the DAEMON's configured
+                // provider, not the account's: an account linked to Hanko on
+                // a daemon still running `local` can absolutely use a
+                // password, and that combination is the normal mid-migration
+                // state. Reading it off the account row would tell the
+                // operator their password does not work when it does.
+                let provider = Config::load(Some(cfg_path))?.auth.provider;
+                let db = open_or_create_db(cfg_path, home).await?;
+                let password = read_password_confirmed()?;
+                let out = opsclaw::cli::account_cmd::set_password(&db, &email, &password).await?;
+                println!("set the password for {} ({})", out.email, out.id);
+                if provider != opsclaw::config::AuthProvider::Local {
+                    println!(
+                        "  note: auth.provider is not \"local\", so password sign-in is refused \
+                         until it is set back"
+                    );
+                }
+            }
+            AccountCommand::RevokeSessions { email } => {
+                let db = open_or_create_db(cfg_path, home).await?;
+                let revoked = opsclaw::cli::account_cmd::revoke_sessions(&db, &email).await?;
+                println!(
+                    "revoked every web session for {email} and {revoked} CLI token(s) — they must \
+                     sign in again"
+                );
             }
             AccountCommand::List { json } => {
                 let db = open_or_create_db(cfg_path, home).await?;
@@ -920,8 +1050,15 @@ async fn dispatch(
                 } else if accounts.is_empty() {
                     println!("(no operator accounts — run `opsclaw-cli account create <email>`)");
                 } else {
+                    // Linkage is shown because it is the one thing an
+                    // auth.provider flip depends on, and it was otherwise
+                    // only inspectable by opening the database by hand.
                     for a in accounts {
-                        println!("{}  {}  {}", a.id, a.email, a.display_name);
+                        let link = match (&a.auth_provider, &a.external_subject) {
+                            (p, Some(s)) => format!("{p}:{s}"),
+                            (p, None) => format!("{p} (not linked)"),
+                        };
+                        println!("{}  {}  {}  {link}", a.id, a.email, a.display_name);
                     }
                 }
             }
@@ -1161,6 +1298,18 @@ mod tests {
         let cases: &[&[&str]] = &[
             &["opsclaw-cli", "onboard", "--yes"],
             &["opsclaw-cli", "onboard"],
+            &["opsclaw-cli", "onboard", "--auth-provider", "local"],
+            &[
+                "opsclaw-cli",
+                "onboard",
+                "--yes",
+                "--auth-provider",
+                "hanko",
+                "--hanko-api-url",
+                "https://tenant.hanko.io",
+                "--hanko-audience",
+                "ops.example.com,ops.internal.example.com",
+            ],
             &["opsclaw-cli", "doctor"],
             &["opsclaw-cli", "doctor", "--json"],
             &["opsclaw-cli", "daemon"],
@@ -1223,6 +1372,26 @@ mod tests {
             &["opsclaw-cli", "ui", "--tunnel", "op@bastion.example.com"],
             &["opsclaw-cli", "account", "create", "ops@example.com"],
             &["opsclaw-cli", "account", "create", "ops@example.com", "--name", "dcp"],
+            &[
+                "opsclaw-cli",
+                "account",
+                "create",
+                "ops@example.com",
+                "--hanko-subject",
+                "6f1c0e64-0000-4000-8000-000000000001",
+            ],
+            &["opsclaw-cli", "account", "revoke-sessions", "ops@example.com"],
+            &["opsclaw-cli", "account", "link", "ops@example.com", "--hanko-subject", "sub-1"],
+            &[
+                "opsclaw-cli",
+                "account",
+                "link",
+                "ops@example.com",
+                "--hanko-subject",
+                "sub-1",
+                "--drop-password",
+            ],
+            &["opsclaw-cli", "account", "set-password", "ops@example.com"],
             &["opsclaw-cli", "account", "list", "--json"],
             &["opsclaw-cli", "secret", "set", "es-password"],
             &["opsclaw-cli", "secret", "set", "es-password", "--from-env", "ES_PASSWORD"],
@@ -1273,6 +1442,24 @@ mod tests {
         assert!(Cli::try_parse_from(["opsclaw-cli", "approve"]).is_err());
         assert!(Cli::try_parse_from(["opsclaw-cli", "approve", "not-a-uuid"]).is_err());
         assert!(Cli::try_parse_from(["opsclaw-cli", "deny", "not-a-uuid"]).is_err());
+    }
+
+    #[test]
+    fn onboard_refuses_an_unknown_auth_provider_at_parse_time() {
+        assert!(
+            Cli::try_parse_from(["opsclaw-cli", "onboard", "--yes", "--auth-provider", "oidc"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn account_revoke_sessions_requires_an_email() {
+        assert!(Cli::try_parse_from(["opsclaw-cli", "account", "revoke-sessions"]).is_err());
+        assert!(Cli::try_parse_from(["opsclaw-cli", "account", "set-password"]).is_err());
+        // --hanko-subject carries the identity; link without it is meaningless.
+        assert!(
+            Cli::try_parse_from(["opsclaw-cli", "account", "link", "ops@example.com"]).is_err()
+        );
     }
 
     #[test]

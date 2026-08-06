@@ -145,8 +145,12 @@
 
 <main>
 
+  <!-- Every auth card starts hidden. auth.js asks GET /api/auth/config
+       which provider is configured and reveals exactly one, so a
+       passkey-only deployment never flashes a password form that would be
+       refused. -->
   <section id="auth-view" class="view active">
-    <div class="card" style="max-width:360px;width:100%">
+    <div class="card" id="login-card" style="max-width:360px;width:100%;display:none">
       <h2 id="auth-title">Sign in</h2>
       <form class="stack" id="login-form">
         <div><label for="login-email">Email</label><input id="login-email" type="email" autocomplete="username" required /></div>
@@ -154,7 +158,13 @@
         <div class="err" id="login-err"></div>
         <button class="primary" type="submit">Sign in</button>
       </form>
-      <p class="muted">Have an invite code? <a href="#" id="show-join">Join with a code</a></p>
+      <p class="muted">Have an invite code? <a href="#" class="show-join">Join with a code</a></p>
+    </div>
+    <div class="card" id="hanko-card" style="max-width:360px;width:100%;display:none">
+      <h2>Sign in with your passkey</h2>
+      <div id="hanko-mount"></div>
+      <div class="err" id="hanko-err"></div>
+      <p class="muted">Have an invite code? <a href="#" class="show-join">Join with a code</a></p>
     </div>
     <div class="card" id="join-card" style="max-width:360px;width:100%;display:none">
       <h2>Join OpsClaw</h2>
@@ -162,7 +172,7 @@
         <div><label for="join-code">Invite code</label><input id="join-code" required /></div>
         <div><label for="join-name">Display name</label><input id="join-name" required /></div>
         <div><label for="join-email">Email</label><input id="join-email" type="email" autocomplete="username" required /></div>
-        <div><label for="join-password">Password</label><input id="join-password" type="password" autocomplete="new-password" minlength="8" required /></div>
+        <div id="join-password-row"><label for="join-password">Password</label><input id="join-password" type="password" autocomplete="new-password" minlength="8" required /></div>
         <div class="err" id="join-err"></div>
         <button class="primary" type="submit">Create account</button>
       </form>

@@ -240,10 +240,15 @@ This is the heartbeat, and gianna's scheduler is almost exactly the brief's
   state, e-stop), and config/target management. Config edits go through
   daemon API handlers that validate and rewrite `config.toml` — the file
   stays the single source of truth and stays hand-editable.
-- Operator accounts are gianna's auth ported: argon2 passwords, HS256 JWT in
-  an HttpOnly SameSite=Strict cookie, `token_version` revocation, invite
-  flow for teammates. Approvals and audit records carry the operator's
-  account identity as principal.
+- Operator accounts are gianna's auth ported, with LOGIN made pluggable
+  (`auth.provider`, §7 decision 16): `local` proves the operator with an
+  argon2 password, `hanko` proves them with a passkey whose session token is
+  verified server-side against the Hanko API. Only the front door changes.
+  Under either provider the daemon mints and verifies its OWN HS256 JWT in an
+  HttpOnly SameSite=Strict cookie with `token_version` revocation, no
+  external token is ever accepted on an ordinary request, and the `accounts`
+  row remains the principal on approvals and in the audit chain. The invite
+  flow for teammates follows the configured provider.
 - SSE auth uses short-lived signed stream tickets (never a long-lived token
   in a query string).
 - The web UI is a **PWA on purpose**: web push is how incident alerts and
@@ -269,7 +274,9 @@ This is the heartbeat, and gianna's scheduler is almost exactly the brief's
   Tailscale on operators' phones as the golden path (trusted `ts.net`
   certs + phone-to-daemon reachability in one move); alternatives: Caddy
   with a public-DNS name via ACME DNS-01 — real certificates with no
-  inbound exposure.
+  inbound exposure. Under `auth.provider = "hanko"` TLS stops being the norm
+  and becomes **mandatory**: WebAuthn runs only in a secure context, so a
+  passkey cannot be used over plain http off localhost.
 - Webhook ingestion (Alertmanager, PagerDuty) → same orchestrator path as
   chat; HMAC/token verification with constant-time compare.
 
@@ -545,8 +552,9 @@ separate mock layer to drift.
    (KurrentDB), `prometheus`, `argocd`; other provider tools (postgres,
    cloudflare, github, loki, ...) remain trait stubs. Rationale:
    `docs/REMUNDO.md`.
-8. **Web-UI auth: gianna-style accounts** (argon2 + JWT + invites); the
-   operator roster lives in the DB and is the principal for approvals/audit.
+8. **Web-UI auth: gianna-style accounts** (argon2 + JWT + invites) — now the
+   `local` provider (decision 16); the operator roster lives in the DB and is
+   the principal for approvals/audit under every provider.
 9. **Web-UI scope day-one: all four surfaces** — chat, incidents +
    approvals, status dashboard, config/target management (config.toml stays
    canonical).
@@ -571,3 +579,11 @@ separate mock layer to drift.
     web UI.
 15. **Repo posture: proprietary for now** — no LICENSE file until a
     deliberate decision before anything is published.
+16. **Auth provider is a config choice** — `auth.provider = "local"` (argon2
+    passwords, decision 8) or `"hanko"` (passkeys, each sign-in verified
+    server-side against the Hanko API). It changes the front door only: the
+    daemon mints and verifies its own HS256 cookie either way, `Authed` and
+    the `ops_` CLI bearer are untouched, and an identity Hanko authenticates
+    but no `accounts` row claims is refused — no auto-provisioning. Choosing
+    hanko makes TLS mandatory rather than merely normal, because WebAuthn
+    needs a secure context.

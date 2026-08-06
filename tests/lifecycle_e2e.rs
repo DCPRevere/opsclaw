@@ -94,6 +94,8 @@ async fn daemon_boots_serves_drains_on_the_shutdown_token_and_persists_across_re
         password_hash: opsclaw::http::auth::hash_password("some-password-123").unwrap(),
         token_version: 0,
         created_at: chrono::Utc::now(),
+        auth_provider: "local".into(),
+        external_subject: None,
     };
     AccountRepo::insert(&*state.repos, &account).await.unwrap();
 

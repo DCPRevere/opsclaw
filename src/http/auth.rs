@@ -20,8 +20,31 @@ pub fn hash_password(password: &str) -> Result<String> {
         .map_err(|e| Error::other(format!("hash: {e}")))
 }
 
+/// The `password_hash` written for an account that authenticates through an
+/// external provider (`auth.provider = "hanko"`). Deliberately NOT a valid
+/// PHC string, so it can never be reached by an argon2 verify: the column is
+/// `NOT NULL` in migration 0001 and SQLite cannot relax that in place, so a
+/// passwordless account needs a sentinel rather than a null.
+pub const NO_PASSWORD: &str = "!no-password";
+
+/// Verify a password against a stored hash.
+///
+/// An unusable stored hash is `Ok(false)`, never `Err`. `Error::other` maps
+/// to a 500 (`http::mod`), and a 500 where every other account yields a 401
+/// turns `POST /api/login` into an account-existence oracle — it would leak
+/// exactly which emails belong to externally-authenticated operators,
+/// defeating the uniform "invalid email or password" response.
 pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
-    let parsed = PasswordHash::new(hash).map_err(|e| Error::other(format!("hash parse: {e}")))?;
+    if hash == NO_PASSWORD {
+        return Ok(false);
+    }
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        // Never log the hash or the password — only that the row is
+        // unusable, so an operator can find it without the journal
+        // becoming a credential store.
+        tracing::warn!("stored password hash is not a valid PHC string — refusing sign-in");
+        return Ok(false);
+    };
     Ok(Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
 }
 
@@ -179,6 +202,21 @@ mod tests {
         let h = hash_password("correct horse").unwrap();
         assert!(verify_password("correct horse", &h).unwrap());
         assert!(!verify_password("wrong", &h).unwrap());
+    }
+
+    #[test]
+    fn no_password_sentinel_never_verifies() {
+        assert!(!verify_password("", NO_PASSWORD).unwrap());
+        assert!(!verify_password(NO_PASSWORD, NO_PASSWORD).unwrap());
+        assert!(!verify_password("correct horse", NO_PASSWORD).unwrap());
+    }
+
+    #[test]
+    fn garbage_hash_is_rejected_not_an_error() {
+        // Ok(false), never Err: an Err here is a 500 among 401s, which is
+        // an account-existence oracle.
+        assert!(!verify_password("anything", "not-a-phc-string").unwrap());
+        assert!(!verify_password("anything", "").unwrap());
     }
 
     #[test]

@@ -96,6 +96,8 @@ async fn seed_account(state: &AppState, email: &str, password: &str) -> Uuid {
         password_hash: opsclaw::http::auth::hash_password(password).unwrap(),
         token_version: 0,
         created_at: chrono::Utc::now(),
+        auth_provider: "local".into(),
+        external_subject: None,
     };
     AccountRepo::insert(&*state.repos, &account).await.unwrap();
     id
@@ -390,6 +392,496 @@ async fn cli_bearer_token_reaches_authed_gated_routes() {
         .await
         .unwrap();
     assert_eq!(after_revoke.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// A bearer-authenticated request must carry the OPERATOR's identity, not
+/// the token row's. `CliTokenRepo::find_cli_token` returns
+/// `(token_id, account_id)`; `handlers::authenticate` bound that tuple the
+/// other way round, so every `Authed` route outside `/cli/v1/*` saw the
+/// TOKEN's uuid as the account. `/api/me` is the cheapest place to see it:
+/// it looks the id up and reports the row, so the bug showed as a 401
+/// ("unknown account") rather than as a wrong-but-plausible answer.
+///
+/// Asserting the status alone would NOT catch a future re-swap that happens
+/// to resolve — the account id in the body is the actual claim.
+#[tokio::test]
+async fn cli_bearer_token_reaches_api_me_as_the_right_account() {
+    let state = AppState::fake();
+    let account_id = seed_account(&state, "clime@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let web = SessionClient::new();
+    web.post_json(
+        &format!("{base}/api/login"),
+        &serde_json::json!({ "email": "clime@example.com", "password": "some-password-123" }),
+    )
+    .await;
+
+    let verifier = "c".repeat(43);
+    let challenge = opsclaw::http::cli_auth::challenge_for(&verifier);
+    let authorize: serde_json::Value = web
+        .post_json(
+            &format!("{base}/api/cli/authorize"),
+            &serde_json::json!({ "challenge": challenge }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    let code = authorize["code"].as_str().unwrap().to_string();
+    let exchange: serde_json::Value = reqwest::Client::new()
+        .post(format!("{base}/cli/v1/auth/token"))
+        .json(&serde_json::json!({ "code": code, "verifier": verifier }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = exchange["token"].as_str().unwrap();
+
+    // Bearer only, no cookie — and `/api/me` is an `Authed` route OUTSIDE
+    // the `/cli/v1/*` family, so it goes through `handlers::authenticate`.
+    let me = reqwest::Client::new()
+        .get(format!("{base}/api/me"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = me.json().await.unwrap();
+    assert_eq!(
+        body["account_id"],
+        account_id.to_string(),
+        "the bearer must resolve to the operator's account, never the token row's id: {body}"
+    );
+    assert_eq!(body["email"], "clime@example.com");
+}
+
+// ---- auth provider: local vs hanko (DESIGN §7 decision 16) ----
+//
+// The whole claim of the design is that the provider chooses the FRONT DOOR
+// only: past the `opsclaw_session` cookie the two are indistinguishable, and
+// every downstream gate (`Authed`, the `ops_` bearer, `token_version`) is
+// untouched. These tests drive that through the real router, with a
+// wiremock standing in for the Hanko API — same idiom as `http::hanko`'s own
+// unit tests, one level up.
+
+/// The `aud` a Hanko token must carry to be accepted by these test apps.
+const HANKO_AUDIENCE: &str = "ops.example.com";
+
+/// A hanko-provider config pointed at `api_url`.
+///
+/// `http.jwt_secret` is set because `Config::validate()` now demands a real
+/// one whenever the provider is not local — a fakes-mode daemon whose only
+/// configured integration is Hanko still signs REAL operator sessions. A
+/// `store:` ref satisfies validate() without touching process env (it is
+/// resolved at connect time), and `AppState::fake_with_config` falls back to
+/// the dev secret internally, which is self-consistent within one app.
+///
+/// `validate()` is asserted here, not just assumed: these tests are only
+/// worth anything if the config under test is one the daemon would boot.
+/// Note it permits the wiremock's `http://` URL solely because a test config
+/// is `fully_faked()`.
+fn hanko_config(api_url: &str) -> Config {
+    let mut cfg = Config::default();
+    cfg.auth.provider = opsclaw::config::AuthProvider::Hanko;
+    cfg.auth.api_url = Some(api_url.to_string());
+    cfg.auth.audience = vec![HANKO_AUDIENCE.into()];
+    cfg.http.jwt_secret = Some(opsclaw::config::SecretRef::store("opsclaw-e2e-jwt"));
+    cfg.validate().expect("the hanko test config must be one the daemon would boot with");
+    cfg
+}
+
+/// A stand-in for the Hanko API that validates exactly one subject.
+///
+/// The body is shaped like Hanko backend 3.0.4's `ValidateSessionResponse`:
+/// `claims.subject`/`claims.audience`, NOT the JWT's `sub`/`aud`. Held by
+/// the caller for the life of the test — dropping the server unbinds it.
+async fn hanko_server(subject: &str) -> wiremock::MockServer {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/sessions/validate"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "is_valid": true,
+            "claims": {
+                "subject": subject,
+                "expiration": "2026-07-28T21:00:00Z",
+                "session_id": "6f1c0e64-0000-4000-8000-00000000ffff",
+                "audience": [HANKO_AUDIENCE],
+                "amr": ["passkey"],
+                "email": { "address": "passkey@example.com", "is_primary": true, "is_verified": true }
+            }
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// Seed an operator linked to a Hanko identity — the row
+/// `opsclaw-cli account create --hanko-subject` writes. No password: the
+/// column is NOT NULL, so the `NO_PASSWORD` sentinel stands in for one.
+async fn seed_hanko_account(state: &AppState, email: &str, subject: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    let account = Account {
+        id,
+        email: email.into(),
+        display_name: "Passkey Operator".into(),
+        password_hash: opsclaw::http::auth::NO_PASSWORD.into(),
+        token_version: 0,
+        created_at: chrono::Utc::now(),
+        auth_provider: "hanko".into(),
+        external_subject: Some(subject.into()),
+    };
+    AccountRepo::insert(&*state.repos, &account).await.unwrap();
+    id
+}
+
+/// Mint an open invite directly through the repo — the same bypass
+/// `seed_account` uses, for the cases where minting it over HTTP would need
+/// a signed-in session the test isn't about.
+async fn seed_invite(state: &AppState, issued_by: Uuid) -> String {
+    use opsclaw::db::Invite;
+    let code = format!("e2e{}", Uuid::new_v4().simple());
+    let now = chrono::Utc::now();
+    let invite = Invite {
+        code: code.clone(),
+        issued_by,
+        created_at: now,
+        expires_at: now + chrono::Duration::days(1),
+    };
+    state.repos.create_invite(&invite).await.unwrap();
+    code
+}
+
+/// The login screen cannot render at all until it knows which provider is
+/// in front of it, so this route is public by construction — asserted with
+/// no cookie anywhere.
+#[tokio::test]
+async fn auth_config_is_public_and_reports_the_provider() {
+    let base = spawn_server(AppState::fake()).await;
+    let resp = reqwest::get(format!("{base}/api/auth/config")).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["provider"], "local");
+    assert!(body.get("api_url").is_none(), "a local daemon names no identity provider: {body}");
+
+    // Under hanko the browser also learns WHERE to authenticate. The
+    // trailing slash is deliberate: `api_base()` trims it, so the widget
+    // never builds a `//sessions/...` URL.
+    let base =
+        spawn_server(AppState::fake_with_config(hanko_config("https://tenant.hanko.io/"))).await;
+    let resp = reqwest::get(format!("{base}/api/auth/config")).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["provider"], "hanko");
+    assert_eq!(body["api_url"], "https://tenant.hanko.io");
+}
+
+/// The provider setting is authoritative, not advisory: an account created
+/// before the switch keeps its argon2 hash, and leaving `/api/login` live
+/// would leave that password working as a parallel front door. The refusal
+/// names hanko on purpose — the downstream symptom of a mis-set provider is
+/// a wall of 401s, which needs a legible cause.
+#[tokio::test]
+async fn password_login_is_refused_under_the_hanko_provider() {
+    let state = AppState::fake_with_config(hanko_config("https://tenant.hanko.io"));
+    // A REAL, correct password: the refusal must be about the provider, not
+    // about the credential.
+    seed_account(&state, "legacy@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/login"))
+        .json(
+            &serde_json::json!({ "email": "legacy@example.com", "password": "some-password-123" }),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("hanko"),
+        "the refusal must name the provider so the cause is legible: {body}"
+    );
+}
+
+/// The core claim of the design: after the exchange, a hanko sign-in holds
+/// exactly the cookie a password sign-in holds, and the ordinary `Authed`
+/// routes serve it without knowing anything about Hanko.
+#[tokio::test]
+async fn hanko_exchange_mints_the_standard_session_cookie() {
+    let subject = "6f1c0e64-0000-4000-8000-000000000001";
+    let hanko = hanko_server(subject).await;
+    let state = AppState::fake_with_config(hanko_config(&hanko.uri()));
+    assert!(state.hanko.is_some(), "the hanko provider must wire a client");
+    let account_id = seed_hanko_account(&state, "passkey@example.com", subject).await;
+    let base = spawn_server(state).await;
+
+    let client = SessionClient::new();
+    let exchanged = client
+        .post_json(
+            &format!("{base}/api/auth/hanko/exchange"),
+            &serde_json::json!({ "session_token": "a-hanko-session-token" }),
+        )
+        .await;
+    assert_eq!(exchanged.status(), reqwest::StatusCode::OK);
+
+    // The SAME cookie the password path sets — HttpOnly (an XSS cannot read
+    // it) and SameSite=Strict (no cross-site ride-along).
+    let set_cookie = exchanged
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .expect("the exchange must set a session cookie")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(set_cookie.starts_with("opsclaw_session="), "{set_cookie}");
+    assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
+    assert!(set_cookie.contains("SameSite=Strict"), "{set_cookie}");
+    let body: serde_json::Value = exchanged.json().await.unwrap();
+    assert_eq!(body["account_id"], account_id.to_string());
+
+    // …and from here on nothing is hanko-aware: an ordinary `Authed` route
+    // resolves the operator from that cookie alone.
+    let me = client.get(&format!("{base}/api/me")).await;
+    assert_eq!(me.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = me.json().await.unwrap();
+    assert_eq!(body["account_id"], account_id.to_string());
+    assert_eq!(body["email"], "passkey@example.com");
+}
+
+/// No auto-provisioning. A Hanko project can be open to self-registration
+/// and this daemon holds cluster credentials, so an identity Hanko
+/// authenticates but no `accounts` row claims gets a 401 — and, critically,
+/// no new row.
+#[tokio::test]
+async fn hanko_exchange_with_an_unlinked_subject_is_401() {
+    let hanko = hanko_server("6f1c0e64-0000-4000-8000-00000000dead").await;
+    let state = AppState::fake_with_config(hanko_config(&hanko.uri()));
+    // One EXISTING operator, linked to a different subject: the count below
+    // is then a real "nothing was created", not "the table stayed empty".
+    seed_hanko_account(&state, "incumbent@example.com", "6f1c0e64-0000-4000-8000-000000000001")
+        .await;
+    let before = AccountRepo::list(&*state.repos).await.unwrap().len();
+    let base = spawn_server(state.clone()).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/auth/hanko/exchange"))
+        .json(&serde_json::json!({ "session_token": "a-hanko-session-token" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(
+        resp.headers().get(reqwest::header::SET_COOKIE).is_none(),
+        "a refused exchange must not set a session cookie"
+    );
+
+    let after = AccountRepo::list(&*state.repos).await.unwrap();
+    assert_eq!(after.len(), before, "a verified-but-unlinked identity must not self-provision");
+}
+
+/// The remote-CLI hand-off is untouched by the provider change: the web leg
+/// is authorized by whatever cookie the front door minted, and the CLI leg
+/// never sees the provider at all.
+#[tokio::test]
+async fn the_cli_pkce_flow_works_under_the_hanko_provider() {
+    let subject = "6f1c0e64-0000-4000-8000-000000000042";
+    let hanko = hanko_server(subject).await;
+    let state = AppState::fake_with_config(hanko_config(&hanko.uri()));
+    seed_hanko_account(&state, "hankocli@example.com", subject).await;
+    let base = spawn_server(state).await;
+
+    // Sign in through hanko instead of /api/login…
+    let web = SessionClient::new();
+    let exchanged = web
+        .post_json(
+            &format!("{base}/api/auth/hanko/exchange"),
+            &serde_json::json!({ "session_token": "a-hanko-session-token" }),
+        )
+        .await;
+    assert_eq!(exchanged.status(), reqwest::StatusCode::OK);
+
+    // …and the PKCE round trip runs exactly as it does under local.
+    let verifier = "d".repeat(43);
+    let challenge = opsclaw::http::cli_auth::challenge_for(&verifier);
+    let authorize = web
+        .post_json(
+            &format!("{base}/api/cli/authorize"),
+            &serde_json::json!({ "challenge": challenge, "name": "hanko-host" }),
+        )
+        .await;
+    assert_eq!(authorize.status(), reqwest::StatusCode::OK);
+    let authorize: serde_json::Value = authorize.json().await.unwrap();
+    let code = authorize["code"].as_str().unwrap().to_string();
+
+    // No cookie: a fresh CLI process, which has never talked to Hanko.
+    let exchange: serde_json::Value = reqwest::Client::new()
+        .post(format!("{base}/cli/v1/auth/token"))
+        .json(&serde_json::json!({ "code": code, "verifier": verifier }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = exchange["token"].as_str().expect("a minted CLI token");
+    assert!(token.starts_with("ops_"));
+    assert_eq!(exchange["email"], "hankocli@example.com");
+
+    let me: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base}/cli/v1/me"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me["email"], "hankocli@example.com");
+}
+
+/// `take_invite` is a one-time consume, so anything that can fail AFTER it
+/// burns the code and leaves the teammate locked out with nothing to retry.
+/// The hanko path added several late failure modes (provider timeout,
+/// audience mismatch, an already-linked subject), which is what moved every
+/// identity check ahead of the consume. A too-short password is the
+/// cheapest way to prove the ordering under the local provider.
+#[tokio::test]
+async fn a_failed_join_does_not_consume_the_invite() {
+    let state = AppState::fake();
+    seed_account(&state, "invite-order@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let inviter = login(&base, "invite-order@example.com").await;
+    let invite: serde_json::Value =
+        inviter.post(&format!("{base}/api/invites")).await.json().await.unwrap();
+    let code = invite["code"].as_str().unwrap().to_string();
+
+    let failed = reqwest::Client::new()
+        .post(format!("{base}/api/join"))
+        .json(&serde_json::json!({
+            "code": code,
+            "email": "newbie@example.com",
+            "password": "short",
+            "display_name": "Newbie",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // The SAME code, second attempt, valid this time: it must still work.
+    let retry = SessionClient::new();
+    let joined = retry
+        .post_json(
+            &format!("{base}/api/join"),
+            &serde_json::json!({
+                "code": code,
+                "email": "newbie@example.com",
+                "password": "a-long-enough-password",
+                "display_name": "Newbie",
+            }),
+        )
+        .await;
+    assert_eq!(joined.status(), reqwest::StatusCode::OK, "a failed join must not burn the code");
+    assert_eq!(
+        retry.get(&format!("{base}/api/status")).await.status(),
+        reqwest::StatusCode::OK,
+        "the retried join signs the teammate in"
+    );
+}
+
+/// A password sent to a hanko daemon is refused with a message that says
+/// what to do instead — never quietly accepted and stored, which would
+/// create an account with a working password the provider setting claims is
+/// impossible.
+#[tokio::test]
+async fn join_with_a_password_is_refused_under_hanko() {
+    let hanko = hanko_server("6f1c0e64-0000-4000-8000-000000000007").await;
+    let state = AppState::fake_with_config(hanko_config(&hanko.uri()));
+    let inviter = seed_hanko_account(
+        &state,
+        "hankoinviter@example.com",
+        "6f1c0e64-0000-4000-8000-00000000000a",
+    )
+    .await;
+    let code = seed_invite(&state, inviter).await;
+    let base = spawn_server(state.clone()).await;
+    let before = AccountRepo::list(&*state.repos).await.unwrap().len();
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/join"))
+        .json(&serde_json::json!({
+            "code": code,
+            "email": "pwjoin@example.com",
+            "password": "a-long-enough-password",
+            "display_name": "Password Joiner",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap_or("").contains("hanko"), "{body}");
+    assert_eq!(AccountRepo::list(&*state.repos).await.unwrap().len(), before);
+}
+
+/// The mirror image: a local daemon refuses a session token, and refuses a
+/// join carrying no credential at all.
+#[tokio::test]
+async fn join_without_a_password_is_refused_under_local() {
+    let state = AppState::fake();
+    seed_account(&state, "localinviter@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let inviter = login(&base, "localinviter@example.com").await;
+    let invite: serde_json::Value =
+        inviter.post(&format!("{base}/api/invites")).await.json().await.unwrap();
+    let code = invite["code"].as_str().unwrap().to_string();
+
+    let with_token = reqwest::Client::new()
+        .post(format!("{base}/api/join"))
+        .json(&serde_json::json!({
+            "code": code,
+            "email": "tokenjoin@example.com",
+            "display_name": "Token Joiner",
+            "session_token": "a-hanko-session-token",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(with_token.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = with_token.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap_or("").contains("password"), "{body}");
+
+    // Neither credential: refused too (the field is Option only so the
+    // hanko path can deserialize, never so a join can skip the password).
+    let with_nothing = reqwest::Client::new()
+        .post(format!("{base}/api/join"))
+        .json(&serde_json::json!({
+            "code": code,
+            "email": "nothingjoin@example.com",
+            "display_name": "Nothing Joiner",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(with_nothing.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Both refusals ran before the consume, so the code is still open.
+    let survivor = SessionClient::new();
+    let joined = survivor
+        .post_json(
+            &format!("{base}/api/join"),
+            &serde_json::json!({
+                "code": code,
+                "email": "properjoin@example.com",
+                "password": "a-long-enough-password",
+                "display_name": "Proper Joiner",
+            }),
+        )
+        .await;
+    assert_eq!(joined.status(), reqwest::StatusCode::OK);
 }
 
 // ---- e-stop ----

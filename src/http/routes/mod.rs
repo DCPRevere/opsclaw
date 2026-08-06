@@ -8,6 +8,7 @@
 
 pub mod approvals;
 pub mod audit;
+pub mod auth_provider;
 pub mod chat;
 pub mod cli;
 pub mod config_ui;
@@ -60,6 +61,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me", get(handlers::me))
         .route("/api/stream", get(sse::stream))
         .route("/api/stream-ticket", get(sse::stream_ticket))
+        .merge(auth_provider::router())
         .merge(chat::router())
         .merge(incidents::router())
         .merge(approvals::router())
@@ -108,15 +110,15 @@ pub fn router(state: AppState) -> Router {
         // benefits from CSP/frame-deny/nosniff the same way any web app does.
         .layer(security_header(
             axum::http::header::CONTENT_SECURITY_POLICY,
-            CONTENT_SECURITY_POLICY,
+            csp_header_value(&state.config),
         ))
-        .layer(security_header(
+        .layer(static_security_header(
             axum::http::header::STRICT_TRANSPORT_SECURITY,
             "max-age=31536000; includeSubDomains",
         ))
-        .layer(security_header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
-        .layer(security_header(axum::http::header::X_FRAME_OPTIONS, "DENY"))
-        .layer(security_header(
+        .layer(static_security_header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
+        .layer(static_security_header(axum::http::header::X_FRAME_OPTIONS, "DENY"))
+        .layer(static_security_header(
             axum::http::header::REFERRER_POLICY,
             "strict-origin-when-cross-origin",
         ))
@@ -166,20 +168,88 @@ fn cors_layer() -> CorsLayer {
 /// shell depends on both (the service worker and the installable
 /// manifest) and a browser that doesn't fall back silently would
 /// otherwise break install with no visible error.
+/// Under `auth.provider = "hanko"` ONE directive changes: `connect-src`
+/// gains the Hanko API's origin, because the login widget talks to it
+/// directly from the browser. `script-src` never widens — the widget is
+/// vendored and served from this daemon (`static/vendor/`), so it is
+/// same-origin like every other module. There is no `frame-src` exception
+/// either; nothing is framed.
+/// The directives, as data. Built from a list rather than a string with a
+/// `replace` on it: a substitution keyed on the literal `"connect-src
+/// 'self'"` silently no-ops if that substring is ever reworded or reordered,
+/// and the failure is invisible — the header stays a valid CSP, nothing
+/// errors, and login breaks in the browser with a console violation nobody
+/// sees until an operator reports it.
+/// The policy exactly as it shipped before `[auth]` existed. Kept as a
+/// frozen literal for two jobs: it is the golden value
+/// `csp_is_unchanged_under_the_local_provider` asserts the built policy
+/// still equals (a golden, not a tautology — the built value comes from
+/// [`CSP_DIRECTIVES`]), and it is the `'static` fallback if a policy ever
+/// fails to become a header value.
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 script-src 'self'; style-src 'self' 'unsafe-inline'; \
 img-src 'self' data:; connect-src 'self'; \
 worker-src 'self'; manifest-src 'self'; \
 object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
 
+const CSP_DIRECTIVES: &[(&str, &str)] = &[
+    ("default-src", "'self'"),
+    ("script-src", "'self'"),
+    ("style-src", "'self' 'unsafe-inline'"),
+    ("img-src", "'self' data:"),
+    ("connect-src", "'self'"),
+    ("worker-src", "'self'"),
+    ("manifest-src", "'self'"),
+    ("object-src", "'none'"),
+    ("base-uri", "'self'"),
+    ("form-action", "'self'"),
+    ("frame-ancestors", "'none'"),
+];
+
+/// The policy for a given config. Byte-identical under the local provider to
+/// what shipped before this setting existed — a deployment not using an
+/// external identity provider sees no change at all.
+///
+/// Only the ORIGIN of `auth.api_url` is added, never the full URL: a CSP
+/// source expression matches on origin, and a path there is at best ignored.
+pub(crate) fn content_security_policy(config: &crate::config::Config) -> String {
+    let extra_connect = match (config.auth.provider, config.auth.api_origin()) {
+        (crate::config::AuthProvider::Hanko, Some(origin)) => Some(origin),
+        _ => None,
+    };
+    CSP_DIRECTIVES
+        .iter()
+        .map(|(name, sources)| match (*name, extra_connect.as_deref()) {
+            ("connect-src", Some(origin)) => format!("{name} {sources} {origin}"),
+            _ => format!("{name} {sources}"),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn csp_header_value(config: &crate::config::Config) -> axum::http::HeaderValue {
+    let policy = content_security_policy(config);
+    axum::http::HeaderValue::from_str(&policy).unwrap_or_else(|_| {
+        // Unreachable in practice: `validate()` has already refused an
+        // api_url that is not a plain https URL. Falling back to the
+        // stricter static policy beats serving no CSP at all.
+        tracing::error!("auth.api_url is not header-safe — serving the base CSP");
+        axum::http::HeaderValue::from_static(CONTENT_SECURITY_POLICY)
+    })
+}
+
 fn security_header(
+    name: axum::http::HeaderName,
+    value: axum::http::HeaderValue,
+) -> tower_http::set_header::SetResponseHeaderLayer<axum::http::HeaderValue> {
+    tower_http::set_header::SetResponseHeaderLayer::overriding(name, value)
+}
+
+fn static_security_header(
     name: axum::http::HeaderName,
     value: &'static str,
 ) -> tower_http::set_header::SetResponseHeaderLayer<axum::http::HeaderValue> {
-    tower_http::set_header::SetResponseHeaderLayer::overriding(
-        name,
-        axum::http::HeaderValue::from_static(value),
-    )
+    security_header(name, axum::http::HeaderValue::from_static(value))
 }
 
 /// Per-request outcome log. Runs INSIDE the TraceLayer span (layer order:
@@ -242,6 +312,37 @@ async fn ensure_request_id(
 
 #[cfg(test)]
 mod tests {
+    use super::{CONTENT_SECURITY_POLICY, content_security_policy};
+    use crate::config::Config;
+
+    /// House style for config-under-test (see `config::tests::parse`): build
+    /// from TOML so the test states the operator-visible setting, not the
+    /// struct shape.
+    fn parse(s: &str) -> Config {
+        toml::from_str(s).unwrap()
+    }
+
+    /// One directive out of a policy string, without its trailing `;`.
+    /// Panics if the directive is absent — an assertion that names a
+    /// directive the policy does not carry is itself the failure.
+    fn directive<'a>(policy: &'a str, name: &str) -> &'a str {
+        policy
+            .split("; ")
+            .find(|d| d.split_whitespace().next() == Some(name))
+            .unwrap_or_else(|| panic!("no `{name}` directive in: {policy}"))
+    }
+
+    /// The five security headers `router` sets on every response. Kept as
+    /// one list so the regression guard below and any future header change
+    /// disagree loudly rather than silently.
+    const SECURITY_HEADERS: [&str; 5] = [
+        "content-security-policy",
+        "strict-transport-security",
+        "x-content-type-options",
+        "x-frame-options",
+        "referrer-policy",
+    ];
+
     #[test]
     fn trace_id_honours_request_header_else_mints() {
         let mut h = axum::http::HeaderMap::new();
@@ -254,5 +355,116 @@ mod tests {
         let mut empty = axum::http::HeaderMap::new();
         empty.insert("x-request-id", "".parse().unwrap());
         assert!(uuid::Uuid::parse_str(&super::trace_id_for(&empty)).is_ok());
+    }
+
+    /// The promise made when the CSP stopped being a constant: a deployment
+    /// with no external identity provider gets byte-identical headers to the
+    /// ones it got before `[auth]` existed. Exact equality, not `contains` —
+    /// a stray space or a reordered directive is a behaviour change to a
+    /// browser and must fail here.
+    #[test]
+    fn csp_is_unchanged_under_the_local_provider() {
+        assert_eq!(content_security_policy(&Config::default()), CONTENT_SECURITY_POLICY);
+    }
+
+    #[test]
+    fn csp_names_the_hanko_origin_in_connect_src_only() {
+        let cfg = parse(
+            r#"
+            [auth]
+            provider = "hanko"
+            api_url = "https://tenant.hanko.io"
+            audience = ["ops.example.com"]
+            "#,
+        );
+        let policy = content_security_policy(&cfg);
+        const ORIGIN: &str = "https://tenant.hanko.io";
+
+        // The browser talks to the Hanko API directly from the login widget,
+        // so exactly one directive has to allow it.
+        assert_eq!(directive(&policy, "connect-src"), format!("connect-src 'self' {ORIGIN}"));
+
+        // `script-src` never widens: the widget is vendored and served from
+        // this daemon, so it stays same-origin like every other module.
+        assert!(policy.contains("script-src 'self';"), "{policy}");
+        assert_eq!(directive(&policy, "script-src"), "script-src 'self'");
+
+        // No other directive picked the origin up.
+        assert_eq!(
+            policy.matches(ORIGIN).count(),
+            1,
+            "the origin must appear in connect-src and nowhere else: {policy}"
+        );
+
+        assert!(policy.contains("default-src 'self';"), "{policy}");
+        assert_eq!(directive(&policy, "default-src"), "default-src 'self'");
+    }
+
+    #[test]
+    fn csp_adds_the_origin_not_the_path() {
+        // A CSP source expression matches on origin; a path there is at best
+        // ignored and at worst reads as a different host token.
+        let with_path = parse(
+            r#"
+            [auth]
+            provider = "hanko"
+            api_url = "https://tenant.hanko.io/some/path"
+            audience = ["ops.example.com"]
+            "#,
+        );
+        let policy = content_security_policy(&with_path);
+        assert_eq!(directive(&policy, "connect-src"), "connect-src 'self' https://tenant.hanko.io");
+        assert!(!policy.contains("/some/path"), "{policy}");
+
+        // A non-default port is part of the origin and must survive — a
+        // self-hosted Hanko on :8000 is otherwise blocked by its own CSP.
+        let with_port = parse(
+            r#"
+            [auth]
+            provider = "hanko"
+            api_url = "https://hanko.internal:8000/base/path"
+            audience = ["ops.example.com"]
+            "#,
+        );
+        let policy = content_security_policy(&with_port);
+        assert_eq!(
+            directive(&policy, "connect-src"),
+            "connect-src 'self' https://hanko.internal:8000"
+        );
+        assert!(!policy.contains("/base/path"), "{policy}");
+    }
+
+    /// Regression guard for the refactor that made the CSP header dynamic:
+    /// it rewrote all five `SetResponseHeaderLayer` call sites, and a
+    /// dropped layer is invisible until a browser complains. Real server on
+    /// an ephemeral port + a real request, the same rig `tests/e2e_flow.rs`
+    /// uses (`tower::ServiceExt::oneshot` is not available — `tower` is not
+    /// a declared dependency of this crate).
+    #[tokio::test]
+    async fn every_security_header_is_present_on_a_response() {
+        let app = super::router(super::AppState::fake());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let resp =
+            reqwest::Client::new().get(format!("http://{addr}/ready")).send().await.expect("GET");
+        assert_eq!(resp.status().as_u16(), 200);
+
+        for name in SECURITY_HEADERS {
+            assert!(
+                resp.headers().contains_key(name),
+                "missing {name} on the response: {:?}",
+                resp.headers()
+            );
+        }
+        // A fake state is the local provider, so the served policy is the
+        // constant — the layer carries the real value, not an empty header.
+        assert_eq!(
+            resp.headers().get("content-security-policy").unwrap().to_str().unwrap(),
+            CONTENT_SECURITY_POLICY
+        );
     }
 }

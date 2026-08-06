@@ -51,6 +51,13 @@ pub struct AppState {
     /// webhook_secret` is unset (fakes mode only; `resolve_webhook_secret`
     /// mirrors `Config::validate`'s refusal to boot unset+live).
     pub webhook_secret: Option<Arc<str>>,
+    /// The Hanko session verifier — `Some` exactly when
+    /// `config.auth.provider` is `hanko`, so `is_some()` is the runtime
+    /// answer to "is an external provider configured". No secret is
+    /// involved: Hanko's `/sessions/validate` is unauthenticated, which is
+    /// why (unlike `jwt_secret`) nothing here needs a `SecretStore` and
+    /// nothing needs scrubbing from logs.
+    pub hanko: Option<Arc<crate::http::hanko::HankoClient>>,
     pub repos: Arc<dyn AllRepos>,
     /// The safety-invariant seam (AGENTS.md): the ONLY way any handler may
     /// reach a `TargetExecutor` is through one of these two traits — never
@@ -137,12 +144,14 @@ impl AppState {
             Some(r) => Some(Arc::<str>::from(r.resolve(secret_store)?)),
             None => None,
         };
+        let hanko = build_hanko(&config)?;
         let web = Arc::new(WebHub::new());
         Ok(AppState {
             config: Arc::new(config),
             config_path,
             jwt_secret,
             webhook_secret,
+            hanko,
             repos,
             policy,
             approved,
@@ -205,6 +214,11 @@ impl AppState {
         ));
         let estop = Arc::new(EStop::new(sentinel, db.clone()));
         let jwt_secret: Arc<str> = resolve_jwt_secret_without_store(&config).into();
+        // Infallible here for the same reason it is safe in `new`: building
+        // the client is pure construction with no network I/O. A malformed
+        // hanko config in a FAKE state degrades to "no provider wired"
+        // rather than panicking a test rig.
+        let hanko = build_hanko(&config).unwrap_or(None);
         let web = Arc::new(WebHub::new());
         let repos: Arc<dyn AllRepos> = db;
         // A per-instance, GUARANTEED-non-existent path under the system
@@ -220,6 +234,7 @@ impl AppState {
             config_path,
             jwt_secret,
             webhook_secret: None,
+            hanko,
             repos,
             policy: policy.clone(),
             approved: policy,
@@ -244,6 +259,18 @@ impl AppState {
     /// call sites don't hand-construct the variant inconsistently.
     pub fn operator_principal(account_id: Uuid) -> crate::domain::Principal {
         crate::domain::Principal::Operator { account: account_id }
+    }
+}
+
+/// Build the Hanko verifier when — and only when — the config selects that
+/// provider. Kept out of both constructors' struct literals so the two can
+/// never drift apart on which provider they honour.
+fn build_hanko(config: &Config) -> crate::Result<Option<Arc<crate::http::hanko::HankoClient>>> {
+    match config.auth.provider {
+        crate::config::AuthProvider::Local => Ok(None),
+        crate::config::AuthProvider::Hanko => {
+            Ok(Some(Arc::new(crate::http::hanko::HankoClient::new(&config.auth)?)))
+        }
     }
 }
 

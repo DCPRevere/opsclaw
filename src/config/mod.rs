@@ -65,6 +65,7 @@ pub fn persist_config_text(path: &Path, body: &str) -> Result<()> {
 pub struct Config {
     pub daemon: DaemonCfg,
     pub http: HttpCfg,
+    pub auth: AuthCfg,
     pub llm: LlmCfg,
     pub memory: MemoryCfg,
     pub telegram: TelegramCfg,
@@ -223,6 +224,94 @@ impl Default for HttpCfg {
     fn default() -> Self {
         HttpCfg { jwt_secret: None, webhook_secret: None, cookies_secure: true }
     }
+}
+
+/// Which identity provider proves an operator is who they say they are at
+/// LOGIN time (DESIGN §7 decision 16). This chooses the front door only:
+/// whichever provider is configured, the daemon still mints and verifies its
+/// OWN HS256 session cookie ([`HttpCfg::jwt_secret`]), and the `accounts` row
+/// is still the principal recorded on approvals and in the audit log. Every
+/// gate downstream of login — `Authed`, the `ops_` CLI bearer, SSE stream
+/// tickets, `token_version` revocation — is identical under both providers.
+///
+/// Absent (the default) is [`AuthProvider::Local`], so an existing config
+/// file with no `[auth]` section keeps exactly the behaviour it has today.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AuthCfg {
+    /// The provider. An unknown value is a PARSE error, never a silent
+    /// fallback — falling back would quietly downgrade a deployment that
+    /// meant to require passkeys to one that accepts passwords.
+    pub provider: AuthProvider,
+    /// Base URL of the Hanko API — `https://<tenant>.hanko.io` for Hanko
+    /// Cloud, or the self-hosted backend's PUBLIC port (8000; never the
+    /// admin port 8001). No trailing slash is required; one is trimmed.
+    /// Required when `provider = "hanko"`, refused otherwise.
+    pub api_url: Option<String>,
+    /// The `aud` values a Hanko session token must carry to be accepted
+    /// here. Hanko defaults `session.audience` to its
+    /// `webauthn.relying_party.id`, so this cannot be inferred and must be
+    /// stated: without it, a token minted by ANY Hanko project the daemon
+    /// can reach would be accepted. Required when `provider = "hanko"`.
+    pub audience: Vec<String>,
+}
+
+impl Default for AuthCfg {
+    fn default() -> Self {
+        AuthCfg { provider: AuthProvider::Local, api_url: None, audience: Vec::new() }
+    }
+}
+
+/// The identity providers opsclaw can put in front of login. Spelled in
+/// `snake_case` in TOML, following [`TargetKindName`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthProvider {
+    /// Argon2 password + the daemon's own HS256 session cookie — the
+    /// gianna-ported scheme, and what every deployment predating `[auth]`
+    /// is running.
+    #[default]
+    Local,
+    /// Hanko (hanko.io): the browser authenticates against the Hanko API
+    /// (passkeys, email OTP, …) and the daemon verifies the resulting
+    /// session token server-side before minting its own cookie.
+    Hanko,
+}
+
+impl AuthCfg {
+    /// The Hanko API base URL with any trailing slash removed, so callers
+    /// can join paths without producing `//sessions/validate`.
+    pub fn api_base(&self) -> Option<&str> {
+        self.api_url.as_deref().map(|u| u.trim_end_matches('/'))
+    }
+
+    /// The ORIGIN (scheme + host + optional port) of `api_url`, which is
+    /// what a `connect-src` CSP directive names — never the full URL, since
+    /// CSP source expressions match on origin and a path there is at best
+    /// ignored and at worst rejected.
+    ///
+    /// Built from a PARSED url, not string surgery. This value is
+    /// interpolated into a response header, so anything that is not a host
+    /// and port must be incapable of reaching it: a `;` in the configured
+    /// URL would otherwise close the `connect-src` directive and append an
+    /// attacker-chosen one to every response.
+    pub fn api_origin(&self) -> Option<String> {
+        let url = url::Url::parse(self.api_base()?).ok()?;
+        let host = url.host_str()?;
+        let scheme = url.scheme();
+        Some(match url.port() {
+            Some(p) => format!("{scheme}://{host}:{p}"),
+            None => format!("{scheme}://{host}"),
+        })
+    }
+}
+
+/// Whether an `auth.api_url` host is loopback — the one case where plain
+/// `http://` is allowed. It is also the only origin a browser treats as a
+/// secure context without TLS, so it is exactly the set where WebAuthn can
+/// work over http anyway.
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// The insecure placeholder JWT secret used only when fully faked (no real
@@ -961,6 +1050,23 @@ impl Config {
             && self.telegram.bot_token.is_none()
     }
 
+    /// Whether `http.jwt_secret` must be real (set, not the placeholder, long
+    /// enough) rather than allowed to fall back to [`DEV_JWT_SECRET`].
+    ///
+    /// This is deliberately BROADER than `!fully_faked()`. `fully_faked`
+    /// looks only at the LLM/memory/Telegram credentials, so a deployment
+    /// whose only configured integration is Hanko counts as fully faked —
+    /// and would then sign real, passkey-authenticated operator sessions
+    /// with a constant published in this source file. Configuring a real
+    /// identity provider is by itself proof that the sessions are real.
+    ///
+    /// `fully_faked` itself is left alone on purpose: it also gates the
+    /// memory/LLM rules and the `fakes_mode` status bit, which a non-local
+    /// auth provider says nothing about.
+    fn requires_real_jwt_secret(&self) -> bool {
+        !self.fully_faked() || self.auth.provider != AuthProvider::Local
+    }
+
     /// Resolve `http.jwt_secret`, falling back to [`DEV_JWT_SECRET`] when
     /// unset. Callers in live mode must not reach an unset secret at all —
     /// `validate()` refuses to boot before this is ever called — so the
@@ -973,7 +1079,7 @@ impl Config {
             Some(r) => r.resolve(store)?,
             None => DEV_JWT_SECRET.to_string(),
         };
-        if !self.fully_faked() {
+        if self.requires_real_jwt_secret() {
             if secret == DEV_JWT_SECRET {
                 return Err(Error::Config(
                     "http.jwt_secret resolved to the insecure default — set a strong secret \
@@ -1125,7 +1231,7 @@ impl Config {
         // backed secret happen at connect time (validate() has no
         // SecretStore to resolve one); an Env-backed secret is checkable
         // here since env vars need no store.
-        if !self.fully_faked() {
+        if self.requires_real_jwt_secret() {
             match &self.http.jwt_secret {
                 None => errs.push(
                     "live mode requires http.jwt_secret — an unset secret would fall back to \
@@ -1146,6 +1252,79 @@ impl Config {
                         .push(format!("http.jwt_secret references env:{name}, which is not set")),
                 },
                 Some(SecretRef::Store(_)) => {} // resolved + checked at connect time
+            }
+        }
+        // Auth provider coherence. Every failure here is one that would
+        // otherwise surface as "nobody can sign in", discovered at 3am by
+        // the operator who needed the daemon most.
+        match self.auth.provider {
+            AuthProvider::Local => {
+                // A half-written [auth] block reads as active. Refuse it
+                // rather than let an operator believe passkeys are on.
+                if self.auth.api_url.is_some() || !self.auth.audience.is_empty() {
+                    errs.push(
+                        "auth.api_url/auth.audience are set but auth.provider is \"local\" — set \
+                         provider = \"hanko\" to use them, or remove them"
+                            .into(),
+                    );
+                }
+            }
+            AuthProvider::Hanko => {
+                match self.auth.api_base() {
+                    None => errs.push(
+                        "auth.provider = \"hanko\" requires auth.api_url — the daemon verifies \
+                         every sign-in against it (Hanko Cloud: https://<tenant>.hanko.io; \
+                         self-hosted: the PUBLIC port, not the admin port)"
+                            .into(),
+                    ),
+                    Some(u) => match url::Url::parse(u) {
+                        // Anything that is not a plain scheme://host[:port]
+                        // URL is refused here, because `api_origin` feeds
+                        // this value into the CSP response header — a `;`,
+                        // a query, a fragment or userinfo must never get
+                        // that far.
+                        Err(e) => errs.push(format!("auth.api_url is not a valid URL ({e}): {u}")),
+                        Ok(parsed) => {
+                            let host = parsed.host_str().unwrap_or_default().to_string();
+                            if host.is_empty() {
+                                errs.push(format!("auth.api_url has no host: {u}"));
+                            }
+                            if !parsed.username().is_empty()
+                                || parsed.password().is_some()
+                                || parsed.query().is_some()
+                                || parsed.fragment().is_some()
+                            {
+                                errs.push(format!(
+                                    "auth.api_url must be a plain scheme://host[:port][/path] URL \
+                                     with no credentials, query or fragment: {u}"
+                                ));
+                            }
+                            // Passkeys are a secure-context feature: a
+                            // browser will not run WebAuthn over plain http
+                            // anywhere but loopback, so a http:// api_url
+                            // cannot work off a dev box. Keyed on the HOST,
+                            // not on fakes mode — configuring a real
+                            // identity provider is itself proof that the
+                            // sessions are real, the same reasoning as
+                            // `requires_real_jwt_secret`.
+                            if parsed.scheme() != "https" && !is_loopback_host(&host) {
+                                errs.push(format!(
+                                    "auth.api_url must be https:// (got {u}) — WebAuthn requires \
+                                     a secure context; plain http is allowed only on localhost"
+                                ));
+                            }
+                        }
+                    },
+                }
+                if self.auth.audience.is_empty() {
+                    errs.push(
+                        "auth.provider = \"hanko\" requires auth.audience — Hanko defaults its \
+                         session audience to webauthn.relying_party.id, so it cannot be inferred, \
+                         and an unchecked audience would accept a token from any Hanko project \
+                         this daemon can reach"
+                            .into(),
+                    );
+                }
             }
         }
         // Policy-bounds lists: an empty-string entry would match EVERY
@@ -1318,6 +1497,188 @@ mod tests {
             "#,
         );
         assert!(cfg.validate().unwrap_err().to_string().contains("VAPID"));
+    }
+
+    #[test]
+    fn auth_provider_defaults_to_local_and_absent_stays_absent() {
+        let cfg = Config::default();
+        assert_eq!(cfg.auth.provider, AuthProvider::Local);
+        assert!(cfg.auth.api_url.is_none());
+        cfg.validate().unwrap();
+        // A config with no [auth] section must not grow one on round-trip —
+        // an existing file stays byte-comparable in the part that matters.
+        let rendered = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&rendered).unwrap();
+        assert_eq!(back.auth.provider, AuthProvider::Local);
+    }
+
+    #[test]
+    fn unknown_auth_provider_fails_at_parse() {
+        let r: std::result::Result<Config, _> = toml::from_str(
+            r#"
+            [auth]
+            provider = "okta"
+            "#,
+        );
+        assert!(r.is_err(), "an unknown provider must not silently fall back to local");
+    }
+
+    #[test]
+    fn hanko_provider_requires_api_url_and_audience() {
+        let cfg = parse(
+            r#"
+            [auth]
+            provider = "hanko"
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("auth.api_url"), "{err}");
+        assert!(err.contains("auth.audience"), "{err}");
+    }
+
+    #[test]
+    fn hanko_provider_requires_a_real_jwt_secret_even_when_otherwise_faked() {
+        // The fail-open this guards: fully_faked() looks only at LLM/memory/
+        // Telegram, so without requires_real_jwt_secret() this config would
+        // sign real passkey-authenticated sessions with DEV_JWT_SECRET.
+        let cfg = parse(
+            r#"
+            [auth]
+            provider = "hanko"
+            api_url = "https://tenant.hanko.io"
+            audience = ["ops.example.com"]
+            "#,
+        );
+        assert!(cfg.fully_faked(), "nothing here is an LLM/memory/telegram credential");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("http.jwt_secret"), "{err}");
+    }
+
+    #[test]
+    fn stray_auth_fields_under_the_local_provider_are_refused() {
+        let cfg = parse(
+            r#"
+            [auth]
+            api_url = "https://tenant.hanko.io"
+            "#,
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("auth.provider"), "{err}");
+    }
+
+    #[test]
+    fn auth_section_round_trips() {
+        let cfg = parse(
+            r#"
+            [auth]
+            provider = "hanko"
+            api_url = "https://tenant.hanko.io/"
+            audience = ["ops.example.com"]
+            "#,
+        );
+        assert_eq!(cfg.auth.provider, AuthProvider::Hanko);
+        // Trailing slash trimmed for path joining; origin carries no path.
+        assert_eq!(cfg.auth.api_base(), Some("https://tenant.hanko.io"));
+        assert_eq!(cfg.auth.api_origin().as_deref(), Some("https://tenant.hanko.io"));
+        let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.auth.provider, AuthProvider::Hanko);
+        assert_eq!(back.auth.audience, vec!["ops.example.com".to_string()]);
+    }
+
+    #[test]
+    fn a_semicolon_in_api_url_cannot_inject_a_csp_directive() {
+        // api_origin feeds the Content-Security-Policy header. A `;` would
+        // close connect-src and append a directive of the attacker's
+        // choosing to every response, so validate() must refuse the config
+        // outright and api_origin must never emit anything but host:port.
+        let cfg = parse(
+            r#"
+            [http]
+            jwt_secret = "store:jwt"
+            [auth]
+            provider = "hanko"
+            api_url = "https://evil.example.com/;script-src 'unsafe-inline'"
+            audience = ["ops"]
+            "#,
+        );
+        assert_eq!(cfg.auth.api_origin().as_deref(), Some("https://evil.example.com"));
+        let rendered = crate::http::routes::content_security_policy(&cfg);
+        // script-src must still be exactly 'self'. (style-src legitimately
+        // carries 'unsafe-inline' and always has, so the check has to be
+        // directive-scoped rather than a bare substring search.)
+        assert!(rendered.contains("script-src 'self';"), "{rendered}");
+        assert!(!rendered.contains("script-src 'self' 'unsafe-inline'"), "{rendered}");
+        assert!(
+            !rendered.contains("evil.example.com/"),
+            "no path may reach the header: {rendered}"
+        );
+        // A path in api_url is legitimate (a reverse-proxied Hanko), so
+        // validate() accepts this URL. The defence is that `api_origin`
+        // rebuilds from the PARSED scheme/host/port, so nothing after the
+        // authority can reach the header no matter what the path contains.
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn plain_http_is_refused_off_loopback_even_when_otherwise_faked() {
+        // The regression guard: keying this on fully_faked() let a real
+        // hanko deployment verify every sign-in over cleartext.
+        let cfg = parse(
+            r#"
+            [http]
+            jwt_secret = "store:jwt"
+            [auth]
+            provider = "hanko"
+            api_url = "http://tenant.hanko.io"
+            audience = ["ops"]
+            "#,
+        );
+        assert!(cfg.fully_faked());
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("must be https"), "{err}");
+
+        // Loopback stays usable for development and for the test suites
+        // that point at a local mock.
+        for host in ["http://localhost:8000", "http://127.0.0.1:8000"] {
+            let mut ok = cfg.clone();
+            ok.auth.api_url = Some(host.into());
+            ok.validate().unwrap_or_else(|e| panic!("{host} must validate: {e}"));
+        }
+    }
+
+    #[test]
+    fn api_url_with_credentials_or_a_query_is_refused() {
+        for bad in [
+            "https://user:pw@tenant.hanko.io",
+            "https://tenant.hanko.io?x=1",
+            "https://tenant.hanko.io#frag",
+            "not-a-url",
+        ] {
+            let cfg = parse(&format!(
+                r#"
+                [http]
+                jwt_secret = "store:jwt"
+                [auth]
+                provider = "hanko"
+                api_url = "{bad}"
+                audience = ["ops"]
+                "#
+            ));
+            assert!(cfg.validate().is_err(), "{bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn api_origin_strips_path_and_port_survives() {
+        let cfg = parse(
+            r#"
+            [auth]
+            provider = "hanko"
+            api_url = "https://hanko.internal:8000/base/path"
+            audience = ["ops"]
+            "#,
+        );
+        assert_eq!(cfg.auth.api_origin().as_deref(), Some("https://hanko.internal:8000"));
     }
 
     #[test]

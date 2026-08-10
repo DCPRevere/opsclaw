@@ -24,6 +24,14 @@ RUN rm -rf src
 
 # Now the real source.
 COPY . .
+
+# The commit this image was built from. Declared AFTER the dependency-cache
+# layers above so a new SHA never invalidates them. build.rs reads this
+# because .dockerignore excludes .git — without it every image reports its
+# build id as "nogit" (see build.rs). Empty for a local `docker build`, which
+# is honest: that image did not come from a known commit.
+ARG OPSCLAW_GIT_SHA=""
+ENV OPSCLAW_GIT_SHA=${OPSCLAW_GIT_SHA}
 # Host file mtimes can be older than the dummy build above, which would let
 # Cargo skip the "real" rebuild and ship the dummy stub instead (gianna hit
 # exactly this with include_dir!-embedded trees — see gianna.chat/Dockerfile).

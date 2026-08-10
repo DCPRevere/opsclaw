@@ -26,10 +26,31 @@ fn git(args: &[&str]) -> Option<String> {
 fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
-    let hash = git(&["rev-parse", "--short=10", "HEAD"]).unwrap_or_else(|| "nogit".into());
-    // `status --porcelain` output is non-empty iff the working tree differs
-    // from HEAD — a dirty build must not impersonate the commit's identity.
-    let dirty = git(&["status", "--porcelain"]).map(|s| !s.is_empty()).unwrap_or(false);
-    let id = if dirty { format!("{hash}-dirty") } else { hash };
+    // Docker builds have no repository to ask: .dockerignore excludes .git
+    // (deliberately — it keeps the context small), so `git rev-parse` fails
+    // inside the builder and EVERY published image would stamp itself
+    // "nogit", making the one identity that matters in production the one
+    // place it is absent. The release workflow passes the commit in as a
+    // build-arg instead (.github/workflows/release.yml).
+    println!("cargo:rerun-if-env-changed=OPSCLAW_GIT_SHA");
+    let from_env = std::env::var("OPSCLAW_GIT_SHA")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let id = match from_env {
+        // Truncate to match `--short=10` below: one build id format, whether
+        // it came from the local repo or from CI. Never "-dirty" — a build-arg
+        // SHA names a pushed commit by construction.
+        Some(sha) => sha.chars().take(10).collect(),
+        None => {
+            let hash = git(&["rev-parse", "--short=10", "HEAD"]).unwrap_or_else(|| "nogit".into());
+            // `status --porcelain` output is non-empty iff the working tree
+            // differs from HEAD — a dirty build must not impersonate the
+            // commit's identity.
+            let dirty = git(&["status", "--porcelain"]).map(|s| !s.is_empty()).unwrap_or(false);
+            if dirty { format!("{hash}-dirty") } else { hash }
+        }
+    };
     println!("cargo:rustc-env=OPSCLAW_BUILD_ID={id}");
 }

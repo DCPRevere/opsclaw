@@ -6,6 +6,15 @@
 #   cp deploy/.env.example deploy/.env   # fill in secrets/model config
 #   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
 #
+# No checkout needed — both files are self-contained:
+#   curl -O https://raw.githubusercontent.com/DCPRevere/opsclaw/master/deploy/docker-compose.yml
+#   curl -o .env https://raw.githubusercontent.com/DCPRevere/opsclaw/master/deploy/.env.example
+#   $EDITOR .env && docker compose --env-file .env up -d
+#
+# Then set the daemon up (it writes config.toml onto the opsclaw_home volume):
+#   docker compose exec opsclaw-daemon opsclaw-cli onboard
+#   docker compose exec opsclaw-daemon opsclaw-cli doctor
+#
 # A bare-binary install (`cargo install` / a prebuilt release) is also
 # supported but must point HINDSIGHT_URL at an existing Hindsight instance —
 # this compose file is what stands one up for you.
@@ -42,9 +51,17 @@ services:
 
   opsclaw-daemon:
     container_name: opsclaw-daemon
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
+    # Published by .github/workflows/release.yml on every `vX.Y.Z` tag. Pin
+    # OPSCLAW_VERSION to an immutable version tag in production (`latest`
+    # moves under you on the next release, which is a deploy you did not
+    # choose — DESIGN.md §5: "No auto-update; versioned releases, immutable
+    # tags").
+    #
+    # There is deliberately no `build:` here: this file must work for someone
+    # who downloaded IT ALONE and never cloned the repo. To build your own
+    # instead, from a repo checkout:
+    #   docker build -f deploy/Dockerfile -t ghcr.io/dcprevere/opsclaw:latest .
+    image: ghcr.io/dcprevere/opsclaw:${OPSCLAW_VERSION:-latest}
     restart: unless-stopped
     logging: *bounded-logs
     depends_on:

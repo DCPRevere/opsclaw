@@ -1,9 +1,8 @@
 name: CI
 
-# Test + clippy on every push and PR. No release workflow yet — this is the
-# only workflow in the repo for now (gianna's release.yml calls its CI via
-# workflow_call before building/publishing an image; add that here once
-# OpsClaw has something to release).
+# Test + clippy on every push and PR. release.yml calls this same suite via
+# workflow_call before it publishes an image, so nothing reaches GHCR that
+# master would have rejected. Keep the `workflow_call` trigger below.
 on:
   push:
     branches: [master]

@@ -35,10 +35,14 @@ ENV OPSCLAW_GIT_SHA=${OPSCLAW_GIT_SHA}
 # Host file mtimes can be older than the dummy build above, which would let
 # Cargo skip the "real" rebuild and ship the dummy stub instead (gianna hit
 # exactly this with include_dir!-embedded trees — see gianna.chat/Dockerfile).
-# opsclaw has no include_dir!/include_str! embed yet (the web UI isn't built
-# out — DESIGN.md §2 http/), but touching src/migrations unconditionally
-# costs nothing and avoids re-discovering the same bug the day one lands.
-RUN find src migrations -type f -exec touch {} +
+#
+# "the day one lands" (what this comment used to say was still hypothetical)
+# has arrived: src/http/pages.rs now include_str!s the whole web shell —
+# every static/app/*.js module, static/sw.js, the manifest, the icons, and
+# the vendored static/vendor/hanko-elements.js. Those bytes are compiled INTO
+# the binary, so a skipped rebuild does not fail loudly; it ships an image
+# whose UI is silently a build behind. static/ MUST be in this list.
+RUN find src migrations static -type f -exec touch {} +
 RUN cargo build --release --bin opsclaw --bin opsclaw-cli
 
 # Stage 2: a slim runtime image. MUST track the builder's Debian release

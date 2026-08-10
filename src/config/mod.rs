@@ -1016,10 +1016,35 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Whether an env var counts as CONFIGURED, given its raw value.
+    ///
+    /// Set-but-empty means "not configured". `deploy/.env.example` ships
+    /// every optional credential as a bare `NAME=`, and the compose file
+    /// forwards them unconditionally (`${OPENROUTER_API_KEY:-}`), so the
+    /// container always receives the name with an empty value. Under a plain
+    /// `is_some()` that read as a configured LLM: the daemon left fakes mode,
+    /// demanded `llm.models` and a real `http.jwt_secret`, and crash-looped —
+    /// for a user who had followed the example file exactly and whose header
+    /// promises "anything left blank runs faked/disabled".
+    ///
+    /// The value-carrying overlays below (`OPSCLAW_MODELS`, `HINDSIGHT_URL`,
+    /// `OPSCLAW_LISTEN`) already had this rule inline; the two SecretRef ones
+    /// did not, because they never look at the value. Non-UTF-8 still counts
+    /// as set — a key this daemon cannot decode is a real key, badly stored,
+    /// not an absent one.
+    fn value_is_configured(value: Option<&std::ffi::OsStr>) -> bool {
+        value.is_some_and(|v| !v.to_string_lossy().trim().is_empty())
+    }
+
+    /// [`Self::value_is_configured`] against the live environment.
+    fn env_configured(name: &str) -> bool {
+        Self::value_is_configured(std::env::var_os(name).as_deref())
+    }
+
     /// Env vars override/fill file config. Only *references* are recorded —
     /// the values stay in the environment until connect-time resolution.
     fn apply_env_overlay(&mut self) {
-        if std::env::var_os("OPENROUTER_API_KEY").is_some() && self.llm.api_key.is_none() {
+        if Self::env_configured("OPENROUTER_API_KEY") && self.llm.api_key.is_none() {
             self.llm.api_key = Some(SecretRef::env("OPENROUTER_API_KEY"));
         }
         if let Ok(models) = std::env::var("OPSCLAW_MODELS")
@@ -1032,7 +1057,7 @@ impl Config {
         {
             self.memory.hindsight_url = Some(url);
         }
-        if std::env::var_os("TELEGRAM_BOT_TOKEN").is_some() && self.telegram.bot_token.is_none() {
+        if Self::env_configured("TELEGRAM_BOT_TOKEN") && self.telegram.bot_token.is_none() {
             self.telegram.bot_token = Some(SecretRef::env("TELEGRAM_BOT_TOKEN"));
         }
         if let Ok(listen) = std::env::var("OPSCLAW_LISTEN")
@@ -1452,6 +1477,45 @@ mod tests {
         );
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("hindsight_url"), "{err}");
+    }
+
+    #[test]
+    fn a_blank_env_credential_is_not_a_configured_one() {
+        // The exact shape deploy/.env.example ships and compose forwards:
+        // the variable is present, its value is empty. Under the old
+        // `var_os().is_some()` this counted as a configured LLM, which left
+        // fakes mode and crash-looped the standard docker install.
+        //
+        // Tested through the pure value check rather than by setting real
+        // env vars: these names are process-global, and a test that mutates
+        // them corrupts every other test running in parallel (the ambient
+        // OPENROUTER_API_KEY on a developer's shell already fails six).
+        use std::ffi::OsStr;
+        assert!(!Config::value_is_configured(None), "absent");
+        assert!(!Config::value_is_configured(Some(OsStr::new(""))), "NAME=");
+        assert!(!Config::value_is_configured(Some(OsStr::new("   "))), "whitespace only");
+        assert!(!Config::value_is_configured(Some(OsStr::new("\n"))), "a stray newline");
+
+        assert!(Config::value_is_configured(Some(OsStr::new("sk-or-v1-abc"))), "a real key");
+        // Leading/trailing space must not disqualify a genuine value.
+        assert!(Config::value_is_configured(Some(OsStr::new(" sk-or-v1-abc "))), "padded key");
+    }
+
+    #[test]
+    fn a_blank_env_credential_leaves_the_daemon_fully_faked() {
+        // The consequence that actually mattered: blank credentials must
+        // keep fully_faked() true, because that is what gates live mode —
+        // and live mode is what demands models and a real jwt_secret.
+        let mut cfg = Config::default();
+        assert!(cfg.fully_faked(), "a default config is fully faked");
+
+        // Simulate the overlay's decision for a blank var: it must not
+        // record a SecretRef at all.
+        if Config::value_is_configured(Some(std::ffi::OsStr::new(""))) {
+            cfg.llm.api_key = Some(SecretRef::env("OPENROUTER_API_KEY"));
+        }
+        assert!(cfg.fully_faked(), "blank OPENROUTER_API_KEY must not leave fakes mode");
+        assert!(cfg.validate().is_ok(), "and must still boot: {:?}", cfg.validate());
     }
 
     #[test]

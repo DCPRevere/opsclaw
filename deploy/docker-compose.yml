@@ -9,11 +9,31 @@
 # No checkout needed — both files are self-contained:
 #   curl -O https://raw.githubusercontent.com/DCPRevere/opsclaw/master/deploy/docker-compose.yml
 #   curl -o .env https://raw.githubusercontent.com/DCPRevere/opsclaw/master/deploy/.env.example
-#   $EDITOR .env && docker compose --env-file .env up -d
+#   $EDITOR .env
 #
-# Then set the daemon up (it writes config.toml onto the opsclaw_home volume):
-#   docker compose exec opsclaw-daemon opsclaw-cli onboard
+# ONBOARD FIRST, THEN START. This order is not a preference:
+#
+#   docker compose --env-file .env run --rm --no-deps opsclaw-daemon \
+#       opsclaw-cli onboard --hindsight-url http://opsclaw-hindsight:8888
+#   docker compose --env-file .env up -d
 #   docker compose exec opsclaw-daemon opsclaw-cli doctor
+#
+# Hindsight takes ~40s to load its models. `doctor` run before that reports
+# `[FAIL] hindsight: ... reachable` — wait and re-run rather than debugging
+# it. The daemon itself starts and stays healthy throughout; it does not
+# require memory to be up at boot.
+#
+# This compose file always sets HINDSIGHT_URL, so the daemon is always in
+# live mode, and live mode refuses to start without http.jwt_secret (an unset
+# one falls back to a constant published in the source, letting anyone forge
+# an operator session). `onboard` is what generates that secret. On a fresh
+# volume there is no config.toml, so `up` crash-loops — and you cannot
+# `exec` into a restarting container to fix it. `run` sidesteps that: it
+# starts a one-off container with a different command, writes config.toml
+# onto the same opsclaw_home volume, and exits.
+#
+# Drop --no-deps if you want Hindsight up while you onboard; onboard itself
+# does not contact it.
 #
 # A bare-binary install (`cargo install` / a prebuilt release) is also
 # supported but must point HINDSIGHT_URL at an existing Hindsight instance —
@@ -43,7 +63,12 @@ services:
       HINDSIGHT_API_LLM_PROVIDER: ${HINDSIGHT_LLM_PROVIDER:?set HINDSIGHT_LLM_PROVIDER in .env (e.g. openai)}
       HINDSIGHT_API_LLM_MODEL: ${HINDSIGHT_LLM_MODEL:?set HINDSIGHT_LLM_MODEL in .env}
       HINDSIGHT_API_LLM_BASE_URL: ${HINDSIGHT_LLM_BASE_URL:?set HINDSIGHT_LLM_BASE_URL in .env}
-      HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_LLM_API_KEY:-}
+      # `:?` like its three neighbours, because Hindsight treats it the same
+      # way: MemoryEngine.__init__ raises "LLM API key is required" and the
+      # container crash-loops. Left optional, the only symptom was an opsclaw
+      # `doctor` FAIL on an unreachable Hindsight — the real cause buried in a
+      # DIFFERENT container's logs. Fail here instead, before anything starts.
+      HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_LLM_API_KEY:?set HINDSIGHT_LLM_API_KEY in .env — Hindsight refuses to start without one}
     volumes:
       - opsclaw_hindsight:/home/hindsight/.pg0
     # Not exposed to the host network; only opsclaw-daemon talks to it, over

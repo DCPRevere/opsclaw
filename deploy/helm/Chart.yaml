@@ -9,12 +9,12 @@ description: >-
   The recommended placement is still adjacent (a bastion/ops host) — this
   chart exists for teams that want in-cluster anyway.
 type: application
-version: 0.1.0
+version: 0.1.1
 # MUST be a real published image tag: _helpers.tpl falls back to appVersion
 # when values.image.tag is empty, so a default `helm install` pulls exactly
 # this string. release.yml publishes `vX.Y.Z` (the git tag, verbatim), hence
 # the `v` — and its guard job fails the release if this drifts from the tag.
-appVersion: "v0.1.0"
+appVersion: "v0.1.1"
 home: https://opsclaw.io
 sources:
   - https://github.com/dcprevere/opsclaw

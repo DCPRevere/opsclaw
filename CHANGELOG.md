@@ -4,7 +4,56 @@ Operator-facing changes. Anything that needs manual work at upgrade time
 carries a **Deploying** note (AGENTS.md); read those before rolling a
 release out.
 
-## Unreleased
+## v0.1.1
+
+### The standard docker install actually starts
+
+`v0.1.0` published a working image that no one could start from the
+documented instructions. Two independent faults, both found by installing it
+the way a stranger would — no checkout, anonymous pull.
+
+**A blank credential counted as a configured one.** `deploy/.env.example`
+shipped every optional secret as a bare `NAME=`, and compose forwards them
+unconditionally, so the container always received `OPENROUTER_API_KEY` with
+an empty value. `apply_env_overlay` tested only `var_os().is_some()`, so that
+read as a configured LLM: the daemon left fakes mode, demanded `llm.models`
+and a real `http.jwt_secret`, and crash-looped — for a user who had followed
+the example file exactly, under a header promising that blank means disabled.
+Empty and whitespace-only values are now "not configured", matching the rule
+`OPSCLAW_MODELS`, `HINDSIGHT_URL` and `OPSCLAW_LISTEN` already applied inline.
+`TELEGRAM_BOT_TOKEN` had the same fault and the same fix. Non-UTF-8 still
+counts as set: a key this daemon cannot decode is a real key, badly stored.
+
+**The documented setup order could not be followed.** The compose file said
+to `up -d` and then `exec ... onboard`. But the file always sets
+`HINDSIGHT_URL`, so the daemon is always live, and live mode refuses to boot
+without `http.jwt_secret` — which `onboard` is what generates. On a fresh
+volume the daemon therefore crash-loops, and Docker will not `exec` into a
+restarting container. Rewritten to onboard FIRST via `docker compose run
+--rm`, which starts a one-off container with a different command and writes
+`config.toml` onto the same volume.
+
+**The bundled Hindsight's API key was marked optional, and is not.**
+`HINDSIGHT_LLM_API_KEY` used `:-` while its three neighbours used `:?`, but
+Hindsight raises `LLM API key is required` and crash-loops without one. The
+only symptom was an opsclaw `doctor` FAIL on an unreachable memory backend,
+with the real cause in a different container's logs. It is now `:?`, so
+compose refuses to start with a message naming the variable.
+
+Also: optional credentials in `.env.example` are now commented out rather
+than blank, and the Dockerfile's mtime guard covers `static/` — the hanko
+merge began `include_str!`ing the whole web shell, so a rebuild Cargo decides
+to skip ships an image whose UI is silently a build behind.
+
+**Deploying** — no action for an existing install. An existing `.env` with
+blank credentials is now read the way it always looked like it would be. If
+`v0.1.0` would not start for you, `v0.1.1` fixes it; nothing else changes.
+
+## v0.1.0
+
+The first published container image: `ghcr.io/dcprevere/opsclaw`, at
+`:v0.1.0` and `:latest`, built and pushed by a `v*` tag. Everything below
+shipped in it.
 
 ### Pluggable login provider (`[auth]`)
 

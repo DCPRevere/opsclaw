@@ -162,14 +162,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Approve a pending approval (remote-only — DESIGN §7 decision 14;
-    /// acts on a live daemon's approval queue over its gateway).
+    /// The approval queue: list what is waiting, see the exact command, and
+    /// decide. LOCAL by default, so it works with no gateway session.
+    Approvals {
+        #[command(subcommand)]
+        command: ApprovalsCommand,
+    },
+    /// Approve a pending approval. Kept as a top-level alias for
+    /// `approvals approve`; REMOTE-only, over the saved gateway session.
     Approve {
         id: Uuid,
         #[arg(long)]
         json: bool,
     },
-    /// Deny a pending approval (remote-only; see `Approve`).
+    /// Deny a pending approval. Alias for `approvals deny`; remote-only.
     Deny {
         id: Uuid,
         #[arg(long)]
@@ -195,6 +201,12 @@ enum Command {
     Account {
         #[command(subcommand)]
         command: AccountCommand,
+    },
+    /// `ops_` CLI sessions: list them, revoke one. These never expire, so
+    /// revoking is what actually ends someone's CLI access.
+    Tokens {
+        #[command(subcommand)]
+        command: TokensCommand,
     },
     /// Encrypted secret store management. Values NEVER pass through argv
     /// (visible in ps/shell history) — `set` reads from a hidden prompt,
@@ -279,7 +291,12 @@ enum AccountCommand {
     /// Revoke every outstanding session for an operator: all web session
     /// cookies and all `ops_` CLI tokens. Use when offboarding — removing
     /// someone at the identity provider does not reach this daemon.
-    RevokeSessions { email: String },
+    RevokeSessions {
+        email: String,
+        /// Skip the confirmation (needed where there is no terminal).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -304,6 +321,28 @@ enum JobsCommand {
 }
 
 #[derive(Subcommand)]
+enum TokensCommand {
+    /// List CLI sessions — all operators', or one with --as.
+    List {
+        /// Only this operator's tokens.
+        #[arg(long = "as")]
+        as_email: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke one CLI token by id.
+    Revoke {
+        id: Uuid,
+        /// The token's owner.
+        #[arg(long = "as")]
+        as_email: String,
+        /// Skip the confirmation (needed where there is no terminal).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum SecretCommand {
     /// Store a secret under NAME. Value source (in order): --from-env,
     /// --from-file, piped stdin, else a hidden interactive prompt.
@@ -322,8 +361,14 @@ enum SecretCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Remove one stored secret.
-    Rm { name: String },
+    /// Remove one stored secret. Unrecoverable — the store holds the only
+    /// copy — so it asks first.
+    Rm {
+        name: String,
+        /// Skip the confirmation (needed where there is no terminal).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -369,8 +414,15 @@ enum ConfigCommand {
     /// standard container image — use `show`/`apply` there.
     Edit,
     /// Remove a project, environment, or target by its
-    /// `project[::env[::target]]` path.
-    Rm { path: String },
+    /// `project[::env[::target]]` path. Prints the whole subtree it would
+    /// delete and asks first.
+    Rm {
+        path: String,
+        /// Skip the confirmation. Required where there is no terminal to ask
+        /// on, e.g. under `docker compose exec -T`.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -381,6 +433,45 @@ enum ConfigProjectCommand {
 #[derive(Subcommand)]
 enum ConfigResourceCommand {
     Add,
+}
+
+#[derive(Subcommand)]
+enum ApprovalsCommand {
+    /// Every request awaiting a decision, with the verbatim command each
+    /// one would run.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// One request by id, pending or already decided.
+    Show {
+        id: Uuid,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve a request and RUN its stored command, verbatim.
+    Approve {
+        id: Uuid,
+        /// Which operator the decision is recorded as. Inferred when the
+        /// deployment has exactly one operator account.
+        #[arg(long = "as")]
+        as_email: Option<String>,
+        /// Skip the confirmation (needed where there is no terminal).
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deny a request. The command never runs.
+    Deny {
+        id: Uuid,
+        #[arg(long = "as")]
+        as_email: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -406,6 +497,23 @@ enum IncidentsCommand {
 
 #[derive(Subcommand)]
 enum AuditCommand {
+    /// Read the chain: what the agent actually did. Defaults to the most
+    /// recent records, since "what just happened?" is the usual question.
+    List {
+        /// Start at this sequence number instead of the tail.
+        #[arg(long)]
+        from: Option<i64>,
+        #[arg(long, default_value = "20")]
+        limit: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One record by its sequence number.
+    Show {
+        seq: i64,
+        #[arg(long)]
+        json: bool,
+    },
     /// Re-walk the whole hash chain and report the first tamper/break found, if any.
     Verify {
         #[arg(long)]
@@ -466,12 +574,16 @@ enum MemoryCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Forget one fact by id, or every fact matching a query.
+    /// Forget one fact by id, or every fact matching a query. A query can
+    /// match many facts, so it prints them and asks before forgetting.
     Forget {
         /// An opaque memory id (no spaces), or a free-text query.
         target: String,
         #[arg(long, default_value = "operator requested via CLI")]
         reason: String,
+        /// Skip the confirmation (needed where there is no terminal).
+        #[arg(long)]
+        yes: bool,
         #[arg(long)]
         json: bool,
     },
@@ -726,7 +838,9 @@ async fn dispatch(
                     println!("no changes — {} left alone", cfg_path.display());
                 }
             },
-            ConfigCommand::Rm { path } => {
+            ConfigCommand::Rm { path, yes } => {
+                let preview = opsclaw::cli::config_edit::describe_removal(cfg_path, &path)?;
+                opsclaw::cli::confirm::destructive(&preview, yes)?;
                 let removed = opsclaw::cli::config_edit::remove(cfg_path, &path)?;
                 println!("removed {removed} from {}", cfg_path.display());
                 println!(
@@ -761,24 +875,47 @@ async fn dispatch(
             }
         },
 
-        Command::Audit { command: AuditCommand::Verify { json } } => {
-            let db = open_db(cfg_path).await?;
-            let outcome = opsclaw::cli::audit_cmd::verify(&db, 1).await?;
-            if json {
-                opsclaw::cli::output::print_json(&outcome);
-            } else if outcome.ok {
-                println!("OK — {} record(s) verified", outcome.records_verified);
-            } else {
-                println!(
-                    "FAIL after {} record(s): {}",
-                    outcome.records_verified,
-                    outcome.failure.as_deref().unwrap_or("unknown")
-                );
+        Command::Audit { command } => match command {
+            AuditCommand::List { from, limit, json } => {
+                let db = open_db(cfg_path).await?;
+                let views = match from {
+                    Some(seq) => opsclaw::cli::audit_cmd::list(&db, seq, limit).await?,
+                    None => opsclaw::cli::audit_cmd::tail(&db, limit).await?,
+                };
+                if json {
+                    opsclaw::cli::output::print_json(&views);
+                } else {
+                    print!("{}", opsclaw::cli::audit_cmd::render(&views));
+                }
             }
-            if !outcome.ok {
-                std::process::exit(1);
+            AuditCommand::Show { seq, json } => {
+                let db = open_db(cfg_path).await?;
+                let view = opsclaw::cli::audit_cmd::show(&db, seq).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&view);
+                } else {
+                    print!("{}", opsclaw::cli::audit_cmd::render(std::slice::from_ref(&view)));
+                }
             }
-        }
+            AuditCommand::Verify { json } => {
+                let db = open_db(cfg_path).await?;
+                let outcome = opsclaw::cli::audit_cmd::verify(&db, 1).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&outcome);
+                } else if outcome.ok {
+                    println!("OK — {} record(s) verified", outcome.records_verified);
+                } else {
+                    println!(
+                        "FAIL after {} record(s): {}",
+                        outcome.records_verified,
+                        outcome.failure.as_deref().unwrap_or("unknown")
+                    );
+                }
+                if !outcome.ok {
+                    std::process::exit(1);
+                }
+            }
+        },
 
         Command::Postmortem { id } => {
             let db = open_db(cfg_path).await?;
@@ -942,7 +1079,9 @@ async fn dispatch(
                     println!("{}", opsclaw::cli::memory_cmd::DISABLED_MESSAGE);
                 }
             }
-            MemoryCommand::Forget { target, reason, json } => {
+            MemoryCommand::Forget { target, reason, yes, json } => {
+                let preview = opsclaw::cli::memory_cmd::describe_forget(cfg_path, &target).await?;
+                opsclaw::cli::confirm::destructive(&preview, yes)?;
                 let outcome = opsclaw::cli::memory_cmd::forget(cfg_path, &target, &reason).await?;
                 if json {
                     opsclaw::cli::output::print_json(&outcome);
@@ -1017,6 +1156,89 @@ async fn dispatch(
             let session = remote_session()?;
             opsclaw::cli::remote::status::status(&session, json).await?;
         }
+
+        Command::Approvals { command } => match command {
+            ApprovalsCommand::List { json } => {
+                let db = open_db(cfg_path).await?;
+                let views = opsclaw::cli::approvals_cmd::list(&db.repos()).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&views);
+                } else {
+                    print!("{}", opsclaw::cli::approvals_cmd::render(&views));
+                }
+            }
+            ApprovalsCommand::Show { id, json } => {
+                let db = open_db(cfg_path).await?;
+                let view = opsclaw::cli::approvals_cmd::show(&db.repos(), id).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&view);
+                } else {
+                    print!("{}", opsclaw::cli::approvals_cmd::render(std::slice::from_ref(&view)));
+                }
+            }
+            ApprovalsCommand::Approve { id, as_email, yes, json } => {
+                // Approving EXECUTES the stored command, so this needs the
+                // daemon's own wiring — the same full boot `scan` uses.
+                let config = Config::load(Some(cfg_path))?;
+                config.validate()?;
+                let state =
+                    opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
+                let view = opsclaw::cli::approvals_cmd::show(&state.repos, id).await?;
+                if !opsclaw::cli::approvals_cmd::is_pending(&view) {
+                    return Err(opsclaw::Error::Config(format!(
+                        "approval {id} is already {} — nothing to decide",
+                        view.state
+                    )));
+                }
+                let operator = opsclaw::cli::approvals_cmd::resolve_operator(
+                    &state.repos,
+                    as_email.as_deref(),
+                )
+                .await?;
+                opsclaw::cli::confirm::destructive(
+                    &opsclaw::cli::approvals_cmd::decision_preview(&view, true),
+                    yes,
+                )?;
+                let outcome = opsclaw::incidents::approvals::approve(
+                    &*state.repos,
+                    &state.approved,
+                    id,
+                    operator,
+                )
+                .await?;
+                if json {
+                    opsclaw::cli::output::print_json(&format!("{outcome:?}"));
+                } else {
+                    println!("{outcome:?}");
+                }
+                state.chat.drain(std::time::Duration::from_secs(20)).await;
+            }
+            ApprovalsCommand::Deny { id, as_email, yes, json } => {
+                // Denying runs nothing, so it needs only the database.
+                let db = open_db(cfg_path).await?;
+                let repos = db.repos();
+                let view = opsclaw::cli::approvals_cmd::show(&repos, id).await?;
+                if !opsclaw::cli::approvals_cmd::is_pending(&view) {
+                    return Err(opsclaw::Error::Config(format!(
+                        "approval {id} is already {} — nothing to decide",
+                        view.state
+                    )));
+                }
+                let operator =
+                    opsclaw::cli::approvals_cmd::resolve_operator(&repos, as_email.as_deref())
+                        .await?;
+                opsclaw::cli::confirm::destructive(
+                    &opsclaw::cli::approvals_cmd::decision_preview(&view, false),
+                    yes,
+                )?;
+                let outcome = opsclaw::incidents::approvals::deny(&*repos, id, operator).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&format!("{outcome:?}"));
+                } else {
+                    println!("{outcome:?}");
+                }
+            }
+        },
 
         Command::Approve { id, json } => {
             let session = remote_session()?;
@@ -1122,7 +1344,15 @@ async fn dispatch(
                     );
                 }
             }
-            AccountCommand::RevokeSessions { email } => {
+            AccountCommand::RevokeSessions { email, yes } => {
+                opsclaw::cli::confirm::destructive(
+                    &format!(
+                        "will revoke EVERY session for {email}: all web sign-ins and all `ops_` \
+                         CLI tokens. They must sign in again, and any automation using one of \
+                         their tokens stops working."
+                    ),
+                    yes,
+                )?;
                 let db = open_or_create_db(cfg_path, home).await?;
                 let revoked = opsclaw::cli::account_cmd::revoke_sessions(&db, &email).await?;
                 println!(
@@ -1152,6 +1382,35 @@ async fn dispatch(
             }
         },
 
+        Command::Tokens { command } => match command {
+            TokensCommand::List { as_email, json } => {
+                let db = open_or_create_db(cfg_path, home).await?;
+                let views =
+                    opsclaw::cli::tokens_cmd::list(&db.repos(), as_email.as_deref()).await?;
+                if json {
+                    opsclaw::cli::output::print_json(&views);
+                } else {
+                    print!("{}", opsclaw::cli::tokens_cmd::render(&views));
+                }
+            }
+            TokensCommand::Revoke { id, as_email, yes } => {
+                let db = open_or_create_db(cfg_path, home).await?;
+                opsclaw::cli::confirm::destructive(
+                    &format!(
+                        "will revoke CLI token {id} belonging to {as_email}. Anything using it \
+                         stops working immediately, and the token cannot be restored."
+                    ),
+                    yes,
+                )?;
+                if opsclaw::cli::tokens_cmd::revoke(&db.repos(), &as_email, id).await? {
+                    println!("revoked CLI token {id}");
+                } else {
+                    eprintln!("no CLI token {id} belonging to {as_email}");
+                    std::process::exit(1);
+                }
+            }
+        },
+
         Command::Secret { command } => match command {
             SecretCommand::Set { name, from_env, from_file } => {
                 let value = read_secret_value(&name, from_env.as_deref(), from_file.as_deref())?;
@@ -1175,7 +1434,14 @@ async fn dispatch(
                     }
                 }
             }
-            SecretCommand::Rm { name } => {
+            SecretCommand::Rm { name, yes } => {
+                opsclaw::cli::confirm::destructive(
+                    &format!(
+                        "will remove secret store:{name}. Any config field referencing it stops \
+                         resolving, and the store holds the only copy."
+                    ),
+                    yes,
+                )?;
                 if opsclaw::cli::secret_cmd::rm(home, &name)? {
                     println!("removed store:{name}");
                 } else {

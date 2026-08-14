@@ -203,6 +203,46 @@ pub struct ForgetOutcome {
 /// id actually forgotten is returned so the operator sees exactly what
 /// left, not just an ack. `reason` rides the audit trail Hindsight itself
 /// keeps (`Memory::forget`'s doc: "reversible... reason rides along").
+/// What [`forget`] would delete, for the confirmation preview.
+///
+/// This is the destructive command whose blast radius is LEAST knowable from
+/// the command line: anything with a space is treated as a recall query, so
+/// `memory forget "disk"` can take out every fact mentioning disks. A count
+/// would not be enough — the operator has to see the actual facts to notice
+/// that one of them is the thing they meant to keep. Returns the CONTENT of
+/// each match, not just its opaque id, since an id says nothing about what
+/// is being lost.
+///
+/// Runs the same id-or-query discrimination [`forget`] does, so the preview
+/// cannot describe a different set from the one that gets deleted.
+pub async fn describe_forget(cfg_path: &Path, target: &str) -> Result<String> {
+    let memory = memory_from_config(cfg_path)?;
+    if !memory.is_enabled() {
+        return Ok(DISABLED_MESSAGE.to_string());
+    }
+    if looks_like_id(target) {
+        return Ok(format!("will forget the fact with id {target:?}"));
+    }
+    let matches = memory.recall(target, 20).await?;
+    if matches.is_empty() {
+        return Ok(format!("nothing matches {target:?} — nothing would be forgotten"));
+    }
+    let mut out = format!("{target:?} is a QUERY, and it matches {} fact(s):\n", matches.len());
+    for m in &matches {
+        out.push_str(&format!("  - {}\n", m.fact.trim()));
+    }
+    out.push_str("all of them would be forgotten.");
+    Ok(out)
+}
+
+/// The id-or-query discrimination, shared so [`describe_forget`] and
+/// [`forget`] can never disagree about which branch a `target` takes — a
+/// preview that showed query matches for something then treated as an id
+/// would be worse than no preview.
+fn looks_like_id(target: &str) -> bool {
+    !target.trim().is_empty() && !target.contains(' ')
+}
+
 pub async fn forget(cfg_path: &Path, target: &str, reason: &str) -> Result<ForgetOutcome> {
     let memory = memory_from_config(cfg_path)?;
     let enabled = memory.is_enabled();
@@ -220,8 +260,7 @@ pub async fn forget(cfg_path: &Path, target: &str, reason: &str) -> Result<Forge
     // perspective; `forget` itself doesn't error on an already-forgotten
     // id) and strictly safer than guessing wrong and forgetting nothing.
     let mut forgotten = Vec::new();
-    let looks_like_id = !target.trim().is_empty() && !target.contains(' ');
-    if looks_like_id {
+    if looks_like_id(target) {
         memory.forget(target, reason).await?;
         forgotten.push(target.to_string());
     } else {

@@ -4,6 +4,82 @@ Operator-facing changes. Anything that needs manual work at upgrade time
 carries a **Deploying** note (AGENTS.md); read those before rolling a
 release out.
 
+## v0.3.0
+
+### Destructive commands now have brakes
+
+`config rm`, `secret rm`, `memory forget` and `account revoke-sessions` all
+destroyed without asking, without previewing and without a `--yes` to make
+the intent explicit. `config rm <project>` dropped every environment, target
+and resource beneath it in one word. `memory forget` takes FREE TEXT and
+deletes every fact it matches, so the blast radius was not even knowable from
+the command line.
+
+Each now prints exactly what it will destroy and asks. `config rm` enumerates
+the whole subtree rather than counting it — "removes 4 things" does not let
+you notice that one of the four is the production cluster — and `memory
+forget` prints the CONTENT of every matching fact, not its opaque id.
+
+The third rule is the one that is easy to get wrong: with **no terminal**,
+these REFUSE rather than guess. Reading EOF as "yes" destroys data nobody
+confirmed; reading it as "no" turns a piped command into a silent no-op that
+exits 0 while the operator believes it worked. This is not a corner case —
+`docker compose exec -T`, the documented way to reach this CLI, never has a
+TTY. Pass `--yes` there.
+
+### The approval queue is reachable from the CLI
+
+`ApprovalRepo::list_pending()` and `GET /api/approvals` have always existed;
+no CLI command did. So `opsclaw-cli approve <id>` needed a UUID that nothing
+local would print — and `approve`/`deny` were remote-only, requiring a
+gateway session, which requires `login`, which is a browser hand-off. On a
+host whose web UI is not reachable yet, every route to the queue was closed:
+you could watch the agent say "queued for human approval" and have no way to
+see the request, let alone answer it.
+
+`approvals list|show|approve|deny` are LOCAL, against the same SQLite file the
+daemon uses. Concurrent decisions are safe because `ApprovalRepo::decide` is
+an atomic compare-and-set on a pending row — a decision here and one through
+the gateway cannot both land. Approving executes the stored command verbatim,
+so it needs the daemon's own wiring, exactly as `scan` does.
+
+Who decided is resolved, never invented: `--as <email>`, or the sole operator
+account when there is exactly one. With several accounts and no `--as` it
+refuses, because `decided_by` lands in an append-only chain and a guess there
+forges an attribution.
+
+`approve`/`deny` remain as top-level remote-only aliases; nothing that worked
+before changes.
+
+### The audit chain can be read, not just verified
+
+`AuditRepo::range`'s own doc says it exists for "`audit verify` and
+inspection". Only verify was ever built, so an operator could prove the log
+was untampered and had no way to see what was in it — the append-only record
+of every action the agent took was unavailable for the question it exists to
+answer. `audit list` (tail by default, `--from` to page) and `audit show
+<seq>` read it.
+
+### `tokens list|revoke`
+
+`TokenRepo` and `/api/cli-tokens` existed with no CLI behind them, while this
+changelog told operators that `ops_` tokens never expire and that revoking
+them is what actually ends someone's access. The documented offboarding step
+had no command outside the web UI.
+
+### Also
+
+`config list` shows every project, environment and target with autonomy and
+expected-state RESOLVED through the inheritance chain, and takes repeatable
+`project[::env[::target]]` filters. Config writes now name the restart command
+for the packaging they are running under. `deploy/opsclaw-edit.sh` gives a
+containerised install a one-step `show → $EDITOR → apply`.
+
+**Deploying** — no action. Existing configs and databases are read exactly as
+before. The one behaviour change to know about is the confirmation prompts: if
+you script `config rm`, `secret rm`, `memory forget` or `account
+revoke-sessions`, add `--yes` or they will refuse.
+
 ## v0.2.0
 
 ### The config CLI can now edit, not only append

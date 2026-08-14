@@ -26,11 +26,13 @@
 //! going through argv parsing.
 
 pub mod account_cmd;
+pub mod approvals_cmd;
 pub mod audit_cmd;
 pub mod chat_repl;
 pub mod config_cmd;
 pub mod config_edit;
 pub mod config_list;
+pub mod confirm;
 pub mod doctor;
 pub mod estop;
 pub mod incidents_cmd;
@@ -45,5 +47,6 @@ pub mod remote;
 pub mod runbook_cmd;
 pub mod scan_cmd;
 pub mod secret_cmd;
+pub mod tokens_cmd;
 pub mod ui_cmd;
 pub mod vapid;

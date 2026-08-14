@@ -232,3 +232,105 @@ mod tests {
         assert_eq!(outcome.records_verified, 550);
     }
 }
+
+/// One chain record, flattened for display.
+///
+/// The chain has always been verifiable and never readable: `AuditRepo::
+/// range`'s own doc says it exists for "`audit verify` and inspection", but
+/// only verify was ever built. So an operator could prove the log was
+/// untampered and had no way to see what was in it — which makes the
+/// append-only, hash-chained record of every action the agent took
+/// unavailable for exactly the question it exists to answer: what did it do?
+///
+/// `command` is the post-scrubbing command line (`AuditRecord::command`),
+/// so secret VALUES were never written here in the first place.
+#[derive(Debug, Serialize)]
+pub struct AuditView {
+    pub seq: i64,
+    pub ts: String,
+    pub principal: String,
+    pub target: String,
+    pub tool: String,
+    pub command: String,
+    pub risk: String,
+    pub outcome: String,
+    pub exit_code: Option<i32>,
+    pub hash: String,
+    pub prev_hash: String,
+}
+
+impl From<&crate::audit::AuditRecord> for AuditView {
+    fn from(r: &crate::audit::AuditRecord) -> Self {
+        AuditView {
+            seq: r.seq,
+            ts: r.ts.to_rfc3339(),
+            principal: format!("{:?}", r.principal),
+            target: r.fq_target.clone(),
+            tool: r.tool.clone(),
+            command: r.command.clone(),
+            risk: format!("{:?}", r.risk).to_lowercase(),
+            outcome: format!("{:?}", r.outcome).to_lowercase(),
+            exit_code: r.exit_code,
+            hash: r.hash.clone(),
+            prev_hash: r.prev_hash.clone(),
+        }
+    }
+}
+
+/// Read a window of the chain, oldest first.
+///
+/// Paged through `AuditRepo::range` like [`verify`] rather than loading the
+/// table: an audit chain is append-only and grows without bound.
+pub async fn list(db: &Db, from_seq: i64, limit: i64) -> Result<Vec<AuditView>> {
+    use crate::db::AuditRepo;
+    let repos = db.repos();
+    let rows = AuditRepo::range(&*repos, from_seq.max(1), limit).await?;
+    Ok(rows.iter().map(AuditView::from).collect())
+}
+
+/// One record by its sequence number.
+pub async fn show(db: &Db, seq: i64) -> Result<AuditView> {
+    use crate::db::AuditRepo;
+    let repos = db.repos();
+    let rows = AuditRepo::range(&*repos, seq, 1).await?;
+    rows.first()
+        .filter(|r| r.seq == seq)
+        .map(AuditView::from)
+        .ok_or_else(|| crate::Error::Config(format!("no audit record at seq {seq}")))
+}
+
+/// The tail of the chain — what `audit list` shows with no arguments.
+///
+/// Defaults to the END rather than the beginning: an operator reaching for
+/// the audit log is nearly always asking "what just happened?", and starting
+/// at genesis on a long-lived deployment answers a question nobody asked.
+pub async fn tail(db: &Db, limit: i64) -> Result<Vec<AuditView>> {
+    use crate::db::AuditRepo;
+    let repos = db.repos();
+    let last = AuditRepo::last(&*repos).await?;
+    let Some(last) = last else { return Ok(Vec::new()) };
+    let from = (last.seq - limit + 1).max(1);
+    list(db, from, limit).await
+}
+
+/// Render chain records for a human, one block each.
+pub fn render(views: &[AuditView]) -> String {
+    if views.is_empty() {
+        return "the audit chain is empty — the agent has taken no recorded action yet.\n"
+            .to_string();
+    }
+    let mut out = String::new();
+    for r in views {
+        out.push_str(&format!("#{}  {}  [{}] {}\n", r.seq, r.ts, r.risk, r.outcome));
+        out.push_str(&format!("  target      {}\n", r.target));
+        out.push_str(&format!("  tool        {}\n", r.tool));
+        out.push_str(&format!("  command     {}\n", r.command));
+        out.push_str(&format!("  by          {}\n", r.principal));
+        if let Some(code) = r.exit_code {
+            out.push_str(&format!("  exit        {code}\n"));
+        }
+        out.push('\n');
+    }
+    out.push_str("`opsclaw-cli audit verify` proves this chain has not been altered.\n");
+    out
+}

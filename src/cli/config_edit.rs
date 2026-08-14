@@ -192,6 +192,74 @@ fn edit_with(config_path: &Path, editor: &str) -> Result<EditOutcome> {
     }
 }
 
+/// What [`remove`] would delete, for the confirmation preview.
+///
+/// Enumerates the whole subtree rather than counting it. `config rm
+/// <project>` takes out every environment, target and resource beneath it,
+/// and a count ("removes 4 things") does not let an operator notice that one
+/// of the four is the production cluster.
+pub fn describe_removal(config_path: &Path, path: &str) -> Result<String> {
+    let raw = std::fs::read_to_string(config_path)?;
+    let cfg: Config = toml::from_str(&raw)
+        .map_err(|e| crate::Error::Config(format!("{}: {e}", config_path.display())))?;
+
+    let parts: Vec<&str> = path.split("::").map(str::trim).collect();
+    let mut lines = Vec::new();
+    match parts.as_slice() {
+        [project] => {
+            let p = cfg
+                .projects
+                .iter()
+                .find(|p| p.name == *project)
+                .ok_or_else(|| unknown_path(&cfg, path))?;
+            lines.push(format!("will remove PROJECT {project:?} and everything under it:"));
+            for e in &p.envs {
+                lines.push(format!("  env {}::{}", p.name, e.name));
+                for t in &e.targets {
+                    lines.push(format!("    target {}::{}::{}", p.name, e.name, t.name));
+                    for r in &t.resources {
+                        lines.push(format!("      resource {} [{:?}]", r.name(), r.rtype()));
+                    }
+                }
+            }
+        }
+        [project, env] => {
+            let e = cfg
+                .projects
+                .iter()
+                .find(|p| p.name == *project)
+                .and_then(|p| p.envs.iter().find(|e| e.name == *env))
+                .ok_or_else(|| unknown_path(&cfg, path))?;
+            lines.push(format!("will remove ENVIRONMENT {project}::{env} and its targets:"));
+            for t in &e.targets {
+                lines.push(format!("  target {}::{}::{}", project, env, t.name));
+                for r in &t.resources {
+                    lines.push(format!("    resource {} [{:?}]", r.name(), r.rtype()));
+                }
+            }
+        }
+        [project, env, target] => {
+            let t = cfg
+                .projects
+                .iter()
+                .find(|p| p.name == *project)
+                .and_then(|p| p.envs.iter().find(|e| e.name == *env))
+                .and_then(|e| e.targets.iter().find(|t| t.name == *target))
+                .ok_or_else(|| unknown_path(&cfg, path))?;
+            lines.push(format!("will remove TARGET {project}::{env}::{target} [{:?}]", t.kind));
+            for r in &t.resources {
+                lines.push(format!("  resource {} [{:?}]", r.name(), r.rtype()));
+            }
+        }
+        _ => {
+            return Err(crate::Error::Config(format!(
+                "{path:?} is not a project, project::env, or project::env::target path"
+            )));
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
 /// Remove the project, environment, or target named by `path`
 /// (`project`, `project::env`, or `project::env::target`) — the same
 /// `::`-separated form `scan` and `doctor` already print.

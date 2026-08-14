@@ -348,6 +348,10 @@ enum ConfigCommand {
     /// state RESOLVED through the inheritance chain — the effective values
     /// the daemon uses, which `show` would make you work out from the TOML.
     List {
+        /// Limit to these subtrees: `project`, `project::env`, or
+        /// `project::env::target`. Repeatable, and they union — e.g.
+        /// `config list remundo::dev remundo::prod`. Omit for everything.
+        paths: Vec<String>,
         #[arg(long)]
         json: bool,
     },
@@ -685,8 +689,8 @@ async fn dispatch(
                     std::process::exit(1);
                 }
             }
-            ConfigCommand::List { json } => {
-                let projects = opsclaw::cli::config_list::list(cfg_path)?;
+            ConfigCommand::List { paths, json } => {
+                let projects = opsclaw::cli::config_list::list(cfg_path, &paths)?;
                 if json {
                     opsclaw::cli::output::print_json(&projects);
                 } else {

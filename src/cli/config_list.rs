@@ -248,10 +248,125 @@ pub fn render(projects: &[ProjectView]) -> String {
     out
 }
 
-/// `config list` end to end: load, resolve, render.
-pub fn list(config_path: &std::path::Path) -> Result<Vec<ProjectView>> {
+/// A `project[::env[::target]]` selector — the same `::` path `scan`,
+/// `config rm` and `doctor`'s own output already use, so filtering needs no
+/// vocabulary an operator has not already met.
+#[derive(Debug, PartialEq, Eq)]
+struct Selector {
+    project: String,
+    env: Option<String>,
+    target: Option<String>,
+}
+
+impl Selector {
+    fn parse(raw: &str) -> Result<Self> {
+        let parts: Vec<&str> = raw.split("::").map(str::trim).collect();
+        match parts.as_slice() {
+            [p] if !p.is_empty() => Ok(Selector { project: (*p).into(), env: None, target: None }),
+            [p, e] if !p.is_empty() && !e.is_empty() => {
+                Ok(Selector { project: (*p).into(), env: Some((*e).into()), target: None })
+            }
+            [p, e, t] if !p.is_empty() && !e.is_empty() && !t.is_empty() => Ok(Selector {
+                project: (*p).into(),
+                env: Some((*e).into()),
+                target: Some((*t).into()),
+            }),
+            _ => Err(crate::Error::Config(format!(
+                "{raw:?} is not a project, project::env, or project::env::target path"
+            ))),
+        }
+    }
+}
+
+/// Narrow an inventory to the selected subtrees. Selectors UNION, so
+/// `list a::dev b::prod` shows both.
+///
+/// Filtering happens on the resolved views, never on the `Config` — every
+/// effective autonomy and expected-state has already been computed against
+/// the WHOLE tree by then. Filtering the config first would drop the very
+/// ancestors the inheritance chain reads, so a narrowed listing could report
+/// a different autonomy than the daemon enforces, which is exactly the
+/// disagreement this module exists to prevent.
+///
+/// An empty selector list means no filtering (show everything). A selector
+/// list that matches nothing is an ERROR listing what does exist, not an
+/// empty success: a filtered listing that silently shows nothing reads as
+/// "this project has no targets" rather than "you typed the name wrong".
+fn filter(projects: Vec<ProjectView>, selectors: &[Selector]) -> Vec<ProjectView> {
+    if selectors.is_empty() {
+        return projects;
+    }
+    projects
+        .into_iter()
+        .filter_map(|p| {
+            let hits: Vec<&Selector> = selectors.iter().filter(|s| s.project == p.name).collect();
+            if hits.is_empty() {
+                return None;
+            }
+            // A bare `project` selector takes the whole subtree; otherwise
+            // keep only the environments (and targets) named.
+            if hits.iter().any(|s| s.env.is_none()) {
+                return Some(p);
+            }
+            let envs: Vec<EnvView> = p
+                .envs
+                .into_iter()
+                .filter_map(|e| {
+                    let env_hits: Vec<&&Selector> =
+                        hits.iter().filter(|s| s.env.as_deref() == Some(e.name.as_str())).collect();
+                    if env_hits.is_empty() {
+                        return None;
+                    }
+                    if env_hits.iter().any(|s| s.target.is_none()) {
+                        return Some(e);
+                    }
+                    let targets: Vec<TargetView> = e
+                        .targets
+                        .into_iter()
+                        .filter(|t| {
+                            env_hits.iter().any(|s| s.target.as_deref() == Some(t.name.as_str()))
+                        })
+                        .collect();
+                    if targets.is_empty() { None } else { Some(EnvView { targets, ..e }) }
+                })
+                .collect();
+            if envs.is_empty() { None } else { Some(ProjectView { envs, ..p }) }
+        })
+        .collect()
+}
+
+/// Every selectable path in a config, for the "nothing matched" error.
+fn known_paths(projects: &[ProjectView]) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in projects {
+        out.push(p.name.clone());
+        for e in &p.envs {
+            out.push(format!("{}::{}", p.name, e.name));
+            for t in &e.targets {
+                out.push(t.path.clone());
+            }
+        }
+    }
+    out
+}
+
+/// `config list` end to end: load, resolve, filter.
+///
+/// `paths` empty lists everything.
+pub fn list(config_path: &std::path::Path, paths: &[String]) -> Result<Vec<ProjectView>> {
     let cfg = Config::load(Some(config_path))?;
-    Ok(inventory(&cfg))
+    let all = inventory(&cfg);
+    let selectors = paths.iter().map(|p| Selector::parse(p)).collect::<Result<Vec<_>>>()?;
+    let known = known_paths(&all);
+    let filtered = filter(all, &selectors);
+    if filtered.is_empty() && !selectors.is_empty() {
+        return Err(crate::Error::Config(format!(
+            "nothing matched {}. Configured: {}",
+            paths.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>().join(", "),
+            if known.is_empty() { "(nothing)".to_string() } else { known.join(", ") }
+        )));
+    }
+    Ok(filtered)
 }
 
 #[cfg(test)]
@@ -411,6 +526,127 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
         }
+    }
+
+    const TWO_PROJECTS: &str = r#"
+        [[project]]
+        name = "remundo"
+        autonomy = "observe"
+        [[project.env]]
+        name = "dev"
+        [[project.env.target]]
+        name = "web-1"
+        kind = "local"
+        [[project.env.target]]
+        name = "web-2"
+        kind = "local"
+        [[project.env]]
+        name = "prod"
+        [[project.env.target]]
+        name = "db-1"
+        kind = "local"
+        [[project]]
+        name = "other"
+        [[project.env]]
+        name = "dev"
+        [[project.env.target]]
+        name = "thing"
+        kind = "local"
+        "#;
+
+    fn sel(s: &str) -> Selector {
+        Selector::parse(s).unwrap()
+    }
+
+    fn paths_in(views: &[ProjectView]) -> Vec<String> {
+        views
+            .iter()
+            .flat_map(|p| p.envs.iter().flat_map(|e| e.targets.iter().map(|t| t.path.clone())))
+            .collect()
+    }
+
+    #[test]
+    fn a_filter_selects_a_project_an_env_or_a_single_target() {
+        let cfg = parse(TWO_PROJECTS);
+
+        assert_eq!(
+            paths_in(&filter(inventory(&cfg), &[sel("remundo")])),
+            ["remundo::dev::web-1", "remundo::dev::web-2", "remundo::prod::db-1"]
+        );
+        assert_eq!(
+            paths_in(&filter(inventory(&cfg), &[sel("remundo::dev")])),
+            ["remundo::dev::web-1", "remundo::dev::web-2"]
+        );
+        assert_eq!(
+            paths_in(&filter(inventory(&cfg), &[sel("remundo::dev::web-2")])),
+            ["remundo::dev::web-2"]
+        );
+        assert_eq!(paths_in(&filter(inventory(&cfg), &[])), paths_in(&inventory(&cfg)));
+    }
+
+    #[test]
+    fn filters_union_across_projects_and_envs() {
+        // "limit them to only some projects or envs" — plural, so several
+        // selectors have to combine rather than the last one winning.
+        let cfg = parse(TWO_PROJECTS);
+        assert_eq!(
+            paths_in(&filter(inventory(&cfg), &[sel("remundo::prod"), sel("other::dev")])),
+            ["remundo::prod::db-1", "other::dev::thing"]
+        );
+    }
+
+    #[test]
+    fn an_env_of_the_same_name_in_another_project_is_not_swept_in() {
+        // Both projects have a "dev". Matching on the env name alone would
+        // quietly widen the filter the operator asked for.
+        let cfg = parse(TWO_PROJECTS);
+        assert_eq!(paths_in(&filter(inventory(&cfg), &[sel("other::dev")])), ["other::dev::thing"]);
+    }
+
+    #[test]
+    fn filtering_never_changes_a_resolved_value() {
+        // The trap this guards: autonomy here comes from the PROJECT, so
+        // filtering the Config down to one target before resolving would
+        // drop the ancestor the chain reads and report `suggest` — a
+        // narrowed listing disagreeing with the daemon about what a target
+        // may do. Filtering the resolved views cannot do that.
+        let cfg = parse(TWO_PROJECTS);
+        let unfiltered = inventory(&cfg);
+        let whole = &unfiltered[0].envs[0].targets[0];
+        assert_eq!(whole.autonomy, "observe");
+        assert_eq!(whole.autonomy_from, "project");
+
+        let narrowed = filter(inventory(&cfg), &[sel("remundo::dev::web-1")]);
+        let one = &narrowed[0].envs[0].targets[0];
+        assert_eq!(one.autonomy, whole.autonomy);
+        assert_eq!(one.autonomy_from, whole.autonomy_from);
+    }
+
+    #[test]
+    fn a_filter_matching_nothing_is_an_error_that_lists_what_exists() {
+        // An empty success reads as "this project has no targets" rather
+        // than "you typed the name wrong".
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, TWO_PROJECTS).unwrap();
+
+        let err = list(&path, &["remundo::nope".to_string()]).unwrap_err().to_string();
+        assert!(err.contains("nothing matched"), "{err}");
+        assert!(err.contains("remundo::dev::web-1"), "must list real paths: {err}");
+
+        assert!(list(&path, &["remundo::dev".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn a_malformed_selector_is_refused_rather_than_guessed_at() {
+        assert!(Selector::parse("a::b::c::d").is_err());
+        assert!(Selector::parse("").is_err());
+        assert!(Selector::parse("a::").is_err());
+        assert_eq!(
+            sel(" remundo :: dev "),
+            Selector { project: "remundo".into(), env: Some("dev".into()), target: None },
+            "whitespace around the separator is an operator typing, not a different name"
+        );
     }
 
     #[test]

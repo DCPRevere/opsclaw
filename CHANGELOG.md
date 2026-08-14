@@ -6,6 +6,42 @@ release out.
 
 ## Unreleased
 
+### The config CLI can now edit, not only append
+
+`opsclaw-cli config` offered `project add`, `resource add` and `validate`.
+There was no way to add an environment to an existing project, move a target
+between environments, or remove anything — so restructuring meant hand-editing
+`config.toml`, and in a container that meant copying the file out of a docker
+volume and back. Four commands, all LOCAL (no gateway session, no browser, so
+they work over `docker compose exec` on a host with no web access yet):
+
+- `config show` — the file byte-for-byte. Safe to pipe or paste: config holds
+  secret REFERENCES (`env:VAR` / `store:KEY`), never values.
+- `config apply [--file F]` — replace it from stdin or a file.
+- `config edit` — `$EDITOR` round-trip.
+- `config rm <project[::env[::target]]>` — remove one thing.
+
+Every write takes the same two gates the gateway's `POST /api/config` takes,
+in the same order: parse, then the SAME `Config::validate()` the daemon boots
+with, and only then the atomic write with a `.bak`. **A refused config is
+never written.** That ordering is the reason these exist rather than a
+documented `$EDITOR` recipe — live mode refuses to boot on an invalid config
+and Docker will not `exec` into a restarting container, so an unvalidated save
+is an install you cannot get back into.
+
+`show`/`apply` round-trip verbatim, so comments and formatting survive.
+`rm` re-serializes and cannot preserve comments — the same trade-off the
+structured `PUT /api/config/*` routes already make; it says so when it runs.
+`rm` on a path that matches nothing is an error listing what does exist:
+"removed nothing, exit 0" is how an operator concludes a target is gone while
+it is still being scanned.
+
+`config edit` refuses with a pointer to `show`/`apply` when no `$EDITOR` is
+set, rather than guessing at `vi`. The runtime image installs only
+`ca-certificates` and `curl`, so inside the standard container there is no
+editor at all, and a fallback would fail with `No such file or directory` —
+naming neither the cause nor the way round it.
+
 ### `doctor` checked the operator roster it could not see
 
 `check_db` and `check_account_linkage` ran only when `daemon.db_path` was set

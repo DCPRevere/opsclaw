@@ -29,6 +29,7 @@ pub mod account_cmd;
 pub mod audit_cmd;
 pub mod chat_repl;
 pub mod config_cmd;
+pub mod config_edit;
 pub mod doctor;
 pub mod estop;
 pub mod incidents_cmd;

@@ -344,6 +344,22 @@ enum ConfigCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Print config.toml exactly as it is on disk. Safe to pipe or paste:
+    /// config holds secret REFERENCES (env:VAR / store:KEY), never values.
+    Show,
+    /// Replace config.toml from stdin or --file, after checking the daemon
+    /// would still boot on it. A refused config is never written.
+    Apply {
+        /// Read from this file instead of stdin.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Open $EDITOR on the config, then apply it. There is no editor in the
+    /// standard container image — use `show`/`apply` there.
+    Edit,
+    /// Remove a project, environment, or target by its
+    /// `project[::env[::target]]` path.
+    Rm { path: String },
 }
 
 #[derive(Subcommand)]
@@ -464,6 +480,13 @@ enum MemoryCommand {
         json: bool,
     },
 }
+
+/// Said after every config write. Config is read at boot, not hot-reloaded
+/// (DESIGN §3), and the gateway's own `POST /api/config` says the same thing
+/// in its response — an operator who edits config and sees no behaviour
+/// change should not have to find that out by experiment.
+const RESTART_TO_APPLY: &str =
+    "restart the daemon to apply (config is read at boot, not hot-reloaded)";
 
 fn opsclaw_home() -> PathBuf {
     opsclaw::config::default_dir()
@@ -660,6 +683,45 @@ async fn dispatch(
                 if !errors.is_empty() {
                     std::process::exit(1);
                 }
+            }
+            ConfigCommand::Show => {
+                // print! not println!: the file's own trailing newline is
+                // part of it, and `show > f && apply < f` must round-trip
+                // byte-for-byte.
+                print!("{}", opsclaw::cli::config_edit::show(cfg_path)?);
+            }
+            ConfigCommand::Apply { file } => {
+                let body = match &file {
+                    Some(path) => std::fs::read_to_string(path)?,
+                    None => {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        std::io::stdin().read_to_string(&mut buf)?;
+                        buf
+                    }
+                };
+                opsclaw::cli::config_edit::apply(cfg_path, &body)?;
+                println!("{} written", cfg_path.display());
+                println!("{RESTART_TO_APPLY}");
+            }
+            ConfigCommand::Edit => match opsclaw::cli::config_edit::edit(cfg_path)? {
+                opsclaw::cli::config_edit::EditOutcome::Applied => {
+                    println!("{} written", cfg_path.display());
+                    println!("{RESTART_TO_APPLY}");
+                }
+                opsclaw::cli::config_edit::EditOutcome::Unchanged => {
+                    println!("no changes — {} left alone", cfg_path.display());
+                }
+            },
+            ConfigCommand::Rm { path } => {
+                let removed = opsclaw::cli::config_edit::remove(cfg_path, &path)?;
+                println!("removed {removed} from {}", cfg_path.display());
+                println!(
+                    "note: a structural edit is re-serialized, so comments in config.toml were \
+                     not preserved (the previous file is at {}.bak)",
+                    cfg_path.display()
+                );
+                println!("{RESTART_TO_APPLY}");
             }
         },
 

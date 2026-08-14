@@ -69,6 +69,35 @@ pub fn apply(config_path: &Path, body: &str) -> Result<()> {
     Ok(())
 }
 
+/// What to say after a config write: that a restart is needed, AND the
+/// command that does it here.
+///
+/// Config is read at boot, not hot-reloaded (DESIGN §3), so every write path
+/// has to tell the operator to restart — but "restart the daemon" on its own
+/// leaves them to work out how, and the answer differs by packaging. Inside
+/// the standard image the daemon is PID 1 of a container that `systemctl`
+/// cannot reach and the compose file is on a host this process cannot see;
+/// under `deploy/opsclaw.service` it is a systemd unit and `docker` is not
+/// involved at all. Printing the wrong one is worse than printing none.
+///
+/// The container command is deliberately unqualified — no `--env-file`, no
+/// path. This process cannot know the operator's compose project directory
+/// (it is on the host, outside the container's filesystem), so the hint says
+/// where to run it rather than inventing arguments that may not match.
+pub fn restart_hint() -> String {
+    let in_container = std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists();
+    if in_container {
+        "restart to apply (config is read at boot, not hot-reloaded):\n  docker compose restart \
+         opsclaw-daemon   — on the host, from the directory holding docker-compose.yml"
+            .to_string()
+    } else {
+        "restart to apply (config is read at boot, not hot-reloaded):\n  systemctl restart \
+         opsclaw   — or `systemctl --user restart opsclaw` for a user unit"
+            .to_string()
+    }
+}
+
 /// Where [`edit`] leaves your work when the result does not validate: beside
 /// the real config, at a predictable path, rather than in a temp directory
 /// the error message would have to explain.
@@ -285,6 +314,26 @@ expected_state = "running"
         let path = dir.path().join("config.toml");
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn the_restart_hint_names_a_command_that_exists_where_it_is_printed() {
+        // "restart the daemon" alone leaves an operator to work out how, and
+        // the answer differs by packaging: systemctl cannot reach a daemon
+        // that is PID 1 of a container, and docker is not involved at all in
+        // a systemd install. Whichever branch runs here, it must name exactly
+        // one of them and say where to run it.
+        let hint = restart_hint();
+        assert!(hint.contains("not hot-reloaded"), "{hint}");
+        let docker = hint.contains("docker compose restart");
+        let systemd = hint.contains("systemctl restart");
+        assert!(docker ^ systemd, "exactly one restart mechanism, never both: {hint}");
+        if docker {
+            assert!(
+                hint.contains("on the host"),
+                "the compose file is not in the container: {hint}"
+            );
+        }
     }
 
     #[test]

@@ -481,13 +481,6 @@ enum MemoryCommand {
     },
 }
 
-/// Said after every config write. Config is read at boot, not hot-reloaded
-/// (DESIGN §3), and the gateway's own `POST /api/config` says the same thing
-/// in its response — an operator who edits config and sees no behaviour
-/// change should not have to find that out by experiment.
-const RESTART_TO_APPLY: &str =
-    "restart the daemon to apply (config is read at boot, not hot-reloaded)";
-
 fn opsclaw_home() -> PathBuf {
     opsclaw::config::default_dir()
 }
@@ -663,11 +656,12 @@ async fn dispatch(
                 let (target, resource) =
                     opsclaw::cli::config_cmd::add_resource(&mut prompter, cfg_path, &store)?;
                 println!(
-                    "added {}::{} to {target} in {} (restart the daemon to pick it up)",
+                    "added {}::{} to {target} in {}",
                     resource.rtype(),
                     resource.name(),
                     cfg_path.display()
                 );
+                println!("{}", opsclaw::cli::config_edit::restart_hint());
             }
             ConfigCommand::Validate { json } => {
                 let errors = opsclaw::cli::config_cmd::validate(cfg_path)?;
@@ -702,12 +696,12 @@ async fn dispatch(
                 };
                 opsclaw::cli::config_edit::apply(cfg_path, &body)?;
                 println!("{} written", cfg_path.display());
-                println!("{RESTART_TO_APPLY}");
+                println!("{}", opsclaw::cli::config_edit::restart_hint());
             }
             ConfigCommand::Edit => match opsclaw::cli::config_edit::edit(cfg_path)? {
                 opsclaw::cli::config_edit::EditOutcome::Applied => {
                     println!("{} written", cfg_path.display());
-                    println!("{RESTART_TO_APPLY}");
+                    println!("{}", opsclaw::cli::config_edit::restart_hint());
                 }
                 opsclaw::cli::config_edit::EditOutcome::Unchanged => {
                     println!("no changes — {} left alone", cfg_path.display());
@@ -721,7 +715,7 @@ async fn dispatch(
                      not preserved (the previous file is at {}.bak)",
                     cfg_path.display()
                 );
-                println!("{RESTART_TO_APPLY}");
+                println!("{}", opsclaw::cli::config_edit::restart_hint());
             }
         },
 

@@ -39,9 +39,11 @@ impl Report {
 }
 
 /// Run every check against the config at `config_path` (file-or-default,
-/// same rule as `Config::load`). `db_path`: explicit override, else
-/// `config.daemon.db_path`, else skip the DB check entirely (no daemon has
-/// ever run here — not itself a failure, `daemon` would create it on boot).
+/// same rule as `Config::load`). The database checked is
+/// [`effective_db_path`]'s — `config.daemon.db_path`, else an existing
+/// `<home>/opsclaw.sqlite3` — and only when neither exists is the DB check
+/// skipped (no daemon has ever run here — not itself a failure, `daemon`
+/// would create it on boot).
 pub async fn run(config_path: &std::path::Path, opsclaw_home: &std::path::Path) -> Result<Report> {
     let mut checks = Vec::new();
 
@@ -94,7 +96,7 @@ pub async fn run(config_path: &std::path::Path, opsclaw_home: &std::path::Path) 
     checks.extend(check_targets(&cfg, opsclaw_home).await);
 
     // 4. DB open/migrate.
-    let db_path = cfg.daemon.db_path.clone().map(|p| p.display().to_string());
+    let db_path = effective_db_path(&cfg, opsclaw_home);
     checks.push(check_db(db_path.as_deref()).await);
 
     // 5. Hindsight reachability (only if configured — absent is fakes mode,
@@ -107,11 +109,34 @@ pub async fn run(config_path: &std::path::Path, opsclaw_home: &std::path::Path) 
     // ready for the configured provider — the precondition an auth.provider
     // flip stakes everything on.
     checks.push(check_auth_provider(&cfg).await);
-    checks.push(
-        check_account_linkage(&cfg, cfg.daemon.db_path.as_deref().and_then(|p| p.to_str())).await,
-    );
+    checks.push(check_account_linkage(&cfg, db_path.as_deref()).await);
 
     Ok(Report { checks })
+}
+
+/// The database the daemon will actually open: an explicit `daemon.db_path`,
+/// else `<home>/opsclaw.sqlite3` IF that file already exists.
+///
+/// The fallback is the point. `boot::daemon_state` (src/boot.rs), the CLI's
+/// own `db_path_from_config`, and `onboard`'s account wizard all default to
+/// `<home>/opsclaw.sqlite3` when config declares nothing — doctor was the
+/// only caller that did not, so on a default install it reported
+/// "no daemon.db_path configured" and skipped both the DB check and the
+/// operator roster. That made `[OK] operator linkage` a check of nothing,
+/// seconds after `onboard` had written an account into exactly that file,
+/// and it silently voided the pre-flip roster check CHANGELOG.md tells
+/// operators to trust before switching `auth.provider` to `hanko`.
+///
+/// Gated on `exists()` rather than defaulting unconditionally because
+/// `check_db` CONNECTS, and connecting creates: an unconditional default
+/// would have `doctor` — a read-only diagnostic — create the daemon's
+/// database as a side effect of being run.
+fn effective_db_path(cfg: &Config, opsclaw_home: &std::path::Path) -> Option<String> {
+    if let Some(path) = &cfg.daemon.db_path {
+        return Some(path.display().to_string());
+    }
+    let default = opsclaw_home.join("opsclaw.sqlite3");
+    default.exists().then(|| default.display().to_string())
 }
 
 fn check_secrets(cfg: &Config, opsclaw_home: &std::path::Path) -> Result<Vec<CheckResult>> {
@@ -248,7 +273,7 @@ async fn check_db(db_path: Option<&str>) -> CheckResult {
         return CheckResult {
             name: "database".into(),
             ok: true,
-            detail: "no daemon.db_path configured — daemon will create one on first boot".into(),
+            detail: "no database exists yet — the daemon will create one on first boot".into(),
         };
     };
     match crate::db::Db::connect(path).await {
@@ -360,7 +385,7 @@ async fn check_account_linkage(cfg: &Config, db_path: Option<&str>) -> CheckResu
     let hanko = cfg.auth.provider == crate::config::AuthProvider::Hanko;
 
     let Some(path) = db_path else {
-        return result(true, "no daemon.db_path configured — no roster to check".into());
+        return result(true, "no database exists yet — no roster to check".into());
     };
     let db = match crate::db::Db::connect(path).await {
         Ok(db) => db,
@@ -428,6 +453,39 @@ async fn check_account_linkage(cfg: &Config, db_path: Option<&str>) -> CheckResu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_existing_default_database_is_the_one_doctor_checks() {
+        // The regression this exists for: `daemon.db_path` unset is the
+        // DEFAULT install, and `boot::daemon_state` still opens
+        // `<home>/opsclaw.sqlite3`. Doctor skipping it made both the DB
+        // check and the operator roster silently vacuous — reported as OK.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::default();
+        assert!(cfg.daemon.db_path.is_none(), "guards the premise of this test");
+
+        assert_eq!(effective_db_path(&cfg, dir.path()), None, "nothing written yet");
+
+        let db = dir.path().join("opsclaw.sqlite3");
+        std::fs::write(&db, b"").unwrap();
+        assert_eq!(
+            effective_db_path(&cfg, dir.path()),
+            Some(db.display().to_string()),
+            "an existing default-path database must be checked, not skipped"
+        );
+    }
+
+    #[test]
+    fn an_explicit_db_path_wins_and_is_never_gated_on_existence() {
+        // Unlike the fallback, an explicitly configured path that does not
+        // exist is a real finding — `check_db` reporting it unopenable is
+        // the point, so this must NOT be existence-gated into a pass.
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        let explicit = dir.path().join("elsewhere.sqlite3");
+        cfg.daemon.db_path = Some(explicit.clone());
+        assert_eq!(effective_db_path(&cfg, dir.path()), Some(explicit.display().to_string()));
+    }
 
     #[tokio::test]
     async fn fully_faked_config_is_all_green() {

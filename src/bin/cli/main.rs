@@ -546,21 +546,34 @@ async fn dispatch(
             hanko_api_url,
             hanko_audience,
         } => {
+            // Built for BOTH paths: under `--yes` these are the answers, and
+            // interactively they are the prompt defaults. Previously only the
+            // `--yes` branch saw them, so `--hindsight-url` (which the
+            // compose file's own documented onboarding command passes) was
+            // accepted by clap and then silently ignored.
+            let opts = opsclaw::cli::onboard::NonInteractiveOptions {
+                openrouter_api_key_env,
+                models,
+                hindsight_url,
+                telegram_bot_token_env,
+                deadman_url,
+                auth_provider,
+                hanko_api_url,
+                hanko_audience,
+            };
             if yes {
-                let opts = opsclaw::cli::onboard::NonInteractiveOptions {
-                    openrouter_api_key_env,
-                    models,
-                    hindsight_url,
-                    telegram_bot_token_env,
-                    deadman_url,
-                    auth_provider,
-                    hanko_api_url,
-                    hanko_audience,
-                };
                 let outcome =
                     opsclaw::cli::onboard::run_non_interactive(&opts, cfg_path, home).await?;
                 for line in &outcome.summary {
                     println!("  {line}");
+                }
+                // Advisory, and deliberately after the write: a model this
+                // catalogue does not list may simply be newer than the
+                // catalogue, so it must not block a scripted install.
+                if let Some(warning) =
+                    opsclaw::cli::onboard::unknown_model_warning(&opts.models).await
+                {
+                    println!("  {warning}");
                 }
                 println!("config written to {}", outcome.config_path);
             } else {
@@ -568,7 +581,7 @@ async fn dispatch(
                 // chained follow-on stages) through the prompter — printing
                 // the outcome again here would just repeat it.
                 let mut prompter = StdioPrompter::new();
-                opsclaw::cli::onboard::run(&mut prompter, cfg_path, home).await?;
+                opsclaw::cli::onboard::run(&mut prompter, &opts, cfg_path, home).await?;
             }
         }
 

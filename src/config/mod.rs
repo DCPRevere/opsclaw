@@ -1037,7 +1037,12 @@ impl Config {
     }
 
     /// [`Self::value_is_configured`] against the live environment.
-    fn env_configured(name: &str) -> bool {
+    ///
+    /// `pub(crate)` so the onboarding wizard suggests defaults by exactly the
+    /// rule the overlay applies, rather than a second opinion: a prompt that
+    /// offered `OPENROUTER_API_KEY` on the strength of a blank value would
+    /// steer the operator into the very crash-loop v0.1.1 fixed.
+    pub(crate) fn env_configured(name: &str) -> bool {
         Self::value_is_configured(std::env::var_os(name).as_deref())
     }
 

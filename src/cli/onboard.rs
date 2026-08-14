@@ -14,7 +14,9 @@
 //! [`run_non_interactive`] (`--yes`, flag-driven, for CI/scripted installs —
 //! DESIGN.md doesn't mandate a flag surface here, but a wizard with no
 //! non-interactive escape hatch is untestable in CI by construction, so this
-//! exists from day one rather than being bolted on later).
+//! exists from day one rather than being bolted on later). Both read the
+//! same [`NonInteractiveOptions`]: a flag that means something under `--yes`
+//! means the same thing interactively, as the prompt's default.
 
 use std::path::Path;
 
@@ -38,11 +40,17 @@ pub struct OnboardOutcome {
     pub summary: Vec<String>,
 }
 
-/// Flags for the non-interactive path (`onboard --yes`). Every field is
-/// optional — an unset field is left at `Config::default()` for that
-/// section, which is the fully-faked, self-validating boot DESIGN.md §3
-/// promises ("with zero config the whole daemon runs and self-validates on
-/// fakes").
+/// The `onboard` flags. Named for the path they were built for, but read by
+/// BOTH: under `--yes` these are the answers, and interactively they are the
+/// prompt defaults ([`ask_defaulted`]). Wiring only the scripted path to them
+/// is what made `--hindsight-url` a flag clap accepted and the wizard
+/// ignored — including in the onboarding command `deploy/docker-compose.yml`
+/// documents.
+///
+/// Every field is optional — an unset field is left at `Config::default()`
+/// for that section, which is the fully-faked, self-validating boot
+/// DESIGN.md §3 promises ("with zero config the whole daemon runs and
+/// self-validates on fakes").
 #[derive(Debug, Default, Clone)]
 pub struct NonInteractiveOptions {
     pub openrouter_api_key_env: Option<String>,
@@ -326,13 +334,152 @@ async fn wizard_account(p: &mut dyn Prompter, cfg: &Config, opsclaw_home: &Path)
     Ok(out.email)
 }
 
-/// Interactive path: ask, don't assume. Every question has a sensible
-/// default (empty = skip that integration, matching fakes mode) so an
-/// operator can hit enter through the whole thing and land on a fully-faked,
-/// self-validating daemon — exactly what `Config::default()` already is,
-/// made discoverable through a guided walkthrough instead of silence.
+/// Ask a question that may already have a discovered answer.
+///
+/// With no default this is `p.ask(q, None)` unchanged: blank means skip, and
+/// no new vocabulary is introduced where there is nothing to suggest. With a
+/// default, blank now means TAKE IT — so the operator who presses enter
+/// through the wizard lands on the setup their environment already describes
+/// instead of on fakes — and `none` is the explicit way to decline. The skip
+/// token is spelled out in the prompt precisely because the meaning of blank
+/// flips: an unannounced flip would silently configure things for operators
+/// who were deliberately skipping.
+fn ask_defaulted(p: &mut dyn Prompter, question: &str, default: Option<&str>) -> Result<String> {
+    let Some(default) = default.filter(|d| !d.is_empty()) else {
+        return p.ask(question, None);
+    };
+    let answer =
+        p.ask(&format!("{question} (enter to accept, \"none\" to skip)"), Some(default))?;
+    Ok(if answer.eq_ignore_ascii_case("none") { String::new() } else { answer })
+}
+
+/// The default for the LLM key prompt, best evidence first: an explicit
+/// `--openrouter-api-key-env`, else the reference an earlier run already
+/// wrote, else the conventional variable name IF it actually holds a value.
+///
+/// The last clause uses [`Config::env_configured`] rather than a bare
+/// `var_os().is_some()` on purpose — `.env.example` ships blank optional
+/// credentials, and suggesting a name backed by an empty value is how the
+/// v0.1.1 crash-loop started.
+fn default_llm_key_env(opts: &NonInteractiveOptions, cfg: &Config) -> Option<String> {
+    if let Some(name) = opts.openrouter_api_key_env.as_ref().filter(|n| !n.is_empty()) {
+        return Some(name.clone());
+    }
+    if let Some(SecretRef::Env(name)) = &cfg.llm.api_key {
+        return Some(name.clone());
+    }
+    Config::env_configured(OPENROUTER_KEY_VAR).then(|| OPENROUTER_KEY_VAR.to_string())
+}
+
+/// Flag, else what config already holds, else the environment variable the
+/// daemon itself reads for this setting.
+fn default_from_flag_config_or_env(
+    flag: Option<&str>,
+    from_config: Option<&str>,
+    env_var: &str,
+) -> Option<String> {
+    flag.filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| from_config.filter(|v| !v.is_empty()).map(str::to_string))
+        .or_else(|| {
+            Config::env_configured(env_var)
+                .then(|| std::env::var(env_var).ok())
+                .flatten()
+                .map(|v| v.trim().to_string())
+        })
+}
+
+const OPENROUTER_KEY_VAR: &str = "OPENROUTER_API_KEY";
+const TELEGRAM_TOKEN_VAR: &str = "TELEGRAM_BOT_TOKEN";
+const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+
+/// Warn about model ids OpenRouter's public catalogue does not list.
+///
+/// A mistyped id is accepted by every layer below this one: `validate()`
+/// only checks that the list is non-empty when a key is set, and `doctor`
+/// checks that the KEY resolves, not that the MODEL exists. So the first
+/// symptom is a failed reasoning call during a real incident — the worst
+/// possible moment to discover a typo made at install time.
+///
+/// Warns, never refuses, and treats every failure as silence. The catalogue
+/// is a remote service reached over a network that may be air-gapped,
+/// proxied, or simply down; an operator must never be blocked from
+/// onboarding because a third-party endpoint is unreachable, and a
+/// legitimately new model that this catalogue lags behind must not be
+/// rejected either. The check is worth having only because it is advisory.
+async fn warn_on_unknown_models(p: &mut dyn Prompter, models: &[String]) {
+    if let Some(warning) = unknown_model_warning(models).await {
+        p.say(&format!("  {warning}"));
+    }
+}
+
+/// [`warn_on_unknown_models`]'s finding as a line, so `--yes` can carry the
+/// same warning where it has no prompter to say it through: a scripted
+/// install mistypes a model as readily as a human does.
+///
+/// Called from the CLI binary rather than from [`run_non_interactive`]
+/// itself, deliberately. This reaches the network, and a library function
+/// that unit tests drive must not — a test asserting on config-writing would
+/// otherwise make a live third-party request as a side effect, going slow
+/// when the network is slow and leaking test traffic off the machine. The
+/// comparison itself is pure and tested; only the fetch is not.
+pub async fn unknown_model_warning(models: &[String]) -> Option<String> {
+    if models.is_empty() {
+        return None;
+    }
+    // Offline, proxied, slow, or an unexpected payload: say nothing.
+    let known = fetch_openrouter_model_ids().await?;
+    let unknown = unknown_model_ids(models, &known);
+    if unknown.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "warning: OpenRouter does not list {} — check for a typo; an unknown model is accepted \
+         here and fails at the first reasoning call, not at `doctor`",
+        unknown.join(", ")
+    ))
+}
+
+/// The ids in `models` that `known` does not contain. Split out from the
+/// fetch so the decision is testable without a network.
+fn unknown_model_ids<'a>(
+    models: &'a [String],
+    known: &std::collections::HashSet<String>,
+) -> Vec<&'a str> {
+    models.iter().map(String::as_str).filter(|m| !known.contains(*m)).collect()
+}
+
+/// The `id` of every model OpenRouter currently publishes, or `None` if the
+/// catalogue could not be read for any reason. No API key: this endpoint is
+/// public, and onboarding must be able to check a model list before any key
+/// has been proven to work.
+async fn fetch_openrouter_model_ids() -> Option<std::collections::HashSet<String>> {
+    let client =
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build().ok()?;
+    let body: serde_json::Value =
+        client.get(OPENROUTER_MODELS_URL).send().await.ok()?.json().await.ok()?;
+    let ids: std::collections::HashSet<String> = body
+        .get("data")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| m.get("id")?.as_str().map(str::to_string))
+        .collect();
+    // An empty catalogue means the shape changed under us, not that no model
+    // exists — treat it as unreadable so every id is left unwarned.
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// Interactive path: ask, don't assume — but do not re-ask for what is
+/// already known. Flags and the surrounding environment become prompt
+/// DEFAULTS (see [`ask_defaulted`]), so `--hindsight-url` is honoured here
+/// as well as under `--yes`, and a compose install whose `.env` already
+/// names every credential can be walked through with the enter key. Where
+/// nothing is discoverable the old rule stands: blank skips that
+/// integration and lands on the fully-faked, self-validating daemon
+/// `Config::default()` already is.
 pub async fn run(
     p: &mut dyn Prompter,
+    opts: &NonInteractiveOptions,
     config_path: &Path,
     opsclaw_home: &Path,
 ) -> Result<OnboardOutcome> {
@@ -350,8 +497,11 @@ pub async fn run(
 
     p.say("[llm] OpsClaw reasons with an OpenRouter model. The API key is stored by REFERENCE");
     p.say("      (the env var's NAME) — the key's value never enters the config file.");
-    let llm_key_env =
-        p.ask("OpenRouter API key env var name (blank to skip; sets fakes-mode LLM)", None)?;
+    let llm_key_env = ask_defaulted(
+        p,
+        "OpenRouter API key env var name (blank to skip; sets fakes-mode LLM)",
+        default_llm_key_env(opts, &cfg).as_deref(),
+    )?;
     if !llm_key_env.is_empty() {
         if std::env::var(&llm_key_env).is_err() {
             p.say(&format!(
@@ -360,10 +510,19 @@ pub async fn run(
             ));
         }
         cfg.llm.api_key = Some(SecretRef::env(&llm_key_env));
-        let models_raw =
-            p.ask("comma-separated OpenRouter model list (required if a key is set)", None)?;
+        let models_default = default_from_flag_config_or_env(
+            (!opts.models.is_empty()).then(|| opts.models.join(",")).as_deref(),
+            (!cfg.llm.models.is_empty()).then(|| cfg.llm.models.join(",")).as_deref(),
+            "OPSCLAW_MODELS",
+        );
+        let models_raw = ask_defaulted(
+            p,
+            "comma-separated OpenRouter model list (required if a key is set)",
+            models_default.as_deref(),
+        )?;
         cfg.llm.models =
             models_raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        warn_on_unknown_models(p, &cfg.llm.models).await;
         summary.push(format!("LLM: env:{llm_key_env}, {} model(s)", cfg.llm.models.len()));
     } else {
         summary.push("LLM: not configured (fakes mode)".to_string());
@@ -371,8 +530,16 @@ pub async fn run(
 
     p.say("[memory] Hindsight is the optional long-term memory service; without it, memory");
     p.say("         features run as an honest no-op.");
-    let hindsight_url =
-        p.ask("Hindsight URL (blank to skip; memory runs as an honest no-op)", None)?;
+    let hindsight_url = ask_defaulted(
+        p,
+        "Hindsight URL (blank to skip; memory runs as an honest no-op)",
+        default_from_flag_config_or_env(
+            opts.hindsight_url.as_deref(),
+            cfg.memory.hindsight_url.as_deref(),
+            "HINDSIGHT_URL",
+        )
+        .as_deref(),
+    )?;
     if !hindsight_url.is_empty() {
         cfg.memory.hindsight_url = Some(hindsight_url.clone());
         summary.push(format!("Memory: {hindsight_url}"));
@@ -382,7 +549,21 @@ pub async fn run(
 
     p.say("[telegram] optional chat channel for alerts and approvals; the bot token is stored");
     p.say("           by env-var REFERENCE, like the LLM key.");
-    let telegram_env = p.ask("Telegram bot token env var name (blank to skip)", None)?;
+    let telegram_default = opts
+        .telegram_bot_token_env
+        .clone()
+        .or_else(|| match &cfg.telegram.bot_token {
+            Some(SecretRef::Env(name)) => Some(name.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            Config::env_configured(TELEGRAM_TOKEN_VAR).then(|| TELEGRAM_TOKEN_VAR.to_string())
+        });
+    let telegram_env = ask_defaulted(
+        p,
+        "Telegram bot token env var name (blank to skip)",
+        telegram_default.as_deref(),
+    )?;
     if !telegram_env.is_empty() {
         if std::env::var(&telegram_env).is_err() {
             p.say(&format!(
@@ -398,9 +579,15 @@ pub async fn run(
 
     p.say("[dead-man] an external heartbeat URL (e.g. healthchecks.io) that alerts you when");
     p.say("           OpsClaw itself dies — essential if it runs inside a cluster it monitors.");
-    let deadman_url = p.ask(
+    let deadman_url = ask_defaulted(
+        p,
         "external dead-man heartbeat URL (blank to skip; REQUIRED for in-cluster installs)",
-        None,
+        default_from_flag_config_or_env(
+            opts.deadman_url.as_deref(),
+            cfg.daemon.deadman_url.as_deref(),
+            "OPSCLAW_DEADMAN_URL",
+        )
+        .as_deref(),
     )?;
     if !deadman_url.is_empty() {
         cfg.daemon.deadman_url = Some(deadman_url.clone());
@@ -768,7 +955,8 @@ mod tests {
             "n",                     // chained doctor run: skip
         ]);
 
-        let outcome = run(&mut p, &config_path, dir.path()).await.unwrap();
+        let outcome =
+            run(&mut p, &NonInteractiveOptions::default(), &config_path, dir.path()).await.unwrap();
         assert!(outcome.config_created);
         let cfg = Config::load(Some(&config_path)).unwrap();
         assert_eq!(cfg.daemon.deadman_url.as_deref(), Some("https://hc-ping.com/x"));
@@ -792,6 +980,7 @@ mod tests {
             "prod",      // env name
             "",          // env autonomy: inherit
             "running",   // env expected_state
+            "y",         // add a target now? yes
             "this-host", // target name
             "local",     // target kind (no credential prompt)
             "",          // address
@@ -810,7 +999,8 @@ mod tests {
             "y",
         ]);
 
-        let outcome = run(&mut p, &config_path, dir.path()).await.unwrap();
+        let outcome =
+            run(&mut p, &NonInteractiveOptions::default(), &config_path, dir.path()).await.unwrap();
         assert!(outcome.config_created);
 
         let cfg = Config::load(Some(&config_path)).unwrap();
@@ -836,13 +1026,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_hindsight_url_flag_reaches_the_interactive_prompt() {
+        // The regression: `--hindsight-url` was read only under `--yes`, so
+        // the onboarding command deploy/docker-compose.yml documents passed
+        // it, the operator pressed enter, and memory was written as "not
+        // configured" — while the compose file's own HINDSIGHT_URL env turned
+        // memory ON at runtime. Config and behaviour disagreed.
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let opts = NonInteractiveOptions {
+            hindsight_url: Some("http://opsclaw-hindsight:8888".into()),
+            ..Default::default()
+        };
+        let mut p = ScriptedPrompter::new([
+            "",  // llm key env: skip
+            "",  // hindsight url: ENTER — must take the flag, not skip
+            "",  // telegram env: skip
+            "",  // deadman url: skip
+            "",  // auth provider: default (local)
+            "n", // project wizard: skip
+            "n", // account: skip
+            "n", // doctor: skip
+        ]);
+
+        run(&mut p, &opts, &config_path, dir.path()).await.unwrap();
+
+        let cfg = Config::load(Some(&config_path)).unwrap();
+        assert_eq!(cfg.memory.hindsight_url.as_deref(), Some("http://opsclaw-hindsight:8888"));
+    }
+
+    #[tokio::test]
+    async fn none_is_how_you_decline_a_discovered_default() {
+        // The counterpart to the test above: a default must not become a
+        // value the operator cannot refuse, or the flip in what blank means
+        // would take away the ability to skip.
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let opts = NonInteractiveOptions {
+            hindsight_url: Some("http://opsclaw-hindsight:8888".into()),
+            ..Default::default()
+        };
+        let mut p = ScriptedPrompter::new(["", "none", "", "", "", "n", "n", "n"]);
+
+        run(&mut p, &opts, &config_path, dir.path()).await.unwrap();
+
+        let cfg = Config::load(Some(&config_path)).unwrap();
+        assert_eq!(cfg.memory.hindsight_url, None);
+    }
+
+    #[test]
+    fn ask_defaulted_only_changes_the_meaning_of_blank_when_it_has_something_to_offer() {
+        // No default: byte-for-byte the old behaviour, including the question
+        // text — operators who skip must not be taught new vocabulary that
+        // does not apply to them.
+        let mut p = ScriptedPrompter::new([""]);
+        assert_eq!(ask_defaulted(&mut p, "q", None).unwrap(), "");
+        assert_eq!(p.asked, vec!["q".to_string()]);
+
+        // An empty-string default is not a default.
+        let mut p = ScriptedPrompter::new([""]);
+        assert_eq!(ask_defaulted(&mut p, "q", Some("")).unwrap(), "");
+        assert_eq!(p.asked, vec!["q".to_string()]);
+
+        // With one, blank takes it and the skip token is spelled out.
+        let mut p = ScriptedPrompter::new([""]);
+        assert_eq!(ask_defaulted(&mut p, "q", Some("found")).unwrap(), "found");
+        assert!(p.asked[0].contains("\"none\" to skip"), "{:?}", p.asked);
+
+        // An explicit answer still wins over the default.
+        let mut p = ScriptedPrompter::new(["typed"]);
+        assert_eq!(ask_defaulted(&mut p, "q", Some("found")).unwrap(), "typed");
+
+        // And "none" means skip, case-insensitively.
+        let mut p = ScriptedPrompter::new(["NONE"]);
+        assert_eq!(ask_defaulted(&mut p, "q", Some("found")).unwrap(), "");
+    }
+
+    #[test]
+    fn unknown_model_ids_are_exactly_those_the_catalogue_omits() {
+        let known: std::collections::HashSet<String> =
+            ["deepseek/deepseek-v4-flash-0731", "openai/gpt-4o-mini"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+
+        let all_good = vec!["openai/gpt-4o-mini".to_string()];
+        assert!(unknown_model_ids(&all_good, &known).is_empty());
+
+        // The failure this guards: a typo is accepted by validate() (which
+        // only checks the list is non-empty) and by doctor (which checks the
+        // KEY resolves, not the MODEL), so without this it first surfaces as
+        // a failed reasoning call mid-incident.
+        let typo = vec!["deepseek/deepseek-v4-flash-0713".to_string()];
+        assert_eq!(unknown_model_ids(&typo, &known), vec!["deepseek/deepseek-v4-flash-0713"]);
+
+        assert!(unknown_model_ids(&[], &known).is_empty());
+    }
+
+    #[test]
+    fn the_llm_key_default_prefers_the_flag_then_the_existing_config() {
+        // Deliberately no env-var mutation: OPENROUTER_API_KEY is
+        // process-global and setting it corrupts every test running in
+        // parallel. Flag and config precedence are testable without it.
+        let mut cfg = Config::default();
+        assert_eq!(default_llm_key_env(&NonInteractiveOptions::default(), &cfg), None);
+
+        cfg.llm.api_key = Some(SecretRef::env("FROM_CONFIG"));
+        assert_eq!(
+            default_llm_key_env(&NonInteractiveOptions::default(), &cfg).as_deref(),
+            Some("FROM_CONFIG"),
+            "a rerun must offer back what the last run wrote"
+        );
+
+        let opts = NonInteractiveOptions {
+            openrouter_api_key_env: Some("FROM_FLAG".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            default_llm_key_env(&opts, &cfg).as_deref(),
+            Some("FROM_FLAG"),
+            "an explicit flag outranks what is already on disk"
+        );
+
+        // A store: reference is not an env var NAME, so it cannot answer this
+        // prompt — offering "vapid_private_key" here would be nonsense.
+        cfg.llm.api_key = Some(SecretRef::store("some-key"));
+        assert_eq!(default_llm_key_env(&NonInteractiveOptions::default(), &cfg), None);
+    }
+
+    #[tokio::test]
     async fn chained_flow_skips_print_the_standalone_commands() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         // llm, hindsight, telegram, deadman, auth provider, then three skips.
         let mut p = ScriptedPrompter::new(["", "", "", "", "", "n", "n", "n"]);
 
-        run(&mut p, &config_path, dir.path()).await.unwrap();
+        run(&mut p, &NonInteractiveOptions::default(), &config_path, dir.path()).await.unwrap();
 
         let said = p.said.join("\n");
         assert!(said.contains("`opsclaw-cli config project add`"), "{said}");
@@ -872,7 +1191,7 @@ mod tests {
             "n", // chained doctor run: skip (it would call out to hanko)
         ]);
 
-        run(&mut p, &config_path, dir.path()).await.unwrap();
+        run(&mut p, &NonInteractiveOptions::default(), &config_path, dir.path()).await.unwrap();
 
         let cfg = Config::load(Some(&config_path)).unwrap();
         cfg.validate().unwrap();
@@ -927,7 +1246,7 @@ mod tests {
 
         // Blank answers all the way through the rerun.
         let mut p = ScriptedPrompter::new(["", "", "", "", "", "", "", "n", "n", "n"]);
-        run(&mut p, &config_path, dir.path()).await.unwrap();
+        run(&mut p, &NonInteractiveOptions::default(), &config_path, dir.path()).await.unwrap();
 
         let cfg = Config::load(Some(&config_path)).unwrap();
         assert_eq!(cfg.auth.provider, AuthProvider::Hanko, "{:?}", p.said);

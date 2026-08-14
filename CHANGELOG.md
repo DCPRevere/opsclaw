@@ -4,6 +4,79 @@ Operator-facing changes. Anything that needs manual work at upgrade time
 carries a **Deploying** note (AGENTS.md); read those before rolling a
 release out.
 
+## Unreleased
+
+### `doctor` checked the operator roster it could not see
+
+`check_db` and `check_account_linkage` ran only when `daemon.db_path` was set
+explicitly. Everything else — `boot::daemon_state`, the CLI's own db-path
+resolution, and `onboard`'s account wizard — falls back to
+`<home>/opsclaw.sqlite3` when config declares nothing, which is the DEFAULT
+install. So on a standard setup `onboard` wrote an operator account and then
+its own chained `doctor` reported `[OK] operator linkage: no daemon.db_path
+configured — no roster to check`, seconds later, about that exact file.
+
+The consequence is worse than a cosmetic gap: this changelog tells operators
+to use `doctor` to find unlinked accounts before flipping `auth.provider` to
+`hanko`, and warns that flipping with an unlinked roster locks everyone out.
+For any deployment that never set `db_path`, that check was inspecting
+nothing and passing. Doctor now resolves the same path the daemon will open.
+It is still gated on the file EXISTING, because `check_db` connects and
+connecting creates — a read-only diagnostic must not create the daemon's
+database as a side effect of being run.
+
+### Onboarding no longer asks for what it already knows
+
+**`--hindsight-url` was accepted and ignored.** The flag reached only the
+`--yes` path; interactively the prompt hardcoded no default. The onboarding
+command in `deploy/docker-compose.yml` passes it, so operators following the
+documented install answered a question the flag was supposed to have
+answered — and pressing enter wrote "memory: not configured" while the
+compose file's own `HINDSIGHT_URL` turned memory on at runtime, leaving
+config and behaviour disagreeing. Flags now feed both paths.
+
+**Blank meant "fake it", not "use the obvious value".** Where a flag, the
+existing config, or the environment the daemon runs in already answers a
+question, that answer is now the prompt's default and enter takes it;
+`none` declines it. The skip token is spelled out in the prompt, because the
+meaning of a blank answer flips and an unannounced flip would configure
+things for operators who were deliberately skipping. Where nothing is
+discoverable, blank still skips exactly as before. Detection uses
+`Config::env_configured`, the same rule the env overlay applies, so a blank
+`OPENROUTER_API_KEY` from `.env.example` is not mistaken for a configured one.
+
+**Model ids are checked against OpenRouter.** A typo was accepted by every
+layer: `validate()` only checks the list is non-empty, `doctor` checks the
+KEY resolves rather than the MODEL existing, so the first symptom was a
+failed reasoning call mid-incident. Unknown ids now produce a warning at
+onboard time. Advisory only — an unreachable catalogue, a proxy, or a model
+newer than the catalogue must never block an install.
+
+### An environment can be created with no targets
+
+The wizard's target loop ran once unconditionally, so finishing it REQUIRED
+inventing a target. The only kind needing no credential is `local`, which
+under the docker install resolves to the CONTAINER rather than the host it
+appears to name — so the natural way to get through the wizard produced a
+target whose readings look real and describe the wrong machine. `validate()`
+has always accepted an empty environment; only the prompt did not.
+
+### Containerised targets need their credentials mounted
+
+A credential path in config is opened by the daemon, so it resolves inside
+the container — a host path like `~/.kube/config` is simply not there, and a
+target configured with one fails at first use rather than at `doctor`.
+Nothing said so. `deploy/docker-compose.yml` now documents the mount, and the
+uid trap behind it: the container runs as uid 10001, ssh refuses a
+group-readable private key, so a mounted key needs its own copy owned by that
+uid rather than a relaxed mode.
+
+**Deploying** — no action. Existing configs are read exactly as before; every
+change here is to what `onboard` and `doctor` do, not to what they have
+written. If `doctor` now reports unlinked operator accounts on a deployment
+where it previously said "no roster to check", that finding was always true
+and is only now visible.
+
 ## v0.1.1
 
 ### The standard docker install actually starts

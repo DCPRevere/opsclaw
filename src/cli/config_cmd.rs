@@ -385,14 +385,27 @@ fn wizard_env(p: &mut dyn Prompter, store: &SecretStore) -> Result<EnvCfg> {
         _ => unreachable!(),
     });
 
+    // An environment may legitimately have NO targets yet, and asking first
+    // is what makes that reachable. The loop used to run once unconditionally,
+    // so the only way out of the wizard was to invent a target — and the only
+    // kind needing no credential is `local`, which under the standard docker
+    // install resolves to the CONTAINER, not the host it appears to name.
+    // Forcing that produces a target whose readings look real and describe
+    // the wrong machine. `validate()` has always accepted an empty env; only
+    // this prompt did not.
     let mut targets = Vec::new();
-    loop {
-        p.say(&format!("-- target #{} in environment {name:?} --", targets.len() + 1));
-        p.say("  a target is one machine/cluster OpsClaw can inspect and act on.");
-        targets.push(wizard_target(p, store)?);
-        if !p.confirm("add another target to this environment?", false)? {
-            break;
+    if p.confirm("add a target to this environment now?", true)? {
+        loop {
+            p.say(&format!("-- target #{} in environment {name:?} --", targets.len() + 1));
+            p.say("  a target is one machine/cluster OpsClaw can inspect and act on.");
+            targets.push(wizard_target(p, store)?);
+            if !p.confirm("add another target to this environment?", false)? {
+                break;
+            }
         }
+    } else {
+        p.say("  no targets — nothing in this environment is watched until you add one with");
+        p.say("  `opsclaw-cli config project add`.");
     }
 
     Ok(EnvCfg { name, autonomy, expected_state, targets })
@@ -692,6 +705,38 @@ mod tests {
     }
 
     #[test]
+    fn an_env_can_be_created_with_no_targets_at_all() {
+        // Before this, the target loop ran once unconditionally, so finishing
+        // the wizard REQUIRED inventing a target — and the only kind needing
+        // no credential is `local`, which under the docker install resolves to
+        // the container rather than the host it appears to name. `validate()`
+        // has always accepted an empty env; the prompt was the only obstacle.
+        let (_dir, store) = test_store();
+        let mut p = ScriptedPrompter::new([
+            "remundo", // project name
+            "",        // project autonomy: inherit
+            "dev",     // env name
+            "",        // env autonomy: inherit
+            "running", // env expected_state
+            "n",       // add a target now? NO
+            "n",       // add another env? no
+        ]);
+        let project = wizard_project(&mut p, &store).unwrap();
+        assert_eq!(project.envs.len(), 1);
+        assert!(project.envs[0].targets.is_empty());
+
+        let mut cfg = Config::default();
+        cfg.projects.push(project);
+        cfg.validate().expect("an env with no targets is valid config, not a wizard-only shape");
+
+        assert!(
+            p.said.iter().any(|l| l.contains("nothing in this environment is watched")),
+            "an empty env must say so rather than look like a completed setup: {:?}",
+            p.said
+        );
+    }
+
+    #[test]
     fn wizard_project_single_env_single_target() {
         let (_dir, store) = test_store();
         let mut p = ScriptedPrompter::new([
@@ -700,6 +745,7 @@ mod tests {
             "prod",                    // env name
             "",                        // env autonomy: inherit
             "running",                 // env expected_state
+            "y",                       // add a target now? yes
             "bastion",                 // target name
             "ssh",                     // target kind
             "bastion.remundo.example", // address
@@ -1037,6 +1083,7 @@ mod tests {
             "prod",
             "",
             "running",
+            "y",
             "this-host",
             "local",
             "",
@@ -1067,6 +1114,7 @@ mod tests {
             "prod",
             "",
             "running",
+            "y",
             "this-host",
             "local",
             "",
@@ -1083,6 +1131,7 @@ mod tests {
             "staging",
             "",
             "running",
+            "y",
             "this-host",
             "local",
             "",

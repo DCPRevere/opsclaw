@@ -18,6 +18,14 @@
 #   docker compose --env-file .env up -d
 #   docker compose exec opsclaw-daemon opsclaw-cli doctor
 #
+# Onboarding can end with NO targets, and on a containerised install that is
+# usually right: a target's credential is opened by the daemon, so it has to
+# be mounted into this container first (see the daemon's `volumes:` below).
+# Add targets with `opsclaw-cli config project add` once the mount exists.
+# The one target kind needing no credential, `local`, means THIS CONTAINER —
+# not the host — so it reports the container's own tooling, which is nearly
+# none.
+#
 # Hindsight takes ~40s to load its models. `doctor` run before that reports
 # `[FAIL] hindsight: ... reachable` — wait and re-run rather than debugging
 # it. The daemon itself starts and stays healthy throughout; it does not
@@ -123,6 +131,27 @@ services:
       # opsclaw-daemon opsclaw-cli onboard`) writes config.toml here on first
       # setup.
       - opsclaw_home:/home/opsclaw/.opsclaw
+      # TARGET CREDENTIALS MUST BE MOUNTED. A credential path in config is
+      # opened by the DAEMON, so it is resolved inside this container: a host
+      # path like ~/.kube/config simply does not exist here, and a kubernetes
+      # or ssh target configured with one fails at first use, not at
+      # `doctor`. Mount what each target needs, read-only, and answer the
+      # wizard with the CONTAINER path:
+      #   - ./creds/kubeconfig:/home/opsclaw/creds/kubeconfig:ro
+      #   - ./creds/id_ed25519:/home/opsclaw/creds/id_ed25519:ro
+      #
+      # Mind the uid. This container runs as uid 10001 (deploy/Dockerfile),
+      # which is almost certainly not your host uid — and ssh REFUSES a
+      # private key that is group/world readable, so relaxing the mode is not
+      # the fix. Give the daemon its own copy:
+      #   mkdir -p creds && cp ~/.ssh/id_ed25519 creds/
+      #   sudo chown 10001 creds/id_ed25519 && chmod 600 creds/id_ed25519
+      # A kubeconfig has no such rule; mode 644 is enough for that one.
+      #
+      # On a shared host, `docker inspect` shows every mount to anyone in the
+      # docker group — which is root-equivalent anyway. Scope these
+      # credentials to what this daemon is meant to reach, and prefer keys
+      # issued to it alone so they can be revoked without touching yours.
     ports:
       # Bind to localhost only, same as gianna: front this with a
       # reverse proxy (Caddy/nginx) for TLS, or reach it via VPN/tailnet/SSH

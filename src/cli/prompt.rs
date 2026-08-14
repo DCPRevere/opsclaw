@@ -114,6 +114,11 @@ impl Prompter for StdioPrompter {
 pub struct ScriptedPrompter {
     answers: std::collections::VecDeque<String>,
     pub said: Vec<String>,
+    /// Every question text passed to [`Prompter::ask`], in order. Wizards
+    /// state consequences in the question itself ("enter to accept, \"none\"
+    /// to skip"), so what was ASKED is behaviour worth asserting on, not
+    /// just what was answered.
+    pub asked: Vec<String>,
 }
 
 impl ScriptedPrompter {
@@ -121,12 +126,14 @@ impl ScriptedPrompter {
         ScriptedPrompter {
             answers: answers.into_iter().map(Into::into).collect(),
             said: Vec::new(),
+            asked: Vec::new(),
         }
     }
 }
 
 impl Prompter for ScriptedPrompter {
     fn ask(&mut self, question: &str, default: Option<&str>) -> Result<String> {
+        self.asked.push(question.to_string());
         let answer = self
             .answers
             .pop_front()

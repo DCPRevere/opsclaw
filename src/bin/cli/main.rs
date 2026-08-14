@@ -344,6 +344,13 @@ enum ConfigCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Every project, environment and target, with autonomy and expected
+    /// state RESOLVED through the inheritance chain — the effective values
+    /// the daemon uses, which `show` would make you work out from the TOML.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     /// Print config.toml exactly as it is on disk. Safe to pipe or paste:
     /// config holds secret REFERENCES (env:VAR / store:KEY), never values.
     Show,
@@ -676,6 +683,14 @@ async fn dispatch(
                 }
                 if !errors.is_empty() {
                     std::process::exit(1);
+                }
+            }
+            ConfigCommand::List { json } => {
+                let projects = opsclaw::cli::config_list::list(cfg_path)?;
+                if json {
+                    opsclaw::cli::output::print_json(&projects);
+                } else {
+                    print!("{}", opsclaw::cli::config_list::render(&projects));
                 }
             }
             ConfigCommand::Show => {

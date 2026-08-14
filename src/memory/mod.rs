@@ -823,7 +823,18 @@ mod tests {
     async fn retain_observation_detached_lands_with_scan_framing() {
         let server = MockServer::start().await;
         Mock::given(wiremock::matchers::method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({}))
+                    // Delayed for the same reason as the drain test above: the
+                    // in-flight assertion below reads a counter that the
+                    // SPAWNED task decrements, so against an instant mock the
+                    // task can finish on another worker thread before the
+                    // assertion runs and the count is legitimately 0. Holding
+                    // the response open makes "still in flight" true by
+                    // construction rather than by winning a race.
+                    .set_delay(std::time::Duration::from_millis(300)),
+            )
             .mount(&server)
             .await;
         let memory = memory_against(&server);

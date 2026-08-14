@@ -4,7 +4,7 @@ Operator-facing changes. Anything that needs manual work at upgrade time
 carries a **Deploying** note (AGENTS.md); read those before rolling a
 release out.
 
-## Unreleased
+## v0.2.0
 
 ### The config CLI can now edit, not only append
 

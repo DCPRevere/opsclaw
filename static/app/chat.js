@@ -27,6 +27,7 @@ let streamConnecting = false;
 let streamBackoff = 2000;
 let streamRetryTimer = null;
 let pendingRow = null;
+let pendingTurnId = null;
 // A transport failure does not tell us whether the daemon accepted the POST.
 // Preserve that exact request key for an explicit retry; changing it could
 // execute a second turn after the first already acted.
@@ -57,7 +58,9 @@ export async function openStream() {
   evtSource.addEventListener('message', (e) => {
     let ev = {};
     try { ev = JSON.parse(e.data); } catch (_) { return; }
-    addMsg({ role: 'assistant', content: ev.body && ev.body.text ? ev.body.text : JSON.stringify(ev.body) });
+    if (state.chatConversation === 'operations') {
+      addMsg({ role: 'assistant', content: ev.body && ev.body.text ? ev.body.text : JSON.stringify(ev.body) });
+    }
   });
   // Chat-kind events (`channels::web::WebEvent::chat`): every operator's
   // message, every mid-turn tool call, and every reply arrives here,
@@ -69,10 +72,11 @@ export async function openStream() {
     let ev = {};
     try { ev = JSON.parse(e.data); } catch (_) { return; }
     const body = ev.body || {};
+    if (body.conversation !== state.chatConversation) return;
     // A tool's result landing annotates the ⚙ row already on screen — it
     // is not a new row of its own.
     if (body.role === 'tool_status') { annotateToolStatus(body.speaker, body.text === 'ok'); return; }
-    if (body.role === 'assistant') clearPending();
+    if (body.role === 'assistant' && body.turn_id === pendingTurnId) clearPending();
     addMsg({ role: body.role || 'assistant', speaker: body.speaker, content: body.text || '' });
     if (body.role !== 'assistant' && pendingRow) {
       // Keep the thinking row anchored at the bottom while tool rows stream in.
@@ -87,12 +91,14 @@ export async function openStream() {
   evtSource.addEventListener('approval', (e) => {
     let ev = {};
     try { ev = JSON.parse(e.data); } catch (_) { return; }
-    addApprovalCard(ev.body || {});
+    const body = ev.body || {};
+    if ((body.conversation || 'operations') === state.chatConversation) addApprovalCard(body);
   });
   evtSource.addEventListener('incident', (e) => {
     let ev = {};
     try { ev = JSON.parse(e.data); } catch (_) { return; }
-    addIncidentCard(ev.body || {});
+    const body = ev.body || {};
+    if ((body.conversation || 'operations') === state.chatConversation) addIncidentCard(body);
   });
   evtSource.onerror = () => {
     evtSource.close();
@@ -354,6 +360,7 @@ function showPending() {
 
 function clearPending() {
   if (pendingRow) { pendingRow.remove(); pendingRow = null; }
+  pendingTurnId = null;
 }
 
 function showError(text) {
@@ -370,8 +377,11 @@ function showError(text) {
 // every 'opsclaw:view' -> 'chat' transition. Best-effort: a failed/empty
 // history just leaves the log as-is.
 export async function loadHistory() {
-  const r = await api('/api/chat/history');
+  await loadConversations();
+  const conversation = state.chatConversation;
+  const r = await api('/api/chat/history?conversation=' + encodeURIComponent(conversation));
   if (!r.ok) return;
+  if (conversation !== state.chatConversation) return;
   const log = document.getElementById('chat-log');
   log.innerHTML = '';
   lastMsgDay = null;
@@ -398,8 +408,11 @@ function earlierButton(show) {
 
 async function loadEarlier() {
   if (oldestSeq == null) return;
-  const r = await api('/api/chat/history?before=' + encodeURIComponent(oldestSeq));
+  const conversation = state.chatConversation;
+  const r = await api('/api/chat/history?conversation=' + encodeURIComponent(conversation)
+    + '&before=' + encodeURIComponent(oldestSeq));
   if (!r.ok || !Array.isArray(r.data.history)) return;
+  if (conversation !== state.chatConversation) return;
   const ms = r.data.history;
   if (ms.length) oldestSeq = ms[0].seq;
   const log = document.getElementById('chat-log');
@@ -423,6 +436,14 @@ export function initChat() {
   const input = document.getElementById('chat-input');
   const form = document.getElementById('chat-form');
   const submitBtn = form.querySelector('button[type=submit]');
+  const conversationSelect = document.getElementById('chat-conversation');
+  conversationSelect.addEventListener('change', () => {
+    state.chatConversation = conversationSelect.value;
+    uncertainSend = null;
+    clearPending();
+    updateScopeNote();
+    loadHistory();
+  });
 
   // Selection copy with attribution (gianna): selecting across two or more
   // bubbles copies "Speaker:\ntext" blocks instead of the raw concatenation.
@@ -444,6 +465,7 @@ export function initChat() {
     if (!message) return;
     input.disabled = true;
     submitBtn.disabled = true;
+    conversationSelect.disabled = true;
     try {
       if (!(await ensureStreamOpen())) {
         showError('The live chat connection is not ready — try again.');
@@ -452,16 +474,22 @@ export function initChat() {
       input.value = '';
       showPending();
       const idempotencyKey = uncertainSend && uncertainSend.message === message
+        && uncertainSend.conversation === state.chatConversation
         ? uncertainSend.key
         : ((globalThis.crypto && crypto.randomUUID)
           ? crypto.randomUUID()
           : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
-      const r = await api('/api/chat', 'POST', { message, idempotency_key: idempotencyKey });
+      pendingTurnId = idempotencyKey;
+      const r = await api('/api/chat', 'POST', {
+        message,
+        conversation: state.chatConversation,
+        idempotency_key: idempotencyKey,
+      });
       if (!r.ok) {
         clearPending();
         const stillRunning = r.status === 409 && String(r.data.error || '').includes('already in progress');
         if (r.status === 0 || stillRunning) {
-          uncertainSend = { message, key: idempotencyKey };
+          uncertainSend = { message, key: idempotencyKey, conversation: state.chatConversation };
           input.value = message;
           showError(stillRunning
             ? 'That request is still running — wait, then retry to retrieve its reply.'
@@ -484,7 +512,39 @@ export function initChat() {
     } finally {
       input.disabled = false;
       submitBtn.disabled = false;
+      conversationSelect.disabled = false;
       input.focus();
     }
   });
+}
+
+async function loadConversations() {
+  const select = document.getElementById('chat-conversation');
+  if (select.dataset.loaded === 'true') return;
+  const response = await api('/api/chat/conversations');
+  if (!response.ok) return;
+  const conversations = response.data.conversations || [];
+  select.innerHTML = '';
+  for (const conversation of conversations) {
+    const option = document.createElement('option');
+    option.value = conversation.id;
+    option.textContent = conversation.label;
+    select.appendChild(option);
+  }
+  if (![...select.options].some((option) => option.value === state.chatConversation)) {
+    state.chatConversation = 'operations';
+  }
+  select.value = state.chatConversation;
+  select.dataset.loaded = 'true';
+  updateScopeNote();
+}
+
+function updateScopeNote() {
+  const environment = state.chatConversation !== 'operations';
+  document.getElementById('chat-scope-note').textContent = environment
+    ? 'Shared team context and tools are restricted to this environment.'
+    : 'Team coordination; select an environment to operate on targets.';
+  document.getElementById('chat-input').placeholder = environment
+    ? `Ask about ${state.chatConversation}…`
+    : 'Ask the agent…';
 }

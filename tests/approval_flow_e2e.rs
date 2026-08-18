@@ -277,7 +277,10 @@ async fn operator_at_suggest_approves_a_chat_remediation_and_it_executes_audited
     let chat = client
         .post_json(
             &format!("{base}/api/chat"),
-            &serde_json::json!({ "message": "nginx on web-1 looks wedged — restart it" }),
+            &serde_json::json!({
+                "conversation": "example::prod",
+                "message": "nginx on web-1 looks wedged — restart it"
+            }),
         )
         .await;
     assert_eq!(chat.status(), reqwest::StatusCode::OK);

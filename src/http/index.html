@@ -80,6 +80,10 @@
   .list-item .title strong { display: block; }
   .list-item .title span { color: var(--text-dim); font-size: .85rem; }
   #chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .5rem; margin-bottom: .6rem; }
+  #chat-scope { display: flex; align-items: center; gap: .65rem; margin-bottom: .6rem; flex: none; }
+  #chat-scope label { color: var(--text-dim); font-size: .82rem; }
+  #chat-conversation { min-width: 12rem; }
+  #chat-scope-note { color: var(--text-dim); font-size: .8rem; }
   .msgwrap { max-width: 80%; align-self: flex-start; }
   .msgwrap.out { align-self: flex-end; }
   .msg { padding: .5rem .7rem; border-radius: .6rem; background: var(--panel); border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -181,6 +185,11 @@
   </section>
 
   <section id="chat-view" class="view">
+    <div id="chat-scope">
+      <label for="chat-conversation">Conversation</label>
+      <select id="chat-conversation"><option value="operations">Operations</option></select>
+      <span id="chat-scope-note">Team coordination; select an environment to operate on targets.</span>
+    </div>
     <div id="chat-log"></div>
     <form id="chat-form">
       <input id="chat-input" placeholder="Ask the agent…" autocomplete="off" />

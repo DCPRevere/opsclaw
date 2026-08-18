@@ -15,9 +15,19 @@ pub struct ChatHistoryRow {
 }
 
 pub async fn load(db: &Db, before: Option<i64>, limit: i64) -> Result<Vec<ChatHistoryRow>> {
+    load_scoped(db, "operations", before, limit).await
+}
+
+pub async fn load_scoped(
+    db: &Db,
+    conversation: &str,
+    before: Option<i64>,
+    limit: i64,
+) -> Result<Vec<ChatHistoryRow>> {
+    crate::domain::ChatConversation::parse(conversation)?;
     let rows = match before {
-        Some(seq) => ChatRepo::before_chat(db.repos().as_ref(), seq, limit).await?,
-        None => ChatRepo::recent_chat(db.repos().as_ref(), limit).await?,
+        Some(seq) => ChatRepo::before_chat(db.repos().as_ref(), conversation, seq, limit).await?,
+        None => ChatRepo::recent_chat(db.repos().as_ref(), conversation, limit).await?,
     };
     Ok(rows
         .into_iter()
@@ -42,6 +52,8 @@ mod tests {
         for i in 0..4 {
             ChatRepo::append_chat(
                 db.repos().as_ref(),
+                "operations",
+                None,
                 chrono::Utc::now(),
                 "user",
                 "operator",

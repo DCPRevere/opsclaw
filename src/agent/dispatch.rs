@@ -28,7 +28,7 @@ use crate::agent::{self, AgentDeps};
 use crate::channels::{Channel, ChatHandler};
 use crate::config::{Config, SecretStore};
 use crate::db::{ApprovalRepo, IncidentRepo, RunbookRunRepo};
-use crate::domain::{FqTarget, Job, Payload, Principal};
+use crate::domain::{ChatConversation, FqTarget, Job, Payload, Principal};
 use crate::http::webhook::IngestAlert;
 use crate::llm::{LlmProvider, Turn};
 use crate::memory::{self, Memory};
@@ -54,8 +54,9 @@ pub struct DispatchDeps {
     pub runbooks: Arc<RunbookStore>,
     pub endpoints: Arc<EndpointRegistry>,
     pub llm: Arc<dyn LlmProvider>,
-    /// Conflict-domain gate shared by every entry point. Interactive turns
-    /// exclude all other work; background scans only exclude the same target.
+    /// Conflict-domain gate shared by every entry point. Broad webhook turns
+    /// exclude all work; environment chat excludes that environment; scans
+    /// exclude their exact target.
     pub(crate) turn_gate: crate::agent::turn_gate::TurnGate,
 }
 
@@ -441,22 +442,13 @@ impl IngestAlert for WebhookIngest {
 /// the replayed context bounded without a second token estimator here.
 const TRANSCRIPT_KEEP_ENTRIES: usize = 30;
 
-/// The real, agent-backed [`ChatHandler`]: one conversational turn with the
-/// FULL tool registry (a chat message is the interactive path by
-/// definition) and the SHARED TEAM TRANSCRIPT replayed ahead of it.
-///
-/// One transcript, not per-operator, on purpose: the daemon is the team's
-/// agent (DESIGN §1 — "one daemon = one memory store, with per-operator
-/// attribution on everything said"), so every chat surface — web chat,
-/// each operator's Telegram DM, the CLI REPL — is a window onto the SAME
-/// conversation, exactly like the shared memory bank. Attribution rides in
-/// the message framing (`"{speaker} said: …"`), so the model always knows
-/// who said what. The transcript is in-memory (a restart starts the
-/// conversation fresh); durable knowledge belongs to Memory, which
-/// `retain_turn_detached` already feeds.
+/// The real, agent-backed [`ChatHandler`]. Conversations are team-visible,
+/// never per-operator: `Operations` is the global coordination room and each
+/// configured project environment has its own replay transcript and target
+/// allow-list. Attribution rides in `"{speaker} said: …"` framing.
 pub struct ChatTurn {
     deps: DispatchDeps,
-    transcript: std::sync::Mutex<Vec<Turn>>,
+    transcripts: std::sync::Mutex<std::collections::HashMap<String, Vec<Turn>>>,
     /// Durable side of the shared transcript (migration 0007). `None` only
     /// in tests/fixtures that don't care — every real boot wires it, so a
     /// restart no longer erases the team's chat history.
@@ -476,7 +468,12 @@ const TOOL_EVENT_ARGS_MAX: usize = 400;
 
 impl ChatTurn {
     pub fn new(deps: DispatchDeps) -> Self {
-        ChatTurn { deps, transcript: std::sync::Mutex::new(Vec::new()), chat_log: None, web: None }
+        ChatTurn {
+            deps,
+            transcripts: std::sync::Mutex::new(std::collections::HashMap::new()),
+            chat_log: None,
+            web: None,
+        }
     }
 
     /// Wire the durable log and the live web hub (boot; builder-style so
@@ -500,42 +497,75 @@ impl ChatTurn {
     /// UX feature, not a boot dependency).
     pub async fn hydrate(&self) {
         let Some(log) = &self.chat_log else { return };
-        let rows = match log.recent_chat(TRANSCRIPT_KEEP_ENTRIES as i64 * 2).await {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!(error = %e, "chat transcript hydrate failed — starting empty");
-                return;
-            }
-        };
-        let mut t = self.transcript.lock().expect("chat transcript lock poisoned");
-        for row in rows {
-            match row.role.as_str() {
-                "user" => {
-                    t.push(Turn::User { content: format!("{} said: {}", row.speaker, row.content) })
-                }
-                "assistant" => {
-                    t.push(Turn::Assistant { content: row.content, tool_calls: Vec::new() })
-                }
-                _ => {}
+        let mut conversations = vec![ChatConversation::Operations];
+        for project in &self.deps.config.projects {
+            for environment in &project.envs {
+                conversations.push(ChatConversation::environment(&project.name, &environment.name));
             }
         }
-        if t.len() > TRANSCRIPT_KEEP_ENTRIES {
-            let excess = t.len() - TRANSCRIPT_KEEP_ENTRIES;
-            t.drain(..excess);
+        for conversation in conversations {
+            let id = conversation.id();
+            let rows = match log.recent_chat(&id, TRANSCRIPT_KEEP_ENTRIES as i64 * 2).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!(conversation = %id, error = %e, "chat transcript hydrate failed");
+                    continue;
+                }
+            };
+            let mut transcript = Vec::new();
+            for row in rows {
+                match row.role.as_str() {
+                    "user" => transcript.push(Turn::User {
+                        content: format!("{} said: {}", row.speaker, row.content),
+                    }),
+                    "assistant" => transcript
+                        .push(Turn::Assistant { content: row.content, tool_calls: Vec::new() }),
+                    _ => {}
+                }
+            }
+            if transcript.len() > TRANSCRIPT_KEEP_ENTRIES {
+                transcript.drain(..transcript.len() - TRANSCRIPT_KEEP_ENTRIES);
+            }
+            self.transcripts.lock().expect("chat transcripts lock poisoned").insert(id, transcript);
         }
     }
 
     /// A snapshot of the shared transcript (user/assistant text pairs) —
     /// what a chat surface renders as history on load.
     pub fn transcript(&self) -> Vec<Turn> {
-        self.transcript.lock().expect("chat transcript lock poisoned").clone()
+        self.transcript_for(&ChatConversation::Operations)
+    }
+
+    pub fn transcript_for(&self, conversation: &ChatConversation) -> Vec<Turn> {
+        self.transcripts
+            .lock()
+            .expect("chat transcripts lock poisoned")
+            .get(&conversation.id())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Append one row to the durable log, loudly best-effort (a full disk
     /// must not fail the chat turn the operator is waiting on).
-    async fn log_row(&self, role: &str, speaker: &str, content: &str) {
+    async fn log_row(
+        &self,
+        conversation: &str,
+        turn_id: &str,
+        role: &str,
+        speaker: &str,
+        content: &str,
+    ) {
         if let Some(log) = &self.chat_log
-            && let Err(e) = log.append_chat(chrono::Utc::now(), role, speaker, content).await
+            && let Err(e) = log
+                .append_chat(
+                    conversation,
+                    Some(turn_id),
+                    chrono::Utc::now(),
+                    role,
+                    speaker,
+                    content,
+                )
+                .await
         {
             tracing::warn!(error = %e, role, "chat log append failed — row lost");
         }
@@ -545,11 +575,68 @@ impl ChatTurn {
 #[async_trait]
 impl ChatHandler for ChatTurn {
     async fn chat(&self, principal: Principal, speaker: &str, message: &str) -> Result<String> {
-        let ctx = build_tool_ctx(&self.deps, principal);
-        // Full registry — chat IS the interactive path (same reasoning as
-        // WebhookIngest: a human is on the other end).
-        let registry = tools::registry(&ctx, /* heartbeat = */ false);
-        let team_context = team_context_line(&ctx.known_targets, &self.deps.config);
+        self.chat_scoped(
+            &ChatConversation::Operations,
+            &uuid::Uuid::new_v4().to_string(),
+            principal,
+            speaker,
+            message,
+        )
+        .await
+    }
+
+    async fn chat_scoped(
+        &self,
+        conversation: &ChatConversation,
+        turn_id: &str,
+        principal: Principal,
+        speaker: &str,
+        message: &str,
+    ) -> Result<String> {
+        let conversation_id = conversation.id();
+        if let ChatConversation::Environment { project, environment } = conversation
+            && !self.deps.config.projects.iter().any(|configured_project| {
+                configured_project.name == *project
+                    && configured_project
+                        .envs
+                        .iter()
+                        .any(|configured_environment| configured_environment.name == *environment)
+            })
+        {
+            return Err(crate::Error::NotFound(format!("chat conversation {conversation_id}")));
+        }
+        let mut ctx = build_tool_ctx(&self.deps, principal);
+        ctx.known_targets.retain(|target| conversation.contains(target));
+        // Environment chat receives the interactive registry over its scoped
+        // targets. Operations retains only coordination/context tools.
+        let mut registry = tools::registry(&ctx, /* heartbeat = */ false);
+        if matches!(conversation, ChatConversation::Operations) {
+            registry.retain(|tool| {
+                matches!(
+                    tool.name(),
+                    "web_fetch"
+                        | "recall_memory"
+                        | "store_memory"
+                        | "forget_memory"
+                        | "list_incidents"
+                        | "runbook_list"
+                        | "runbook_history"
+                )
+            });
+        }
+        let team_context = match conversation {
+            ChatConversation::Operations => Some(
+                "Conversation: Operations. Coordinate here; target operations require selecting an environment conversation."
+                    .to_string(),
+            ),
+            ChatConversation::Environment { project, environment } => {
+                let scope = format!("Conversation: {project} / {environment}. Every target tool is restricted to this environment.");
+                Some(match team_context_line(&ctx.known_targets, &self.deps.config) {
+                    Some(targets) => format!("{scope} {targets}"),
+                    None => format!("{scope} No targets are configured in this environment."),
+                })
+            }
+        };
 
         // Live tool visibility: each tool call the model makes is published
         // to the SSE hub as it happens (role "tool" on Called, role
@@ -565,6 +652,8 @@ impl ChatHandler for ChatTurn {
         let on_tool: Option<crate::agent::ToolObserver> = {
             let rows = tool_rows.clone();
             let web = self.web.clone();
+            let conversation_id = conversation_id.clone();
+            let turn_id = turn_id.to_string();
             Some(Arc::new(move |event: crate::agent::ToolEvent<'_>| match event {
                 crate::agent::ToolEvent::Called { name, args } => {
                     let mut shown = crate::policy::Scrubber::global().scrub(args);
@@ -577,7 +666,13 @@ impl ChatHandler for ChatTurn {
                         shown.push('…');
                     }
                     if let Some(web) = &web {
-                        web.publish(crate::channels::web::WebEvent::chat("tool", name, &shown));
+                        web.publish(crate::channels::web::WebEvent::chat(
+                            &conversation_id,
+                            &turn_id,
+                            "tool",
+                            name,
+                            &shown,
+                        ));
                     }
                     rows.lock().expect("tool rows lock poisoned").push((
                         name.to_string(),
@@ -589,6 +684,8 @@ impl ChatHandler for ChatTurn {
                     let status = if ok { "ok" } else { "error" };
                     if let Some(web) = &web {
                         web.publish(crate::channels::web::WebEvent::chat(
+                            &conversation_id,
+                            &turn_id,
                             "tool_status",
                             name,
                             status,
@@ -613,21 +710,37 @@ impl ChatHandler for ChatTurn {
         // Attribution framing (DESIGN §3 memory: `"{operator} said: …"`) —
         // in the shared transcript, who spoke is part of the record.
         let attributed = format!("{speaker} said: {message}");
-        // The team-wide turn gate serializes this whole turn against every
-        // other entry point (see DispatchDeps.turn_gate) — which also
-        // closes the old snapshot race: with at most one turn in flight,
-        // the transcript snapshotted here is always the one the reply
-        // appends after. The std mutex below is still only held for the
-        // clone, never across the turn (poison hygiene).
-        let _turn = self.deps.turn_gate.acquire_interactive("chat").await;
-        let prior = self.transcript.lock().expect("chat transcript lock poisoned").clone();
+        // One turn at a time per conversation closes the snapshot race while
+        // still allowing unrelated environment conversations to proceed.
+        // Environment turns also exclude scans in their environment.
+        let _turn = match conversation {
+            ChatConversation::Operations => {
+                self.deps.turn_gate.acquire_isolated("chat", ChatConversation::OPERATIONS_ID).await
+            }
+            ChatConversation::Environment { project, environment } => {
+                self.deps.turn_gate.acquire_environment("chat", project, environment).await
+            }
+        };
+        let prior = self
+            .transcripts
+            .lock()
+            .expect("chat transcripts lock poisoned")
+            .get(&conversation_id)
+            .cloned()
+            .unwrap_or_default();
 
         // The user's message is durable and broadcast BEFORE the turn runs
         // (it happened regardless of whether the reply succeeds) — every
         // web tab sees it immediately, whatever channel it arrived on.
-        self.log_row("user", speaker, message).await;
+        self.log_row(&conversation_id, turn_id, "user", speaker, message).await;
         if let Some(web) = &self.web {
-            web.publish(crate::channels::web::WebEvent::chat("user", speaker, message));
+            web.publish(crate::channels::web::WebEvent::chat(
+                &conversation_id,
+                turn_id,
+                "user",
+                speaker,
+                message,
+            ));
         }
 
         let reply = agent::run_turn_with_history(
@@ -656,11 +769,13 @@ impl ChatHandler for ChatTurn {
                 // mid-call) persists un-annotated rather than guessed.
                 None => args,
             };
-            self.log_row("tool", &name, &content).await;
+            self.log_row(&conversation_id, turn_id, "tool", &name, &content).await;
         }
-        self.log_row("assistant", "assistant", &reply.reply).await;
+        self.log_row(&conversation_id, turn_id, "assistant", "assistant", &reply.reply).await;
         if let Some(web) = &self.web {
             web.publish(crate::channels::web::WebEvent::chat(
+                &conversation_id,
+                turn_id,
                 "assistant",
                 "assistant",
                 &reply.reply,
@@ -668,7 +783,8 @@ impl ChatHandler for ChatTurn {
         }
 
         {
-            let mut t = self.transcript.lock().expect("chat transcript lock poisoned");
+            let mut transcripts = self.transcripts.lock().expect("chat transcripts lock poisoned");
+            let t = transcripts.entry(conversation_id).or_default();
             t.push(Turn::User { content: attributed });
             t.push(Turn::Assistant { content: reply.reply.clone(), tool_calls: Vec::new() });
             if t.len() > TRANSCRIPT_KEEP_ENTRIES {
@@ -1417,6 +1533,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operations_conversation_cannot_invoke_target_tools() {
+        let mut scripted = ScriptedLlm::new();
+        scripted
+            .push_tool_call("monitor", json!({"target": "example::prod::web-1", "view": "disk"}))
+            .push_text("select the environment first");
+        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let recording = Arc::new(RecordingPolicy::new());
+        let policy: Arc<dyn PolicyExecute> = recording.clone();
+        let chat = ChatTurn::new(test_deps(llm, policy));
+
+        let reply = chat
+            .chat(Principal::Operator { account: uuid::Uuid::new_v4() }, "alice", "check prod disk")
+            .await
+            .unwrap();
+
+        assert_eq!(reply, "select the environment first");
+        assert!(
+            recording.calls().is_empty(),
+            "Operations must not reach policy with a target command"
+        );
+    }
+
+    #[tokio::test]
     async fn chat_turn_persists_the_durable_log_streams_tools_and_hydrates() {
         use crate::db::ChatRepo;
 
@@ -1441,13 +1580,17 @@ mod tests {
         let chat = ChatTurn::new(test_deps(llm, policy)).with_surfaces(db.clone(), hub.clone());
 
         let op = Principal::Operator { account: uuid::Uuid::new_v4() };
-        let reply = chat.chat(op, "alice", "check the cluster").await.unwrap();
+        let conversation = ChatConversation::environment("example", "prod");
+        let reply = chat
+            .chat_scoped(&conversation, "turn-1", op, "alice", "check the cluster")
+            .await
+            .unwrap();
         assert_eq!(reply, "all quiet");
 
         // Durable log: user, tools, assistant — in order, with attribution
         // (the user row stores the RAW message; framing is replay-only).
         // Each tool row carries its outcome as a content suffix.
-        let rows = db.recent_chat(10).await.unwrap();
+        let rows = db.recent_chat("example::prod", 10).await.unwrap();
         let brief: Vec<(&str, &str)> =
             rows.iter().map(|r| (r.role.as_str(), r.speaker.as_str())).collect();
         assert_eq!(
@@ -1489,7 +1632,7 @@ mod tests {
         let rebooted = ChatTurn::new(test_deps(llm2, policy2))
             .with_surfaces(db.clone(), Arc::new(crate::channels::web::WebHub::new()));
         rebooted.hydrate().await;
-        let t = rebooted.transcript();
+        let t = rebooted.transcript_for(&conversation);
         assert_eq!(t.len(), 2, "tool rows must not enter the replay transcript");
         match (&t[0], &t[1]) {
             (Turn::User { content: u }, Turn::Assistant { content: a, .. }) => {

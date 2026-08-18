@@ -1,6 +1,6 @@
 // Tiny shared UI state + view-switching — no framework, direct DOM
 // manipulation (gianna's static/app/state.js pattern).
-export const state = { signedIn: false };
+export const state = { signedIn: false, chatConversation: 'operations' };
 
 export function showAuth() {
   state.signedIn = false;

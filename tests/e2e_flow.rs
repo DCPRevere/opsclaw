@@ -14,7 +14,7 @@
 //! the suite can run fully parallel with no shared state between tests.
 
 use opsclaw::channels::ChatHandler;
-use opsclaw::config::Config;
+use opsclaw::config::{Config, EnvCfg, ProjectCfg};
 use opsclaw::db::{Account, AccountRepo};
 use opsclaw::domain::Principal;
 use opsclaw::http::AppState;
@@ -1881,6 +1881,43 @@ async fn chat_history_on_the_fakes_spine_is_empty_not_an_error() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["history"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn chat_conversations_are_config_derived_and_unknown_rooms_fail_closed() {
+    let config = Config {
+        projects: vec![ProjectCfg {
+            name: "shop".into(),
+            autonomy: None,
+            escalation: None,
+            envs: vec![EnvCfg {
+                name: "prod".into(),
+                autonomy: None,
+                expected_state: None,
+                targets: vec![],
+            }],
+        }],
+        ..Default::default()
+    };
+    let state = AppState::fake_with_config(config);
+    seed_account(&state, "chat-rooms@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = SessionClient::new();
+    client
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "chat-rooms@example.com", "password": "some-password-123" }),
+        )
+        .await;
+
+    let response = client.get(&format!("{base}/api/chat/conversations")).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["conversations"][0]["id"], "operations");
+    assert_eq!(body["conversations"][1]["id"], "shop::prod");
+
+    let response = client.get(&format!("{base}/api/chat/history?conversation=shop%3A%3Adev")).await;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

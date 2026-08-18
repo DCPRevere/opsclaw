@@ -2,9 +2,22 @@ use crate::Result;
 use crate::cli::remote::{client, session::Session};
 
 pub async fn load(session: &Session, before: Option<i64>, limit: i64) -> Result<serde_json::Value> {
+    load_scoped(session, "operations", before, limit).await
+}
+
+pub async fn load_scoped(
+    session: &Session,
+    conversation: &str,
+    before: Option<i64>,
+    limit: i64,
+) -> Result<serde_json::Value> {
+    let conversation: String =
+        url::form_urlencoded::byte_serialize(conversation.as_bytes()).collect();
     let path = match before {
-        Some(seq) => format!("/api/chat/history?before={seq}&limit={limit}"),
-        None => format!("/api/chat/history?limit={limit}"),
+        Some(seq) => {
+            format!("/api/chat/history?conversation={}&before={seq}&limit={limit}", conversation)
+        }
+        None => format!("/api/chat/history?conversation={}&limit={limit}", conversation),
     };
     client::get(session, &path).await
 }

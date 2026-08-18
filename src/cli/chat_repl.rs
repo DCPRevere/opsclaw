@@ -50,7 +50,7 @@ use std::time::Duration;
 
 use crate::Result;
 use crate::config::Config;
-use crate::domain::Principal;
+use crate::domain::{ChatConversation, Principal};
 
 /// Matches `http::server`'s own shutdown drain budget — no reason for the
 /// REPL's exit-time wait to be a different number than the daemon's.
@@ -82,8 +82,18 @@ fn read_line(input: &mut impl std::io::BufRead) -> std::io::Result<Option<String
 /// `output` until EOF or `exit`/`quit`. Split out from `run` (which owns
 /// the real stdin/stdout) so the loop body is testable against an
 /// in-memory `BufRead`/`Vec<u8>` pair without a real TTY.
+#[cfg(test)]
 async fn repl_loop(
     chat: &dyn crate::channels::ChatHandler,
+    input: &mut impl std::io::BufRead,
+    output: &mut impl Write,
+) -> Result<()> {
+    repl_loop_scoped(chat, &ChatConversation::Operations, input, output).await
+}
+
+async fn repl_loop_scoped(
+    chat: &dyn crate::channels::ChatHandler,
+    conversation: &ChatConversation,
     input: &mut impl std::io::BufRead,
     output: &mut impl Write,
 ) -> Result<()> {
@@ -102,7 +112,16 @@ async fn repl_loop(
         if matches!(trimmed, "exit" | "quit") {
             break;
         }
-        match chat.chat(Principal::System, LOCAL_SPEAKER, trimmed).await {
+        match chat
+            .chat_scoped(
+                conversation,
+                &uuid::Uuid::new_v4().to_string(),
+                Principal::System,
+                LOCAL_SPEAKER,
+                trimmed,
+            )
+            .await
+        {
             Ok(reply) => {
                 writeln!(output, "{reply}").ok();
             }
@@ -120,14 +139,19 @@ async fn repl_loop(
 /// only — no `server::run`, no bind), then drive the REPL over real
 /// stdin/stdout.
 pub async fn run(cfg_path: &Path, home: &Path) -> Result<()> {
+    run_scoped(cfg_path, home, ChatConversation::OPERATIONS_ID).await
+}
+
+pub async fn run_scoped(cfg_path: &Path, home: &Path, conversation: &str) -> Result<()> {
     let config = Config::load(Some(cfg_path))?;
     config.validate()?;
     let state = crate::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
+    let conversation = ChatConversation::parse(conversation)?;
 
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut output = std::io::stdout();
-    repl_loop(state.chat.as_ref(), &mut input, &mut output).await
+    repl_loop_scoped(state.chat.as_ref(), &conversation, &mut input, &mut output).await
 }
 
 #[cfg(test)]

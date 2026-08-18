@@ -434,6 +434,8 @@ pub trait ChannelStateRepo: Send + Sync {
 pub struct ChatMessage {
     pub seq: i64,
     pub at: DateTime<Utc>,
+    pub conversation: String,
+    pub turn_id: Option<String>,
     pub role: String,
     pub speaker: String,
     pub content: String,
@@ -455,6 +457,7 @@ pub trait ChatRepo: Send + Sync {
     async fn claim_chat_request(
         &self,
         account: Uuid,
+        conversation: &str,
         key: &str,
         started_at: DateTime<Utc>,
     ) -> Result<ChatRequestClaim>;
@@ -477,6 +480,8 @@ pub trait ChatRepo: Send + Sync {
     /// Append one row (the backend assigns `seq`).
     async fn append_chat(
         &self,
+        conversation: &str,
+        turn_id: Option<&str>,
         at: DateTime<Utc>,
         role: &str,
         speaker: &str,
@@ -484,12 +489,17 @@ pub trait ChatRepo: Send + Sync {
     ) -> Result<()>;
     /// The newest `limit` rows, returned in ASCENDING `seq` order (render
     /// order for a chat log — oldest of the page first).
-    async fn recent_chat(&self, limit: i64) -> Result<Vec<ChatMessage>>;
+    async fn recent_chat(&self, conversation: &str, limit: i64) -> Result<Vec<ChatMessage>>;
     /// The newest `limit` rows STRICTLY BEFORE `before_seq`, ascending —
     /// the "Show earlier" page: the caller hands back the oldest `seq` it
     /// has rendered and receives the page that precedes it. Empty (never
     /// an error) once the archive is exhausted.
-    async fn before_chat(&self, before_seq: i64, limit: i64) -> Result<Vec<ChatMessage>>;
+    async fn before_chat(
+        &self,
+        conversation: &str,
+        before_seq: i64,
+        limit: i64,
+    ) -> Result<Vec<ChatMessage>>;
 }
 
 /// Cheap backing-store liveness used by readiness checks.

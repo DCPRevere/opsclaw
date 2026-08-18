@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::Result;
-use crate::domain::Principal;
+use crate::domain::{ChatConversation, Principal};
 
 /// A message leaving the daemon toward operators.
 #[derive(Debug, Clone)]
@@ -137,6 +137,20 @@ pub trait Channel: Send + Sync {
 #[async_trait]
 pub trait ChatHandler: Send + Sync {
     async fn chat(&self, principal: Principal, speaker: &str, message: &str) -> Result<String>;
+
+    /// Run a turn in a durable team conversation. The default preserves
+    /// non-web channels as Operations clients; the real agent overrides it.
+    async fn chat_scoped(
+        &self,
+        conversation: &ChatConversation,
+        _turn_id: &str,
+        principal: Principal,
+        speaker: &str,
+        message: &str,
+    ) -> Result<String> {
+        let _ = conversation;
+        self.chat(principal, speaker, message).await
+    }
 
     /// A snapshot of the shared team transcript as (role, content) pairs —
     /// `role` is `"user"` or `"assistant"` (a stable, low-cardinality tag a

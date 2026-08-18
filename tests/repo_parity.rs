@@ -96,7 +96,9 @@ async fn sqlite_chat_request_outcome_survives_reopen() {
     AccountRepo::insert(&db, &account(account_id, "durable@example.com")).await.unwrap();
     let now = Utc::now();
     assert_eq!(
-        ChatRepo::claim_chat_request(&db, account_id, "durable-key", now).await.unwrap(),
+        ChatRepo::claim_chat_request(&db, account_id, "operations", "durable-key", now)
+            .await
+            .unwrap(),
         ChatRequestClaim::Claimed
     );
     ChatRepo::complete_chat_request(&db, account_id, "durable-key", "saved reply", now)
@@ -106,7 +108,9 @@ async fn sqlite_chat_request_outcome_survives_reopen() {
 
     let reopened = SqliteDb::connect(path).await.unwrap();
     assert_eq!(
-        ChatRepo::claim_chat_request(&reopened, account_id, "durable-key", now).await.unwrap(),
+        ChatRepo::claim_chat_request(&reopened, account_id, "operations", "durable-key", now)
+            .await
+            .unwrap(),
         ChatRequestClaim::Complete("saved reply".into())
     );
 }
@@ -751,15 +755,16 @@ chat_request_claim_is_atomic_scoped_and_terminal => |db| {
     AccountRepo::insert(db, &account(second, "second-chat@example.com")).await.unwrap();
     let now = Utc::now();
 
-    assert_eq!(ChatRepo::claim_chat_request(db, first, "request-1", now).await.unwrap(), ChatRequestClaim::Claimed);
-    assert_eq!(ChatRepo::claim_chat_request(db, first, "request-1", now).await.unwrap(), ChatRequestClaim::Pending);
+    assert_eq!(ChatRepo::claim_chat_request(db, first, "operations", "request-1", now).await.unwrap(), ChatRequestClaim::Claimed);
+    assert_eq!(ChatRepo::claim_chat_request(db, first, "operations", "request-1", now).await.unwrap(), ChatRequestClaim::Pending);
     ChatRepo::complete_chat_request(db, first, "request-1", "original reply", now).await.unwrap();
-    assert_eq!(ChatRepo::claim_chat_request(db, first, "request-1", now).await.unwrap(), ChatRequestClaim::Complete("original reply".into()));
+    assert_eq!(ChatRepo::claim_chat_request(db, first, "operations", "request-1", now).await.unwrap(), ChatRequestClaim::Complete("original reply".into()));
+    assert!(ChatRepo::claim_chat_request(db, first, "project::prod", "request-1", now).await.is_err());
     assert!(ChatRepo::complete_chat_request(db, first, "request-1", "changed", now).await.is_err());
 
-    assert_eq!(ChatRepo::claim_chat_request(db, second, "request-1", now).await.unwrap(), ChatRequestClaim::Claimed);
+    assert_eq!(ChatRepo::claim_chat_request(db, second, "operations", "request-1", now).await.unwrap(), ChatRequestClaim::Claimed);
     ChatRepo::fail_chat_request(db, second, "request-1", now).await.unwrap();
-    assert_eq!(ChatRepo::claim_chat_request(db, second, "request-1", now).await.unwrap(), ChatRequestClaim::Failed);
+    assert_eq!(ChatRepo::claim_chat_request(db, second, "operations", "request-1", now).await.unwrap(), ChatRequestClaim::Failed);
 }
 
 // ---- Jobs ----
@@ -1149,37 +1154,40 @@ channel_state_get_set_roundtrip_and_overwrites => |db| {
 chat_log_appends_in_order_and_pages_the_newest => |db| {
     for i in 0..5 {
         let role = if i % 2 == 0 { "user" } else { "assistant" };
-        db.append_chat(Utc::now(), role, "alice", &format!("m{i}")).await.unwrap();
+        db.append_chat("operations", Some("turn-1"), Utc::now(), role, "alice", &format!("m{i}")).await.unwrap();
     }
-    db.append_chat(Utc::now(), "tool", "kubernetes", r#"{"command":"get pods"}"#).await.unwrap();
+    db.append_chat("operations", Some("turn-1"), Utc::now(), "tool", "kubernetes", r#"{"command":"get pods"}"#).await.unwrap();
+    db.append_chat("project::prod", Some("turn-2"), Utc::now(), "user", "bob", "isolated").await.unwrap();
 
     // Full read: every row, ascending seq (render order), content intact.
-    let all = db.recent_chat(50).await.unwrap();
+    let all = db.recent_chat("operations", 50).await.unwrap();
     assert_eq!(all.len(), 6);
     assert!(all.windows(2).all(|w| w[0].seq < w[1].seq), "ascending seq");
     assert_eq!(all[0].content, "m0");
+    assert_eq!(all[0].turn_id.as_deref(), Some("turn-1"));
     assert_eq!((all[5].role.as_str(), all[5].speaker.as_str()), ("tool", "kubernetes"));
 
     // Limited read: the NEWEST page, still ascending within it.
-    let page = db.recent_chat(2).await.unwrap();
+    let page = db.recent_chat("operations", 2).await.unwrap();
     assert_eq!(page.len(), 2);
     assert_eq!(page[0].content, "m4");
     assert_eq!(page[1].role, "tool");
 
     // A zero/negative limit is empty, not an error.
-    assert!(db.recent_chat(0).await.unwrap().is_empty());
+    assert!(db.recent_chat("operations", 0).await.unwrap().is_empty());
+    assert_eq!(db.recent_chat("project::prod", 50).await.unwrap()[0].content, "isolated");
 }
 
 chat_log_pages_backward_from_a_seq_anchor => |db| {
     for i in 0..6 {
-        db.append_chat(Utc::now(), "user", "alice", &format!("m{i}")).await.unwrap();
+        db.append_chat("operations", None, Utc::now(), "user", "alice", &format!("m{i}")).await.unwrap();
     }
     // The client's anchor is the oldest seq it has rendered: after a
     // 2-row first page (m4, m5), `before` that anchor is the NEXT-newest
     // page (m2, m3), still ascending within it.
-    let first = db.recent_chat(2).await.unwrap();
+    let first = db.recent_chat("operations", 2).await.unwrap();
     let anchor = first[0].seq;
-    let page = db.before_chat(anchor, 2).await.unwrap();
+    let page = db.before_chat("operations", anchor, 2).await.unwrap();
     assert_eq!(page.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), vec!["m2", "m3"]);
     assert!(page.windows(2).all(|w| w[0].seq < w[1].seq), "ascending seq");
     // The anchor row itself is EXCLUDED (strictly before) — no overlap,
@@ -1187,10 +1195,10 @@ chat_log_pages_backward_from_a_seq_anchor => |db| {
     assert!(page.iter().all(|m| m.seq < anchor));
     // Over-asking returns just what's left; before the oldest is empty
     // (archive exhausted), and a zero limit is empty, not an error.
-    let rest = db.before_chat(anchor, 50).await.unwrap();
+    let rest = db.before_chat("operations", anchor, 50).await.unwrap();
     assert_eq!(rest.len(), 4);
-    assert!(db.before_chat(rest[0].seq, 10).await.unwrap().is_empty());
-    assert!(db.before_chat(anchor, 0).await.unwrap().is_empty());
+    assert!(db.before_chat("operations", rest[0].seq, 10).await.unwrap().is_empty());
+    assert!(db.before_chat("operations", anchor, 0).await.unwrap().is_empty());
 }
 
 }

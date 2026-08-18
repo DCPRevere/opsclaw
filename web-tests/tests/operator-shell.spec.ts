@@ -30,7 +30,36 @@ test('chat sends an idempotency key and renders the fake reply', async ({ page }
   await page.locator('#chat-form button[type=submit]').click();
   await expect(page.locator('#chat-log')).toContainText('OK (fake LLM');
   expect(body?.message).toBe('check the test target');
+  expect(body?.conversation).toBe('operations');
   expect(body?.idempotency_key).toMatch(/.+/);
+});
+
+test('chat switches between durable environment conversations', async ({ page }) => {
+  await login(page);
+  await page.route('**/api/chat/conversations', route => route.fulfill({ json: {
+    conversations: [
+      { id: 'operations', kind: 'operations', label: 'Operations' },
+      { id: 'shop::prod', kind: 'environment', label: 'shop / prod' },
+    ],
+  } }));
+  await page.route('**/api/chat/history?conversation=*', route => {
+    const conversation = new URL(route.request().url()).searchParams.get('conversation');
+    return route.fulfill({ json: { history: [{
+      seq: 1, role: 'assistant', speaker: 'assistant',
+      content: conversation === 'shop::prod' ? 'production handoff' : 'operations handoff',
+      at: '2026-08-18T12:00:00Z',
+    }], has_more: false } });
+  });
+  // Force a fresh catalogue/history read after installing the routes.
+  await page.locator('#chat-conversation').evaluate((select: HTMLSelectElement) => {
+    delete select.dataset.loaded;
+  });
+  await page.getByRole('button', { name: 'Incidents' }).click();
+  await page.getByRole('button', { name: 'Chat' }).click();
+
+  await page.locator('#chat-conversation').selectOption('shop::prod');
+  await expect(page.locator('#chat-log')).toContainText('production handoff');
+  await expect(page.locator('#chat-scope-note')).toContainText('restricted to this environment');
 });
 
 test('an operator can approve a queued command', async ({ page }) => {

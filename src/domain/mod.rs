@@ -16,6 +16,57 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// A durable team conversation. `Operations` is the global coordination
+/// room; an environment room is also the authorization boundary for tools.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ChatConversation {
+    Operations,
+    Environment { project: String, environment: String },
+}
+
+impl ChatConversation {
+    pub const OPERATIONS_ID: &'static str = "operations";
+
+    pub fn environment(project: impl Into<String>, environment: impl Into<String>) -> Self {
+        Self::Environment { project: project.into(), environment: environment.into() }
+    }
+
+    pub fn id(&self) -> String {
+        match self {
+            Self::Operations => Self::OPERATIONS_ID.to_string(),
+            Self::Environment { project, environment } => format!("{project}::{environment}"),
+        }
+    }
+
+    pub fn parse(value: &str) -> crate::Result<Self> {
+        if value == Self::OPERATIONS_ID {
+            return Ok(Self::Operations);
+        }
+        let parts: Vec<_> = value.split("::").collect();
+        match parts.as_slice() {
+            [project, environment]
+                if !project.is_empty()
+                    && !environment.is_empty()
+                    && !project.contains('/')
+                    && !environment.contains('/') =>
+            {
+                Ok(Self::environment(*project, *environment))
+            }
+            _ => Err(crate::Error::validation(format!("invalid chat conversation {value:?}"))),
+        }
+    }
+
+    pub fn contains(&self, target: &FqTarget) -> bool {
+        match self {
+            Self::Operations => false,
+            Self::Environment { project, environment } => {
+                target.project() == project && target.environment() == environment
+            }
+        }
+    }
+}
+
 /// Fully-qualified target path: `project::env::target`, optionally extended
 /// with `::resource_type::name`. This is the audit identity — the audit log
 /// always records the fully qualified form.
@@ -365,6 +416,17 @@ mod tests {
         assert_eq!(r.to_string(), "example::prod::cluster::elasticsearch::logs");
         assert!(FqTarget::parse("just-a-name").is_err());
         assert!(FqTarget::parse("a::b::c::not_a_resource::x").is_err());
+    }
+
+    #[test]
+    fn chat_conversation_roundtrip_and_target_scope() {
+        let operations = ChatConversation::parse("operations").unwrap();
+        assert_eq!(operations.id(), "operations");
+        let production = ChatConversation::parse("example::prod").unwrap();
+        assert_eq!(production.id(), "example::prod");
+        assert!(production.contains(&FqTarget::parse("example::prod::api").unwrap()));
+        assert!(!production.contains(&FqTarget::parse("example::dev::api").unwrap()));
+        assert!(ChatConversation::parse("example::prod::api").is_err());
     }
 
     #[test]

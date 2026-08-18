@@ -24,12 +24,13 @@ use crate::Result;
 use crate::cli::remote::client;
 use crate::cli::remote::session::Session;
 
-async fn send(session: &Session, message: &str) -> Result<String> {
+async fn send(session: &Session, conversation: &str, message: &str) -> Result<String> {
     let body = client::post_json(
         session,
         "/cli/v1/chat",
         &serde_json::json!({
             "message": message,
+            "conversation": conversation,
             "idempotency_key": uuid::Uuid::new_v4().to_string(),
         }),
     )
@@ -42,7 +43,15 @@ async fn send(session: &Session, message: &str) -> Result<String> {
 
 /// `opsclaw-cli chat <message>` — one-shot: send, print the reply, exit.
 pub async fn one_shot(session: &Session, message: &str) -> Result<String> {
-    let reply = send(session, message).await?;
+    one_shot_scoped(session, "operations", message).await
+}
+
+pub async fn one_shot_scoped(
+    session: &Session,
+    conversation: &str,
+    message: &str,
+) -> Result<String> {
+    let reply = send(session, conversation, message).await?;
     println!("{reply}");
     Ok(reply)
 }
@@ -53,7 +62,14 @@ pub async fn one_shot(session: &Session, message: &str) -> Result<String> {
 /// see `agent::dispatch::ChatTurn`'s shared transcript — so the REPL itself
 /// carries no client-side history to replay).
 pub async fn repl(session: &Session) -> Result<()> {
-    println!("opsclaw remote chat ({}) — Ctrl-D or 'exit' to quit", session.server);
+    repl_scoped(session, "operations").await
+}
+
+pub async fn repl_scoped(session: &Session, conversation: &str) -> Result<()> {
+    println!(
+        "opsclaw remote chat ({}, {}) — Ctrl-D or 'exit' to quit",
+        session.server, conversation
+    );
     let stdin = std::io::stdin();
     let mut line = String::new();
     loop {
@@ -72,7 +88,7 @@ pub async fn repl(session: &Session) -> Result<()> {
         if matches!(trimmed, "exit" | "quit") {
             break;
         }
-        match send(session, trimmed).await {
+        match send(session, conversation, trimmed).await {
             Ok(reply) => println!("{reply}"),
             Err(e) => println!("error: {e}"),
         }
@@ -107,6 +123,7 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["message"], "is prod healthy?");
+        assert_eq!(body["conversation"], "operations");
         assert!(uuid::Uuid::parse_str(body["idempotency_key"].as_str().unwrap()).is_ok());
     }
 

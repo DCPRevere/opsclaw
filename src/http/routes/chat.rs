@@ -1,10 +1,10 @@
 //! The web chat surface (DESIGN §3: "Day-one surfaces: agent chat (same
 //! orchestrator path as every channel, SSE for proactive push)"). Two
-//! routes: `POST /api/chat` runs one turn against the SHARED TEAM
-//! transcript `state.chat` already holds (`channels::ChatHandler`,
-//! `agent::dispatch::ChatTurn` — see that module's doc for why one
-//! transcript, not per-operator); `GET /api/chat/history` renders it on
-//! load. Both are cookie-authed (`Authed`) for the web UI; `routes::cli`
+//! routes: `POST /api/chat` runs one turn in a team-visible conversation:
+//! global `Operations` or one configured project environment. History and
+//! live events carry the same stable conversation identity; environment
+//! selection also narrows the agent's target allow-list. Both routes are
+//! cookie-authed (`Authed`) for the web UI; `routes::cli`
 //! wires a bearer-authed twin (`POST /cli/v1/chat`) onto the SAME turn
 //! logic below (`run_chat_turn`), for the remote CLI's `chat --remote`
 //! (DESIGN §7 decision 14: "Remote CLI v1: small set — chat, incidents,
@@ -21,8 +21,7 @@
 //! message before the turn, the agent's live tool calls DURING it, the
 //! reply after) are published by `ChatTurn` itself, not here — so a turn
 //! entering via Telegram or the CLI reaches web tabs identically to a
-//! web-originated one (DESIGN: "web chat is a team surface, one shared
-//! conversation"). The HTTP response still carries the reply directly for
+//! web-originated one. The HTTP response still carries the reply directly for
 //! the CLI twin; the web client renders exclusively from the SSE stream
 //! (see `static/app/chat.js`'s module comment).
 
@@ -34,17 +33,22 @@ use serde_json::{Value, json};
 
 use crate::Result;
 use crate::db::{ChatRepo, ChatRequestClaim};
-use crate::domain::Principal;
+use crate::domain::{ChatConversation, Principal};
 use crate::http::handlers::Authed;
 use crate::http::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/chat", post(send)).route("/api/chat/history", get(history))
+    Router::new()
+        .route("/api/chat", post(send))
+        .route("/api/chat/history", get(history))
+        .route("/api/chat/conversations", get(conversations))
 }
 
 #[derive(Deserialize)]
 pub struct ChatReq {
     pub message: String,
+    #[serde(default)]
+    pub conversation: Option<String>,
     /// Optional client-generated replay key. Reusing it for the same account
     /// returns a duplicate response without running another agent turn.
     #[serde(default)]
@@ -64,18 +68,27 @@ pub(crate) async fn run_chat_turn(
     account: uuid::Uuid,
     speaker: &str,
     message: &str,
+    conversation: &ChatConversation,
     idempotency_key: Option<&str>,
-) -> Result<(String, bool)> {
+) -> Result<(String, bool, String)> {
     let key = idempotency_key.map(str::trim).filter(|key| !key.is_empty());
     if key.is_some_and(|key| key.len() > 128) {
         return Err(crate::Error::validation("idempotency_key must be at most 128 bytes"));
     }
     if let Some(key) = key {
-        match ChatRepo::claim_chat_request(&*state.repos, account, key, chrono::Utc::now()).await? {
+        match ChatRepo::claim_chat_request(
+            &*state.repos,
+            account,
+            &conversation.id(),
+            key,
+            chrono::Utc::now(),
+        )
+        .await?
+        {
             ChatRequestClaim::Claimed => {}
             ChatRequestClaim::Complete(reply) => {
                 tracing::info!(%account, "returning completed chat request replay");
-                return Ok((reply, true));
+                return Ok((reply, true, key.to_string()));
             }
             ChatRequestClaim::Pending => {
                 return Err(crate::Error::Conflict(
@@ -97,10 +110,22 @@ pub(crate) async fn run_chat_turn(
     let speaker = speaker.to_string();
     let message = message.to_string();
     let key = key.map(str::to_string);
+    let turn_id = key.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let conversation = conversation.clone();
+    let task_turn_id = turn_id.clone();
     use tracing::Instrument;
     let span = tracing::Span::current();
     let turn = state.tasks.spawn(async move {
-        let result = state.chat.chat(Principal::Operator { account }, &speaker, &message).await;
+        let result = state
+            .chat
+            .chat_scoped(
+                &conversation,
+                &task_turn_id,
+                Principal::Operator { account },
+                &speaker,
+                &message,
+            )
+            .await;
         match result {
             Ok(reply) => {
                 if let Some(key) = &key {
@@ -132,7 +157,7 @@ pub(crate) async fn run_chat_turn(
         }
     }.instrument(span));
     match turn.await {
-        Ok(result) => result.map(|reply| (reply, false)),
+        Ok(result) => result.map(|reply| (reply, false, turn_id)),
         Err(error) => {
             tracing::error!(%account, %error, "chat turn task failed");
             Err(crate::Error::other("chat turn failed"))
@@ -154,19 +179,22 @@ async fn send(
         .by_id(ctx.account_id)
         .await?
         .ok_or_else(|| crate::Error::unauthorized("unknown account"))?;
-    let (reply, duplicate) = run_chat_turn(
+    let conversation = resolve_conversation(&state, req.conversation.as_deref())?;
+    let (reply, duplicate, turn_id) = run_chat_turn(
         &state,
         ctx.account_id,
         &account.display_name,
         &req.message,
+        &conversation,
         req.idempotency_key.as_deref(),
     )
     .await?;
-    Ok(Json(json!({ "reply": reply, "duplicate": duplicate })))
+    Ok(Json(json!({ "reply": reply, "duplicate": duplicate, "turn_id": turn_id })))
 }
 
 #[derive(Deserialize)]
 pub struct HistoryQuery {
+    pub conversation: Option<String>,
     /// When present, page BACKWARD: the newest `PAGE` rows strictly before
     /// this seq (the client hands back the oldest seq it has rendered).
     pub before: Option<i64>,
@@ -192,14 +220,17 @@ async fn history(
 ) -> Result<Json<Value>> {
     const PAGE: i64 = 100;
     let limit = q.limit.unwrap_or(PAGE).clamp(1, 500);
+    let conversation = resolve_conversation(&state, q.conversation.as_deref())?.id();
     let rows = match q.before {
-        Some(before) => state.repos.before_chat(before, limit).await?,
-        None => state.repos.recent_chat(limit).await?,
+        Some(before) => state.repos.before_chat(&conversation, before, limit).await?,
+        None => state.repos.recent_chat(&conversation, limit).await?,
     };
     let has_more = rows.len() as i64 == limit;
     Ok(Json(json!({
         "history": rows.into_iter().map(|m| json!({
             "seq": m.seq,
+            "conversation": m.conversation,
+            "turn_id": m.turn_id,
             "role": m.role,
             "speaker": m.speaker,
             "content": m.content,
@@ -207,6 +238,44 @@ async fn history(
         })).collect::<Vec<_>>(),
         "has_more": has_more,
     })))
+}
+
+pub(crate) fn resolve_conversation(
+    state: &AppState,
+    raw: Option<&str>,
+) -> Result<ChatConversation> {
+    let conversation = ChatConversation::parse(raw.unwrap_or(ChatConversation::OPERATIONS_ID))?;
+    if let ChatConversation::Environment { project, environment } = &conversation {
+        let exists = state.config.projects.iter().any(|configured_project| {
+            configured_project.name == *project
+                && configured_project.envs.iter().any(|env| env.name == *environment)
+        });
+        if !exists {
+            return Err(crate::Error::NotFound(format!("chat conversation {}", conversation.id())));
+        }
+    }
+    Ok(conversation)
+}
+
+async fn conversations(State(state): State<AppState>, Authed(_ctx): Authed) -> Result<Json<Value>> {
+    let mut values = vec![json!({
+        "id": ChatConversation::OPERATIONS_ID,
+        "kind": "operations",
+        "label": "Operations",
+    })];
+    for project in &state.config.projects {
+        for environment in &project.envs {
+            let conversation = ChatConversation::environment(&project.name, &environment.name);
+            values.push(json!({
+                "id": conversation.id(),
+                "kind": "environment",
+                "label": format!("{} / {}", project.name, environment.name),
+                "project": project.name,
+                "environment": environment.name,
+            }));
+        }
+    }
+    Ok(Json(json!({ "conversations": values })))
 }
 
 #[cfg(test)]
@@ -253,7 +322,15 @@ mod tests {
         let account = uuid::Uuid::new_v4();
         let state2 = state.clone();
         let request = tokio::spawn(async move {
-            run_chat_turn(&state2, account, "operator", "check it", Some("request-1")).await
+            run_chat_turn(
+                &state2,
+                account,
+                "operator",
+                "check it",
+                &ChatConversation::Operations,
+                Some("request-1"),
+            )
+            .await
         });
         started.notified().await;
         request.abort();
@@ -266,6 +343,7 @@ mod tests {
                 let outcome = ChatRepo::claim_chat_request(
                     &*state.repos,
                     account,
+                    "operations",
                     "request-1",
                     chrono::Utc::now(),
                 )

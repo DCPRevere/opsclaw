@@ -41,10 +41,16 @@ impl WebEvent {
     /// whether the text came from history or from this live event);
     /// `speaker` is the attribution label (`"assistant"` for the reply, the
     /// operator's display name for their own message).
-    pub fn chat(role: &str, speaker: &str, text: &str) -> Self {
+    pub fn chat(conversation: &str, turn_id: &str, role: &str, speaker: &str, text: &str) -> Self {
         WebEvent {
             kind: "chat",
-            body: serde_json::json!({ "role": role, "speaker": speaker, "text": text }),
+            body: serde_json::json!({
+                "conversation": conversation,
+                "turn_id": turn_id,
+                "role": role,
+                "speaker": speaker,
+                "text": text,
+            }),
         }
     }
 }
@@ -111,6 +117,18 @@ impl Channel for WebHub {
                 let mut body = meta.clone();
                 if let Some(obj) = body.as_object_mut() {
                     obj.insert("text".into(), serde_json::json!(msg.body));
+                    if let Some(target) = obj.get("target").and_then(|value| value.as_str())
+                        && let Ok(target) = crate::domain::FqTarget::parse(target)
+                    {
+                        obj.insert(
+                            "conversation".into(),
+                            serde_json::json!(format!(
+                                "{}::{}",
+                                target.project(),
+                                target.environment()
+                            )),
+                        );
+                    }
                 }
                 self.publish(WebEvent { kind, body });
                 return Ok(());

@@ -1,9 +1,10 @@
 //! Agent-turn conflict domains and their live queue.
 //!
-//! Interactive turns can address any target, so they take the exclusive
-//! barrier. Background scans take the shared barrier plus a lock for their
-//! exact target: scans of different targets may run together, while a scan can
-//! never race an interactive turn or another scan of the same target.
+//! Broad interactive turns take the exclusive barrier. Environment chat takes
+//! a shared barrier plus an environment write lock. Background scans take the
+//! shared barrier, an environment read lock, and an exact-target lock. This
+//! permits unrelated environments to run together without allowing a chat to
+//! race a scan it can act upon.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,7 @@ use tokio::sync::{
 #[derive(Clone, Default)]
 pub struct TurnGate {
     barrier: Arc<RwLock<()>>,
+    environments: Arc<Mutex<HashMap<String, Arc<RwLock<()>>>>>,
     targets: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     registry: Arc<Mutex<TurnRegistry>>,
 }
@@ -86,7 +88,14 @@ pub struct InteractiveTurnGuard {
 
 pub struct TargetTurnGuard {
     _barrier: OwnedRwLockReadGuard<()>,
+    _environment: OwnedRwLockReadGuard<()>,
     _target: OwnedMutexGuard<()>,
+    _registration: Registration,
+}
+
+pub struct EnvironmentTurnGuard {
+    _barrier: OwnedRwLockReadGuard<()>,
+    _environment: OwnedRwLockWriteGuard<()>,
     _registration: Registration,
 }
 
@@ -118,13 +127,67 @@ impl TurnGate {
         let key = target.to_string();
         let registration = Registration::new(self, kind, key.clone());
         let barrier = self.barrier.clone().read_owned().await;
+        let environment_key = format!("{}::{}", target.project(), target.environment());
+        let environment_lock = {
+            let mut locks = self.environments.lock().expect("turn-gate environment map poisoned");
+            locks.entry(environment_key).or_default().clone()
+        };
+        let environment = environment_lock.read_owned().await;
         let lock = {
             let mut locks = self.targets.lock().expect("turn-gate target map poisoned");
             locks.entry(key).or_default().clone()
         };
         let target = lock.lock_owned().await;
         registration.mark_active();
-        TargetTurnGuard { _barrier: barrier, _target: target, _registration: registration }
+        TargetTurnGuard {
+            _barrier: barrier,
+            _environment: environment,
+            _target: target,
+            _registration: registration,
+        }
+    }
+
+    /// Serialize a chat with every scan in its environment, while allowing
+    /// unrelated environments to continue independently.
+    pub async fn acquire_environment(
+        &self,
+        kind: &str,
+        project: &str,
+        environment: &str,
+    ) -> EnvironmentTurnGuard {
+        let key = format!("{project}::{environment}");
+        let registration = Registration::new(self, kind, key.clone());
+        let barrier = self.barrier.clone().read_owned().await;
+        let lock = {
+            let mut locks = self.environments.lock().expect("turn-gate environment map poisoned");
+            locks.entry(key).or_default().clone()
+        };
+        let environment = lock.write_owned().await;
+        registration.mark_active();
+        EnvironmentTurnGuard {
+            _barrier: barrier,
+            _environment: environment,
+            _registration: registration,
+        }
+    }
+
+    /// Serialize work in a named non-target domain. An all-target turn still
+    /// excludes it through the global barrier, but scans and environment
+    /// chats do not.
+    pub async fn acquire_isolated(&self, kind: &str, domain: &str) -> EnvironmentTurnGuard {
+        let registration = Registration::new(self, kind, domain.to_string());
+        let barrier = self.barrier.clone().read_owned().await;
+        let lock = {
+            let mut locks = self.environments.lock().expect("turn-gate environment map poisoned");
+            locks.entry(format!("isolated:{domain}")).or_default().clone()
+        };
+        let environment = lock.write_owned().await;
+        registration.mark_active();
+        EnvironmentTurnGuard {
+            _barrier: barrier,
+            _environment: environment,
+            _registration: registration,
+        }
     }
 
     pub async fn acquire_for_target(
@@ -204,5 +267,41 @@ mod tests {
         assert_eq!(gate.snapshot(chrono::Utc::now().timestamp_millis()).len(), 1);
         drop(target_guard);
         assert!(gate.snapshot(chrono::Utc::now().timestamp_millis()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn environment_turn_blocks_its_scans_but_not_other_environments() {
+        let gate = TurnGate::new();
+        let environment = gate.acquire_environment("chat", "project", "prod").await;
+
+        let same_gate = gate.clone();
+        let same =
+            tokio::spawn(
+                async move { same_gate.acquire_target("scan", &target("same-env")).await },
+            );
+        let other_gate = gate.clone();
+        let other = tokio::spawn(async move {
+            let other_target = crate::domain::FqTarget::try_new("project", "dev", "other").unwrap();
+            other_gate.acquire_target("scan", &other_target).await
+        });
+        tokio::task::yield_now().await;
+
+        assert!(!same.is_finished());
+        assert!(other.is_finished());
+        drop(environment);
+        same.await.unwrap();
+        other.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn isolated_operations_chat_does_not_block_target_work() {
+        let gate = TurnGate::new();
+        let _operations = gate.acquire_isolated("chat", "operations").await;
+        let scan = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            gate.acquire_target("scan", &target("api")),
+        )
+        .await;
+        assert!(scan.is_ok());
     }
 }

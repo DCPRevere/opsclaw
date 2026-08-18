@@ -210,15 +210,17 @@ async fn chat(
         .by_id(account_id)
         .await?
         .ok_or_else(|| Error::unauthorized("unknown account"))?;
-    let (reply, duplicate) = super::chat::run_chat_turn(
+    let conversation = super::chat::resolve_conversation(&state, req.conversation.as_deref())?;
+    let (reply, duplicate, turn_id) = super::chat::run_chat_turn(
         &state,
         account_id,
         &account.display_name,
         &req.message,
+        &conversation,
         req.idempotency_key.as_deref(),
     )
     .await?;
-    Ok(Json(json!({ "reply": reply, "duplicate": duplicate })))
+    Ok(Json(json!({ "reply": reply, "duplicate": duplicate, "turn_id": turn_id })))
 }
 
 /// DELETE /cli/v1/token — revoke the presented token (logout).

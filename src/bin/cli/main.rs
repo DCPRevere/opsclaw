@@ -208,6 +208,9 @@ enum Command {
         limit: i64,
         #[arg(long)]
         json: bool,
+        /// Shared room: `operations` or `project::environment`.
+        #[arg(long, default_value = "operations")]
+        conversation: String,
     },
     /// [remote] Daemon status. LOCAL mode has no analogue for this (there is no
     /// running-daemon introspection without a daemon to ask) — this
@@ -1302,29 +1305,54 @@ async fn dispatch(
         // otherwise it's always local (module doc: local is the default
         // for commands that support both, so a fresh install with no
         // `login` ever run still gets a working `chat`).
-        Command::Chat { message, remote: true, history: true, before, limit, json } => {
+        Command::Chat {
+            message,
+            remote: true,
+            history: true,
+            before,
+            limit,
+            json,
+            conversation,
+        } => {
             if message.is_some() {
                 return Err(opsclaw::Error::validation(
                     "--history cannot be combined with a chat message",
                 ));
             }
-            let body =
-                opsclaw::cli::remote::history::load(&remote_session()?, before, limit).await?;
+            let body = opsclaw::cli::remote::history::load_scoped(
+                &remote_session()?,
+                &conversation,
+                before,
+                limit,
+            )
+            .await?;
             if json {
                 opsclaw::cli::output::print_json(&body);
             } else {
                 render_remote_history(&body);
             }
         }
-        Command::Chat { message, remote: false, history: true, before, limit, json } => {
+        Command::Chat {
+            message,
+            remote: false,
+            history: true,
+            before,
+            limit,
+            json,
+            conversation,
+        } => {
             if message.is_some() {
                 return Err(opsclaw::Error::validation(
                     "--history cannot be combined with a chat message",
                 ));
             }
-            let rows =
-                opsclaw::cli::chat_history_cmd::load(&open_db(cfg_path).await?, before, limit)
-                    .await?;
+            let rows = opsclaw::cli::chat_history_cmd::load_scoped(
+                &open_db(cfg_path).await?,
+                &conversation,
+                before,
+                limit,
+            )
+            .await?;
             if json {
                 opsclaw::cli::output::print_json(&rows);
             } else {
@@ -1333,24 +1361,29 @@ async fn dispatch(
                 }
             }
         }
-        Command::Chat { message, remote: true, history: false, .. } => {
+        Command::Chat { message, remote: true, history: false, conversation, .. } => {
             let session = remote_session()?;
             match message {
                 Some(m) => {
-                    opsclaw::cli::remote::chat::one_shot(&session, &m).await?;
+                    opsclaw::cli::remote::chat::one_shot_scoped(&session, &conversation, &m)
+                        .await?;
                 }
-                None => opsclaw::cli::remote::chat::repl(&session).await?,
+                None => opsclaw::cli::remote::chat::repl_scoped(&session, &conversation).await?,
             }
         }
-        Command::Chat { message, remote: false, history: false, .. } => match message {
+        Command::Chat { message, remote: false, history: false, conversation, .. } => match message
+        {
             Some(m) => {
                 let config = Config::load(Some(cfg_path))?;
                 config.validate()?;
                 let state =
                     opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
+                let conversation = opsclaw::domain::ChatConversation::parse(&conversation)?;
                 let reply = state
                     .chat
-                    .chat(
+                    .chat_scoped(
+                        &conversation,
+                        &Uuid::new_v4().to_string(),
                         opsclaw::domain::Principal::System,
                         opsclaw::cli::chat_repl::LOCAL_SPEAKER,
                         &m,
@@ -1359,7 +1392,7 @@ async fn dispatch(
                 println!("{reply}");
                 state.chat.drain(std::time::Duration::from_secs(20)).await;
             }
-            None => opsclaw::cli::chat_repl::run(cfg_path, home).await?,
+            None => opsclaw::cli::chat_repl::run_scoped(cfg_path, home, &conversation).await?,
         },
 
         // `status` is remote-only (see `Command::Status`'s doc).

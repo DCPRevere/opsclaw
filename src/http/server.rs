@@ -21,7 +21,7 @@ pub async fn run(state: AppState) -> Result<()> {
     // `state` cancelling it externally drains the server the same way — the
     // SIGTERM-equivalent seam the daemon-lifecycle e2e shuts down through.
     let shutdown = state.shutdown.clone();
-    let tracker = tokio_util::task::TaskTracker::new();
+    let tracker = state.tasks.clone();
 
     crate::scheduler::spawn(
         scheduler_deps(&state),
@@ -46,12 +46,21 @@ pub async fn run(state: AppState) -> Result<()> {
     // still reach the chat seam — `ChatHandler::drain` is how the daemon
     // waits for memory's detached retains (see `drain_background_work`).
     let chat = state.chat.clone();
+    let fakes_mode = state.config.fully_faked();
+    let memory_enabled = state.memory.is_enabled();
 
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .map_err(|e| crate::Error::Config(format!("cannot bind {listen}: {e}")))?;
-    tracing::info!(%listen, version = crate::version(), "opsclaw listening");
+    tracing::info!(
+        %listen,
+        version = crate::version(),
+        fakes_mode,
+        memory = memory_enabled,
+        scheduler = true,
+        "opsclaw listening"
+    );
 
     let bg_shutdown = shutdown.clone();
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())

@@ -161,7 +161,7 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         repos.clone(),
         repos.clone(),
         repos.clone(),
-        memory,
+        memory.clone(),
         llm,
     )?;
 
@@ -177,6 +177,7 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         scheduler_handle,
     )?;
     state.cost_guard = cost_guard.clone();
+    state.memory = memory;
     // The web-session and webhook signing secrets, resolved by
     // `AppState::new` just above — registered for the same reason as the
     // LLM key: no resolved secret stays scrub-invisible.

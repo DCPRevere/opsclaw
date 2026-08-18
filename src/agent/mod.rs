@@ -30,6 +30,7 @@
 pub mod dispatch;
 pub mod prompt;
 mod replay;
+mod turn_gate;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

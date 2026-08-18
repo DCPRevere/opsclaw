@@ -1920,3 +1920,27 @@ async fn a_successful_chat_turn_returns_the_reply_through_the_authed_seam() {
     // `chat_turn_persists_the_durable_log_streams_tools_and_hydrates`,
     // which drives a real ChatTurn against a real hub.
 }
+
+#[tokio::test]
+async fn repeated_chat_idempotency_key_runs_the_turn_once() {
+    let mut state = AppState::fake();
+    let fake = std::sync::Arc::new(FakeChat::new("done"));
+    state.chat = fake.clone();
+    seed_account(&state, "dedupe@example.com", "some-password-123").await;
+    let base = spawn_server(state).await;
+    let client = SessionClient::new();
+    client
+        .post_json(
+            &format!("{base}/api/login"),
+            &serde_json::json!({ "email": "dedupe@example.com", "password": "some-password-123" }),
+        )
+        .await;
+    let request = serde_json::json!({ "message": "run once", "idempotency_key": "same-request" });
+    let first: serde_json::Value =
+        client.post_json(&format!("{base}/api/chat"), &request).await.json().await.unwrap();
+    let second: serde_json::Value =
+        client.post_json(&format!("{base}/api/chat"), &request).await.json().await.unwrap();
+    assert_eq!(first["duplicate"], false);
+    assert_eq!(second["duplicate"], true);
+    assert_eq!(fake.calls.lock().unwrap().len(), 1);
+}

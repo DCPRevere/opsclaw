@@ -54,16 +54,9 @@ pub struct DispatchDeps {
     pub runbooks: Arc<RunbookStore>,
     pub endpoints: Arc<EndpointRegistry>,
     pub llm: Arc<dyn LlmProvider>,
-    /// The TEAM-WIDE turn gate (gianna's `turn_gate.rs`, generalized): at
-    /// most ONE agent turn runs at a time across every entry point — chat
-    /// (web/CLI/channel-inbound), scheduled scans, webhook alerts. Two
-    /// concurrent turns could each independently decide to act on the same
-    /// signal and double-execute a side-effecting tool; policy would gate
-    /// each correctly but has no cross-turn dedup. Serializing turns is the
-    /// simple, sufficient fix at this scale (one team, one daemon). Held as
-    /// an async `Mutex` guard across the whole `run_turn`, so waiters queue
-    /// rather than error.
-    pub turn_gate: Arc<tokio::sync::Mutex<()>>,
+    /// Conflict-domain gate shared by every entry point. Interactive turns
+    /// exclude all other work; background scans only exclude the same target.
+    pub turn_gate: crate::agent::turn_gate::TurnGate,
 }
 
 impl DispatchDeps {
@@ -103,7 +96,7 @@ impl DispatchDeps {
             runbooks,
             endpoints,
             llm,
-            turn_gate: Arc::new(tokio::sync::Mutex::new(())),
+            turn_gate: crate::agent::turn_gate::TurnGate::new(),
         })
     }
 }
@@ -264,7 +257,17 @@ impl JobComposer for AgentJobComposer {
         prompt: &str,
         _now_utc: DateTime<Utc>,
     ) -> Result<Option<String>> {
-        let _turn = self.deps.turn_gate.lock().await; // see DispatchDeps.turn_gate
+        let scan_target = match &job.payload {
+            Payload::ScanRoutine { target: Some(target), .. } => Some(target),
+            Payload::ScanRoutine { target: None, .. } => {
+                return Err(crate::Error::Config(format!(
+                    "seeded scan job {:?} has no bound target; run startup reconciliation",
+                    job.name
+                )));
+            }
+            _ => None,
+        };
+        let _turn = self.deps.turn_gate.acquire_for_target(scan_target).await;
         let principal = Principal::Agent { job: Some(job.id) };
         let mut ctx = build_tool_ctx(&self.deps, principal);
         if let Payload::ScanRoutine { target, .. } = &job.payload {
@@ -322,7 +325,7 @@ impl JobComposer for AgentJobComposer {
                 Payload::ScanRoutine { target: Some(target), .. } => {
                     agent::retain_scan_observation_detached(
                         &self.deps.memory,
-                        &target.to_string(),
+                        target.to_string(),
                         text,
                     );
                 }
@@ -372,7 +375,7 @@ impl WebhookIngest {
 #[async_trait]
 impl IngestAlert for WebhookIngest {
     async fn ingest(&self, source: &str, payload: &Value) -> Result<()> {
-        let _turn = self.deps.turn_gate.lock().await; // see DispatchDeps.turn_gate
+        let _turn = self.deps.turn_gate.acquire_interactive().await;
         let principal = Principal::Agent { job: None };
         let ctx = build_tool_ctx(&self.deps, principal);
         // Full registry, NOT heartbeat — an alert is interactive-priority.
@@ -616,7 +619,7 @@ impl ChatHandler for ChatTurn {
         // the transcript snapshotted here is always the one the reply
         // appends after. The std mutex below is still only held for the
         // clone, never across the turn (poison hygiene).
-        let _turn = self.deps.turn_gate.lock().await;
+        let _turn = self.deps.turn_gate.acquire_interactive().await;
         let prior = self.transcript.lock().expect("chat transcript lock poisoned").clone();
 
         // The user's message is durable and broadcast BEFORE the turn runs

@@ -97,6 +97,20 @@ export async function openStream() {
   };
 }
 
+// A chat reply is rendered from SSE, not the POST body. Do not submit until
+// EventSource is actually open: immediately sending after login could publish
+// both the user row and reply before this tab had joined the hub, leaving its
+// local "thinking" row stuck forever.
+async function ensureStreamOpen() {
+  await openStream();
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (evtSource && evtSource.readyState === EventSource.OPEN) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
 // Shared card scaffolding for actionable announcements. `decide` runs the
 // clicked action with every button disabled; failure re-enables them and
 // surfaces the server's error text (a 409 here usually means someone else
@@ -424,12 +438,19 @@ export function initChat() {
     e.preventDefault();
     const message = input.value.trim();
     if (!message) return;
-    input.value = '';
     input.disabled = true;
     submitBtn.disabled = true;
-    showPending();
     try {
-      const r = await api('/api/chat', 'POST', { message });
+      if (!(await ensureStreamOpen())) {
+        showError('The live chat connection is not ready — try again.');
+        return;
+      }
+      input.value = '';
+      showPending();
+      const idempotencyKey = (globalThis.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const r = await api('/api/chat', 'POST', { message, idempotency_key: idempotencyKey });
       if (!r.ok) {
         clearPending();
         showError(r.data.error || 'The chat turn failed — please try again.');

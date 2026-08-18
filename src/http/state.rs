@@ -2,6 +2,7 @@
 //! `src/http/state.rs`, collapsed to opsclaw's single-tenant shape — no
 //! household-scoped fields).
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -59,6 +60,9 @@ pub struct AppState {
     /// nothing needs scrubbing from logs.
     pub hanko: Option<Arc<crate::http::hanko::HankoClient>>,
     pub repos: Arc<dyn AllRepos>,
+    /// The configured memory backend, retained on state so deep readiness
+    /// probes the same client agent turns use.
+    pub memory: Arc<crate::memory::Memory>,
     /// Shared budget reporter/gate for OpsClaw and metered Hindsight calls.
     pub cost_guard: Arc<crate::llm::CostGuard>,
     /// The safety-invariant seam (AGENTS.md): the ONLY way any handler may
@@ -107,7 +111,11 @@ pub struct AppState {
     /// externally drains `server::run` the same way (the SIGTERM-equivalent
     /// the daemon-lifecycle e2e shuts down through).
     pub shutdown: tokio_util::sync::CancellationToken,
+    /// Every detached request/background task joins this tracker so graceful
+    /// shutdown waits for side effects and their transcript records to settle.
+    pub tasks: tokio_util::task::TaskTracker,
     pub auth_limiter: Arc<RateLimiter>,
+    pub chat_idempotency: Arc<ChatIdempotency>,
     /// Single-use replay guard for SSE stream tickets (gianna's
     /// `used_stream_tickets`) — token string -> expiry unix seconds, swept
     /// on insert. In-memory: opsclaw is a single-node daemon (DESIGN §1),
@@ -118,6 +126,34 @@ pub struct AppState {
     /// in-memory for the same reason as the stream-ticket guard: a restart
     /// mid-login just means re-running `login`.
     pub cli_auth_codes: Arc<Mutex<CliAuthCodes>>,
+}
+
+/// Bounded, process-local replay guard for client chat submission keys.
+pub struct ChatIdempotency {
+    seen: Mutex<VecDeque<(Uuid, String)>>,
+}
+
+pub(crate) const CHAT_IDEMPOTENCY_MAX: usize = 512;
+
+impl ChatIdempotency {
+    fn new() -> Self {
+        Self { seen: Mutex::new(VecDeque::new()) }
+    }
+
+    pub fn accept(&self, account: Uuid, key: Option<&str>) -> bool {
+        let Some(key) = key.map(str::trim).filter(|key| !key.is_empty()) else {
+            return true;
+        };
+        let mut seen = self.seen.lock().expect("chat idempotency cache poisoned");
+        if seen.iter().any(|(seen_account, seen_key)| *seen_account == account && seen_key == key) {
+            return false;
+        }
+        seen.push_back((account, key.to_string()));
+        while seen.len() > CHAT_IDEMPOTENCY_MAX {
+            seen.pop_front();
+        }
+        true
+    }
 }
 
 impl AppState {
@@ -160,6 +196,7 @@ impl AppState {
             webhook_secret,
             hanko,
             repos,
+            memory: Arc::new(crate::memory::Memory::disabled()),
             cost_guard,
             policy,
             approved,
@@ -173,7 +210,9 @@ impl AppState {
             chat: Arc::new(NoopChat),
             listen_channels: Vec::new(),
             shutdown: tokio_util::sync::CancellationToken::new(),
+            tasks: tokio_util::task::TaskTracker::new(),
             auth_limiter: Arc::new(RateLimiter::new(10, 60)),
+            chat_idempotency: Arc::new(ChatIdempotency::new()),
             used_stream_tickets: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cli_auth_codes: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
@@ -249,6 +288,7 @@ impl AppState {
             webhook_secret: None,
             hanko,
             repos,
+            memory: Arc::new(crate::memory::Memory::disabled()),
             cost_guard,
             policy: policy.clone(),
             approved: policy,
@@ -262,7 +302,9 @@ impl AppState {
             chat: Arc::new(NoopChat),
             listen_channels: Vec::new(),
             shutdown: tokio_util::sync::CancellationToken::new(),
+            tasks: tokio_util::task::TaskTracker::new(),
             auth_limiter: Arc::new(RateLimiter::new(10, 60)),
+            chat_idempotency: Arc::new(ChatIdempotency::new()),
             used_stream_tickets: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cli_auth_codes: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }

@@ -37,6 +37,12 @@ impl crate::db::JobRepo for InMemoryDb {
         }
     }
 
+    async fn delete(&self, id: Uuid) -> Result<bool> {
+        let mut store = self.store.lock().unwrap();
+        store.job_failures.retain(|(job_id, _), _| *job_id != id);
+        Ok(store.jobs.remove(&id).is_some())
+    }
+
     async fn due_jobs(&self, now: DateTime<Utc>) -> Result<Vec<Job>> {
         let store = self.store.lock().unwrap();
         let mut v: Vec<Job> = store.jobs.values().filter(|j| j.is_due(now)).cloned().collect();

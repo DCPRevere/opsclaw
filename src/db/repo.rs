@@ -192,6 +192,10 @@ pub trait JobRepo: Send + Sync {
     /// stored version had already moved on (a concurrent writer won) — the
     /// caller re-reads via `get` and retries rather than clobbering.
     async fn update(&self, job: &Job) -> Result<Job>;
+    /// Permanently remove a job and its retry history. Returns false when the
+    /// id did not exist, so operator-facing deletes can distinguish a stale
+    /// request without a read/delete race.
+    async fn delete(&self, id: Uuid) -> Result<bool>;
     /// Enabled jobs whose `next_run_at` has passed — the dispatcher drains
     /// these each tick.
     async fn due_jobs(&self, now: DateTime<Utc>) -> Result<Vec<Job>>;
@@ -311,7 +315,7 @@ pub trait TokenRepo: Send + Sync {
 /// a new one. Single-tenant (DESIGN §1: "no tenancy ids thread through the
 /// code") — unlike gianna's household-scoped invite, an opsclaw invite
 /// carries no household/team id, just who issued it and when it expires.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Invite {
     pub code: String,
     pub issued_by: Uuid,

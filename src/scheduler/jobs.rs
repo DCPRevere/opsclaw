@@ -534,30 +534,12 @@ pub async fn seed_default_scan_jobs(deps: &SchedulerDeps, every_minutes: i64) ->
         .collect();
 
     for job in &existing {
-        if !job.system || !matches!(job.payload, Payload::ScanRoutine { .. }) {
-            continue;
-        }
-        if !desired_names.contains(&job.name) && job.enabled {
-            let mut retired = job.clone();
-            retired.enabled = false;
-            // This also marks an automatic retirement distinctly from the
-            // CLI's operator pause, which leaves the next occurrence intact.
-            retired.next_run_at = None;
-            deps.jobs.update(&retired).await?;
-            tracing::info!(job = %job.id, name = %job.name, "retired stale seeded scan job");
-        } else if desired_names.contains(&job.name)
-            && !job.enabled
-            && job.next_run_at.is_none()
-            && job.schedule.is_recurring()
+        if job.system
+            && matches!(job.payload, Payload::ScanRoutine { .. })
+            && !desired_names.contains(&job.name)
         {
-            // A target can move away and later return. Restore only the
-            // marker shape written above; an operator pause retains its
-            // next occurrence and must stay paused across a restart.
-            let mut restored = job.clone();
-            restored.enabled = true;
-            restored.next_run_at = restored.schedule.next_after(Utc::now());
-            deps.jobs.update(&restored).await?;
-            tracing::info!(job = %job.id, name = %job.name, "restored seeded scan job for returning target");
+            deps.jobs.delete(job.id).await?;
+            tracing::info!(job = %job.id, name = %job.name, "deleted stale seeded scan job");
         }
     }
 

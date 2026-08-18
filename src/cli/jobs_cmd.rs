@@ -122,6 +122,13 @@ pub async fn edit(
     jobs.update(&job).await
 }
 
+pub async fn delete(jobs: &dyn JobRepo, name: &str) -> Result<bool> {
+    let Some(job) = jobs.list().await?.into_iter().find(|job| job.name == name) else {
+        return Ok(false);
+    };
+    jobs.delete(job.id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

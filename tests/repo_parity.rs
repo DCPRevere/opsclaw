@@ -758,6 +758,17 @@ job_update_version_cas_conflict => |db| {
     assert!(matches!(err, opsclaw::Error::NotFound(_)), "expected NotFound, got {err:?}");
 }
 
+job_delete_removes_the_row_and_failure_history => |db| {
+    let j = job("delete-me");
+    JobRepo::insert(db, &j).await.unwrap();
+    db.record_job_failure(j.id, "occurrence", "failed", Utc::now()).await.unwrap();
+
+    assert!(JobRepo::delete(db, j.id).await.unwrap());
+    assert!(JobRepo::get(db, j.id).await.unwrap().is_none());
+    assert_eq!(db.count_job_failures(j.id).await.unwrap(), 0);
+    assert!(!JobRepo::delete(db, j.id).await.unwrap());
+}
+
 job_due_jobs_filters_enabled_and_time => |db| {
     let now = Utc::now();
 

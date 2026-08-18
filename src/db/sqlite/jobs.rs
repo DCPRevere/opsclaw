@@ -125,6 +125,22 @@ impl crate::db::JobRepo for SqliteDb {
         }
     }
 
+    async fn delete(&self, id: Uuid) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM job_failures WHERE job_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        let removed = sqlx::query("DELETE FROM jobs WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+        tx.commit().await?;
+        Ok(removed)
+    }
+
     async fn due_jobs(&self, now: DateTime<Utc>) -> Result<Vec<Job>> {
         let rows = sqlx::query(
             "SELECT * FROM jobs WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?

@@ -1,0 +1,58 @@
+name: Web smoke
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: web-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build daemon and CLI
+        run: cargo build --release --bin opsclaw --bin opsclaw-cli
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web-tests/package-lock.json
+      - name: Install web-test dependencies
+        working-directory: web-tests
+        run: npm ci
+      - name: Check browser module graph
+        working-directory: web-tests
+        run: npm run check
+      - name: Install Chromium
+        working-directory: web-tests
+        run: npx playwright install --with-deps chromium
+      - name: Run browser smoke tests
+        working-directory: web-tests
+        env:
+          CI: "1"
+        run: npm test
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web-tests/playwright-report/
+          retention-days: 7

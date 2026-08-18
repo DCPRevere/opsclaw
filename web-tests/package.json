@@ -1,0 +1,13 @@
+{
+  "name": "opsclaw-web-tests",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "check": "esbuild ../static/app/main.js --bundle --format=esm --platform=browser --external:./hanko-elements.js --log-level=warning --outfile=/dev/null",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "esbuild": "0.28.2"
+  }
+}

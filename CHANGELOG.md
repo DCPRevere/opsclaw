@@ -6,6 +6,30 @@ release out.
 
 ## v0.3.0
 
+### Agent turns and daemon health are failure-safe
+
+Web and remote-CLI chat submissions now carry optional idempotency keys, and
+the web client supplies one for every send. A disconnected client no longer
+cancels an agent turn after a tool may have acted: turns are shutdown-tracked
+through their transcript write. Interactive work remains exclusive, while
+scheduled scans of different exact targets can run concurrently.
+
+Readiness now probes SQLite; `?deep=1` also probes Hindsight, and the standard
+Docker and Kubernetes readiness checks use the deep form. Authentication rate
+limits no longer reset at calendar boundaries. OpenRouter failures wrapped in
+HTTP 200 retain their embedded retry classification instead of collapsing to
+an opaque missing-choices error.
+
+Production logs support `OPSCLAW_LOG_FORMAT=json`, with request-span fields
+and the existing credential scrubber preserved; panics are routed through the
+same tracing stream. CI now includes browser smoke tests and a weekly RustSec
+advisory scan.
+
+**Deploying** — this changes the embedded web client and container health
+checks, so deploy the new binary/image before expecting idempotent sends or
+deep readiness. Set `OPSCLAW_LOG_FORMAT=json` only when structured logs are
+wanted; human-readable output remains the default.
+
 ### Target boundaries are enforced end to end
 
 Seeded scans now persist their exact target and receive only that target and

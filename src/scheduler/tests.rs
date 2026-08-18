@@ -544,6 +544,44 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
         1,
         "re-seeding must not duplicate an existing system job"
     );
+
+    // Moving the target changes its fully-qualified job identity. Reconcile
+    // must seed the new path and retire the old row so it cannot keep firing.
+    let mut moved_config = (*deps.config).clone();
+    moved_config.projects[0].envs[0].name = "staging".into();
+    let moved_deps = SchedulerDeps { config: Arc::new(moved_config), ..deps.clone() };
+    seed_default_scan_jobs(&moved_deps, 5).await.unwrap();
+
+    let jobs = db.list().await.unwrap();
+    assert_eq!(jobs.len(), 2);
+    let old = jobs.iter().find(|job| job.name == "remundo::prod::cluster-scan").unwrap();
+    assert!(!old.enabled, "the removed target's scan must be retired");
+    assert_eq!(old.next_run_at, None, "a retired scan must never remain due");
+    let moved = jobs.iter().find(|job| job.name == "remundo::staging::cluster-scan").unwrap();
+    assert!(moved.enabled, "the target's new path must be seeded");
+
+    // Moving it back restores the row retired by reconciliation and retires
+    // the now-stale staging row. It does not create a third job.
+    seed_default_scan_jobs(&deps, 5).await.unwrap();
+    let jobs = db.list().await.unwrap();
+    assert_eq!(jobs.len(), 2);
+    let restored = jobs.iter().find(|job| job.name == "remundo::prod::cluster-scan").unwrap();
+    assert!(restored.enabled);
+    assert!(restored.next_run_at.is_some());
+    let stale = jobs.iter().find(|job| job.name == "remundo::staging::cluster-scan").unwrap();
+    assert!(!stale.enabled);
+    assert_eq!(stale.next_run_at, None);
+
+    // An operator pause has a retained next occurrence and is not the
+    // automatic-retirement marker, so reconciliation must not undo it.
+    let mut paused = restored.clone();
+    paused.enabled = false;
+    let paused = db.update(&paused).await.unwrap();
+    assert!(paused.next_run_at.is_some());
+    seed_default_scan_jobs(&deps, 5).await.unwrap();
+    let stored = db.get(paused.id).await.unwrap().unwrap();
+    assert!(!stored.enabled, "an operator-paused current scan must stay paused");
+    assert!(stored.next_run_at.is_some());
 }
 
 // ---- adaptive tick interval ----

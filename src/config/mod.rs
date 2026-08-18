@@ -1251,6 +1251,10 @@ impl Config {
     /// CLOSED: nothing silently degrades toward more autonomy, more spend, or
     /// less security.
     pub fn validate(&self) -> Result<()> {
+        self.validate_for_runtime(running_in_container())
+    }
+
+    fn validate_for_runtime(&self, containerized: bool) -> Result<()> {
         let mut errs: Vec<String> = Vec::new();
 
         if self.llm.api_key.is_some() && self.llm.models.is_empty() {
@@ -1459,12 +1463,28 @@ impl Config {
                             p.name, e.name, t.name, t.kind
                         ));
                     }
+                    if t.kind == TargetKindName::Local && containerized {
+                        errs.push(format!(
+                            "target {}::{}::{} is local, but OpsClaw is running in a container \
+                             — local would inspect the container, not its host; configure an SSH \
+                             target for the host instead",
+                            p.name, e.name, t.name
+                        ));
+                    }
                 }
             }
         }
 
         if errs.is_empty() { Ok(()) } else { Err(Error::Config(errs.join("\n"))) }
     }
+}
+
+pub(crate) fn running_in_container() -> bool {
+    container_marker(std::env::var("OPSCLAW_CONTAINER").ok().as_deref())
+}
+
+fn container_marker(value: Option<&str>) -> bool {
+    value.is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
 }
 
 #[cfg(test)]
@@ -1480,6 +1500,34 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.fully_faked());
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn container_marker_is_explicit_and_not_triggered_by_a_blank_value() {
+        assert!(container_marker(Some("1")));
+        assert!(container_marker(Some("true")));
+        assert!(!container_marker(Some("")));
+        assert!(!container_marker(Some("0")));
+        assert!(!container_marker(None));
+    }
+
+    #[test]
+    fn container_runtime_refuses_a_local_target_that_would_inspect_itself() {
+        let cfg = parse(
+            r#"
+            [[project]]
+            name = "payments"
+            [[project.env]]
+            name = "prod"
+            [[project.env.target]]
+            name = "host"
+            kind = "local"
+            "#,
+        );
+        cfg.validate_for_runtime(false).unwrap();
+        let err = cfg.validate_for_runtime(true).unwrap_err().to_string();
+        assert!(err.contains("payments::prod::host"), "{err}");
+        assert!(err.contains("container, not its host"), "{err}");
     }
 
     #[test]

@@ -62,6 +62,7 @@ COPY --from=builder /app/target/release/opsclaw-cli /usr/local/bin/opsclaw-cli
 COPY migrations ./migrations
 
 ENV OPSCLAW_LISTEN=0.0.0.0:8484
+ENV OPSCLAW_CONTAINER=1
 EXPOSE 8484
 
 # Non-root, matching gianna and the Helm chart's podSecurityContext

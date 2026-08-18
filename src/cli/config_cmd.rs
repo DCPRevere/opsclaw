@@ -262,7 +262,14 @@ fn ask_kube_context(p: &mut dyn Prompter, contexts: Option<&[String]>) -> Result
 /// Prompt for one new target within an environment, returning it unattached.
 fn wizard_target(p: &mut dyn Prompter, store: &SecretStore) -> Result<TargetCfg> {
     let name = p.ask("target name", None)?;
-    let kind_str = ask_choice(p, "target kind", &["ssh", "local", "kubernetes", "cloud"], "ssh")?;
+    let kinds: &[&str] = if crate::config::running_in_container() {
+        p.say("  local targets are unavailable here: inside a container they inspect the");
+        p.say("  container, not its host. Use ssh to observe the host.");
+        &["ssh", "kubernetes", "cloud"]
+    } else {
+        &["ssh", "local", "kubernetes", "cloud"]
+    };
+    let kind_str = ask_choice(p, "target kind", kinds, "ssh")?;
     let kind = match kind_str.as_str() {
         "ssh" => TargetKindName::Ssh,
         "local" => TargetKindName::Local,

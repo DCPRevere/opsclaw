@@ -9,6 +9,7 @@
 # No checkout needed — both files are self-contained:
 #   curl -O https://raw.githubusercontent.com/DCPRevere/opsclaw/master/deploy/docker-compose.yml
 #   curl -o .env https://raw.githubusercontent.com/DCPRevere/opsclaw/master/deploy/.env.example
+#   mkdir -p creds
 #   $EDITOR .env
 #
 # ONBOARD FIRST, THEN START. This order is not a preference:
@@ -57,6 +58,24 @@ x-logging: &bounded-logs
     max-file: "3"
 
 services:
+  # Copies host-provided target credentials into a daemon-owned volume and
+  # fixes ownership/modes before each start. The source files stay untouched.
+  opsclaw-credentials:
+    image: ghcr.io/dcprevere/opsclaw:${OPSCLAW_VERSION:-latest}
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        find /output -mindepth 1 -delete &&
+        cp -a /input/. /output/ &&
+        chown -R 10001:10001 /output &&
+        find /output -type d -exec chmod 700 {} \; &&
+        find /output -type f -exec chmod 600 {} \;
+    volumes:
+      - ./creds:/input:ro
+      - opsclaw_credentials:/output
+
   # Hindsight: the sole memory backend (DESIGN.md §3 Memory — "live mode
   # refuses to boot without it"). PINNED: gianna's lockstep-pinning rule —
   # never bump this casually; a version bump is a deliberate, tested decision,
@@ -98,7 +117,10 @@ services:
     restart: unless-stopped
     logging: *bounded-logs
     depends_on:
-      - opsclaw-hindsight
+      opsclaw-hindsight:
+        condition: service_started
+      opsclaw-credentials:
+        condition: service_completed_successfully
     # Graceful shutdown drains HTTP then gives background work a bounded
     # (~20s) budget (DESIGN.md §3 HTTP gateway); give docker's default
     # SIGTERM→SIGKILL grace enough headroom that a stop never cuts the drain
@@ -115,6 +137,10 @@ services:
       # fully faked (no live memory) — there is no in-process fallback.
       HINDSIGHT_URL: ${HINDSIGHT_URL:-http://opsclaw-hindsight:8888}
       HINDSIGHT_TOKEN: ${HINDSIGHT_TOKEN:-}
+      # Read-only billing credentials let OpsClaw include Hindsight's
+      # OpenRouter usage in the same daily cap and `usage` report.
+      HINDSIGHT_LLM_BASE_URL: ${HINDSIGHT_LLM_BASE_URL:-}
+      HINDSIGHT_LLM_API_KEY: ${HINDSIGHT_LLM_API_KEY:-}
       # Telegram channel (optional).
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       # External dead-man heartbeat (DESIGN.md §4): standard feature in every
@@ -131,22 +157,10 @@ services:
       # opsclaw-daemon opsclaw-cli onboard`) writes config.toml here on first
       # setup.
       - opsclaw_home:/home/opsclaw/.opsclaw
-      # TARGET CREDENTIALS MUST BE MOUNTED. A credential path in config is
-      # opened by the DAEMON, so it is resolved inside this container: a host
-      # path like ~/.kube/config simply does not exist here, and a kubernetes
-      # or ssh target configured with one fails at first use, not at
-      # `doctor`. Mount what each target needs, read-only, and answer the
-      # wizard with the CONTAINER path:
-      #   - ./creds/kubeconfig:/home/opsclaw/creds/kubeconfig:ro
-      #   - ./creds/id_ed25519:/home/opsclaw/creds/id_ed25519:ro
-      #
-      # Mind the uid. This container runs as uid 10001 (deploy/Dockerfile),
-      # which is almost certainly not your host uid — and ssh REFUSES a
-      # private key that is group/world readable, so relaxing the mode is not
-      # the fix. Give the daemon its own copy:
-      #   mkdir -p creds && cp ~/.ssh/id_ed25519 creds/
-      #   sudo chown 10001 creds/id_ed25519 && chmod 600 creds/id_ed25519
-      # A kubeconfig has no such rule; mode 644 is enough for that one.
+      # Put target credentials in ./creds and reference them in config as
+      # /home/opsclaw/creds/<name>. The init service above copies them into
+      # this private volume and applies uid 10001 plus ssh-safe modes.
+      - opsclaw_credentials:/home/opsclaw/creds:ro
       #
       # On a shared host, `docker inspect` shows every mount to anyone in the
       # docker group — which is root-equivalent anyway. Scope these
@@ -162,3 +176,4 @@ services:
 volumes:
   opsclaw_hindsight:
   opsclaw_home:
+  opsclaw_credentials:

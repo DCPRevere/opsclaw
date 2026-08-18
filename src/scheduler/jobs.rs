@@ -467,11 +467,11 @@ pub const RECORD_SCAN_PROMPT: &str = "record_scan";
 // namespace and leaned on aggregate metrics (Prometheus `up`) and log
 // search, neither of which surfaces a crashloop. A scan whose coverage
 // depends on the model's per-run whims is not a scan.
-const DEFAULT_SCAN_PROMPT: &str = "Run a full health scan of this target. The following checks are MANDATORY every scan, in \
+const DEFAULT_SCAN_PROMPT: &str = "Run a full health scan of the single target named in this turn. Do not inspect any other environment. The following checks are MANDATORY every scan, in \
      this order, before any deeper digging:\n\
      1. WORKLOAD SWEEP — enumerate workload state across the WHOLE target (for kubernetes: \
-     pods across ALL namespaces in one call — get pods with all_namespaces: true, NOT one \
-     call per namespace), and flag anything crash-looping, restarting excessively, \
+     cover exactly the target's configured scope: use all_namespaces only for a cluster-scoped \
+     target, and use the configured namespace for a namespace-scoped target), and flag anything crash-looping, restarting excessively, \
      failing to pull images, stuck initializing/terminating, or not ready. Aggregate metrics \
      and log searches do NOT substitute for this sweep — a crash-looping pod can look healthy \
      in both.\n\
@@ -503,7 +503,7 @@ pub(super) fn payload_compose_prompt(payload: &Payload) -> Option<&str> {
     match payload {
         Payload::Text(_) => None,
         Payload::Prompt { body } => Some(body.as_str()),
-        Payload::ScanRoutine { routine } => system_routine_prompt(routine),
+        Payload::ScanRoutine { routine, .. } => system_routine_prompt(routine),
     }
 }
 
@@ -520,14 +520,15 @@ pub fn resolved_prompt(payload: &Payload) -> Option<&str> {
 /// Operator-authored/customized payloads are never retired here.
 pub async fn seed_default_scan_jobs(deps: &SchedulerDeps, every_minutes: i64) -> Result<()> {
     let existing = deps.jobs.list().await?;
-    let desired_names: std::collections::HashSet<String> = deps
+    let desired: std::collections::HashMap<String, crate::domain::FqTarget> = deps
         .config
         .projects
         .iter()
         .flat_map(|project| {
             project.envs.iter().flat_map(move |env| {
                 env.targets.iter().map(move |target| {
-                    format!("{}::{}::{}-scan", project.name, env.name, target.name)
+                    let fq = crate::domain::FqTarget::new(&project.name, &env.name, &target.name);
+                    (format!("{fq}-scan"), fq)
                 })
             })
         })
@@ -536,10 +537,25 @@ pub async fn seed_default_scan_jobs(deps: &SchedulerDeps, every_minutes: i64) ->
     for job in &existing {
         if job.system
             && matches!(job.payload, Payload::ScanRoutine { .. })
-            && !desired_names.contains(&job.name)
+            && !desired.contains_key(&job.name)
         {
             deps.jobs.delete(job.id).await?;
             tracing::info!(job = %job.id, name = %job.name, "deleted stale seeded scan job");
+        }
+    }
+
+    // Rows written before scan target binding carried only the routine key.
+    // Upgrade them in place at startup, and also repair any mismatched
+    // binding rather than trusting a target encoded only in the job name.
+    for job in &existing {
+        let Payload::ScanRoutine { routine, target } = &job.payload else { continue };
+        let Some(expected) = desired.get(&job.name) else { continue };
+        if job.system && target.as_ref() != Some(expected) {
+            let mut upgraded = job.clone();
+            upgraded.payload =
+                Payload::ScanRoutine { routine: routine.clone(), target: Some(expected.clone()) };
+            deps.jobs.update(&upgraded).await?;
+            tracing::info!(job = %job.id, target = %expected, "bound seeded scan job to target");
         }
     }
 
@@ -556,7 +572,14 @@ pub async fn seed_default_scan_jobs(deps: &SchedulerDeps, every_minutes: i64) ->
                 let job = Job::new(
                     name,
                     Schedule::Interval { every_minutes: every_minutes.max(1) },
-                    Payload::ScanRoutine { routine: RECORD_SCAN_PROMPT.to_string() },
+                    Payload::ScanRoutine {
+                        routine: RECORD_SCAN_PROMPT.to_string(),
+                        target: Some(crate::domain::FqTarget::new(
+                            &project.name,
+                            &env.name,
+                            &target.name,
+                        )),
+                    },
                 )
                 .system();
                 deps.jobs.insert(&job).await?;

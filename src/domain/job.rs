@@ -137,7 +137,14 @@ pub enum Payload {
     /// Serializes as `{"kind":"scan_routine","body":{"routine":"..."}}`; the
     /// wire string is what the seeding path writes, so keep routine keys
     /// stable — renaming one is a stored-row break.
-    ScanRoutine { routine: String },
+    ScanRoutine {
+        routine: String,
+        /// Exact target this routine is authorized to inspect. `None` only
+        /// exists to deserialize rows written before target binding shipped;
+        /// startup reconciliation upgrades those rows before they can fire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<crate::domain::FqTarget>,
+    },
 }
 
 /// A scheduled recurring job.
@@ -346,7 +353,10 @@ mod tests {
     fn scan_routine_payload_does_not_snapshot_prompt() {
         // ScanRoutine carries only the routine key, never prompt text — the
         // resolve-from-code-constant-at-fire-time invariant (AGENTS.md).
-        let p = Payload::ScanRoutine { routine: "remundo_default_scan".into() };
+        let p = Payload::ScanRoutine {
+            routine: "remundo_default_scan".into(),
+            target: Some(crate::domain::FqTarget::new("remundo", "prod", "cluster")),
+        };
         let json = serde_json::to_value(&p).unwrap();
         assert_eq!(
             json,

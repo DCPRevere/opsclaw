@@ -526,10 +526,11 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
     let job = &seeded[0];
     assert!(job.system);
     assert_eq!(job.name, "remundo::prod::cluster-scan");
-    let Payload::ScanRoutine { routine } = &job.payload else {
+    let Payload::ScanRoutine { routine, target } = &job.payload else {
         panic!("seeded job must carry a ScanRoutine payload, not a snapshotted prompt");
     };
     assert_eq!(routine, jobs::RECORD_SCAN_PROMPT);
+    assert_eq!(target.as_ref().unwrap().to_string(), "remundo::prod::cluster");
 
     // The prompt text resolves from the CODE CONST at fire/preview time —
     // never stored in the row — so editing the const (simulated here by

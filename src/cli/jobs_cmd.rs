@@ -41,7 +41,7 @@ fn describe_payload(p: &Payload) -> String {
     match p {
         Payload::Text(t) => format!("text: {}", preview(t)),
         Payload::Prompt { body } => format!("prompt: {}", preview(body)),
-        Payload::ScanRoutine { routine } => {
+        Payload::ScanRoutine { routine, .. } => {
             format!("scan routine {routine:?} (prompt from code; edit converts to free text)")
         }
     }
@@ -139,7 +139,10 @@ mod tests {
         Job::new(
             name,
             Schedule::Interval { every_minutes: 30 },
-            Payload::ScanRoutine { routine: "record_scan".into() },
+            Payload::ScanRoutine {
+                routine: "record_scan".into(),
+                target: Some(crate::domain::FqTarget::new("remundo", "prod", "cluster")),
+            },
         )
         .system()
     }

@@ -153,6 +153,20 @@ pub fn build_tool_ctx(deps: &DispatchDeps, principal: Principal) -> ToolCtx {
     }
 }
 
+/// Reduce a scan turn's authority to one base target and resources owned by
+/// that target. This is authorization, not prompt guidance: even if the
+/// model names dev while running a prod scan, tool resolution cannot find it.
+fn restrict_to_scan_target(ctx: &mut ToolCtx, target: &FqTarget) -> Result<()> {
+    ctx.known_targets.retain(|known| {
+        known.project == target.project && known.env == target.env && known.target == target.target
+    });
+    if ctx.known_targets.iter().any(|known| known == target) {
+        Ok(())
+    } else {
+        Err(crate::Error::Config(format!("scan is bound to removed target {target}")))
+    }
+}
+
 /// A short, free-text team-context line describing what's addressable this
 /// turn — handed to `run_turn`'s `team_context` parameter (persona ->
 /// [heartbeat framing] -> team context -> volatile clock, `agent::mod`'s
@@ -240,7 +254,21 @@ impl JobComposer for AgentJobComposer {
     ) -> Result<Option<String>> {
         let _turn = self.deps.turn_gate.lock().await; // see DispatchDeps.turn_gate
         let principal = Principal::Agent { job: Some(job.id) };
-        let ctx = build_tool_ctx(&self.deps, principal);
+        let mut ctx = build_tool_ctx(&self.deps, principal);
+        if let Payload::ScanRoutine { target, .. } = &job.payload {
+            let target = target.as_ref().ok_or_else(|| {
+                crate::Error::Config(format!(
+                    "seeded scan job {:?} has no bound target; run startup reconciliation",
+                    job.name
+                ))
+            })?;
+            restrict_to_scan_target(&mut ctx, target).map_err(|_| {
+                crate::Error::Config(format!(
+                    "scan job {:?} is bound to removed target {target}",
+                    job.name
+                ))
+            })?;
+        }
         let registry = tools::registry(&ctx, /* heartbeat = */ true);
         let team_context = team_context_line(&ctx.known_targets, &self.deps.config);
 
@@ -279,15 +307,14 @@ impl JobComposer for AgentJobComposer {
         let text = reply.reply.trim();
         if reply.acted && !text.is_empty() {
             match &job.payload {
-                Payload::ScanRoutine { .. } => {
-                    // Seeded scan jobs are named "{project}::{env}::{target}-scan"
-                    // (`scheduler::jobs::seed_default_scan_jobs`); strip the
-                    // suffix to recover the fq_target the finding is anchored
-                    // to. An operator-renamed job falls back to its full name —
-                    // an odd qualifier beats dropping the attribution.
-                    let fq_target = job.name.strip_suffix("-scan").unwrap_or(&job.name);
-                    agent::retain_scan_observation_detached(&self.deps.memory, fq_target, text);
+                Payload::ScanRoutine { target: Some(target), .. } => {
+                    agent::retain_scan_observation_detached(
+                        &self.deps.memory,
+                        &target.to_string(),
+                        text,
+                    );
                 }
+                Payload::ScanRoutine { target: None, .. } => unreachable!("checked above"),
                 Payload::Text(_) | Payload::Prompt { .. } => {
                     if memory::should_retain(text) {
                         agent::retain_turn_detached(&self.deps.memory, "agent", text.to_string());
@@ -866,7 +893,10 @@ mod tests {
         let job = Job::new(
             "remundo::prod::web-1-scan",
             crate::domain::Schedule::Interval { every_minutes: 5 },
-            Payload::ScanRoutine { routine: "record_scan".into() },
+            Payload::ScanRoutine {
+                routine: "record_scan".into(),
+                target: Some(FqTarget::new("remundo", "prod", "web-1")),
+            },
         )
         .system();
 
@@ -1008,7 +1038,10 @@ mod tests {
         let job = Job::new(
             "remundo::prod::web-1-scan",
             crate::domain::Schedule::Interval { every_minutes: 5 },
-            Payload::ScanRoutine { routine: "record_scan".into() },
+            Payload::ScanRoutine {
+                routine: "record_scan".into(),
+                target: Some(FqTarget::new("remundo", "prod", "web-1")),
+            },
         )
         .system();
         let err = composer.compose(&job, "scan", Utc::now()).await.unwrap_err();
@@ -1036,6 +1069,24 @@ mod tests {
         let targets = known_targets_from_config(&config);
         assert!(targets.iter().any(|t| t.to_string() == "remundo::prod::web-1"));
         assert!(targets.iter().any(|t| t.resource.is_some()));
+    }
+
+    #[test]
+    fn scan_context_cannot_cross_from_prod_into_dev() {
+        let mut config = test_config();
+        let mut dev = config.projects[0].envs[0].clone();
+        dev.name = "dev".into();
+        config.projects[0].envs.push(dev);
+        let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
+        let mut ctx = ToolCtx::for_tests(Principal::Agent { job: None }, policy);
+        ctx.known_targets = known_targets_from_config(&config);
+
+        restrict_to_scan_target(&mut ctx, &FqTarget::new("remundo", "prod", "web-1")).unwrap();
+
+        assert!(ctx.known_targets.iter().all(|target| target.env == "prod"));
+        assert!(ctx.known_targets.iter().any(|target| target.resource.is_none()));
+        assert!(ctx.known_targets.iter().any(|target| target.resource.is_some()));
+        assert!(ctx.resolve_target("remundo::dev::web-1").is_err());
     }
 
     #[test]
@@ -1239,7 +1290,10 @@ mod tests {
         let job = Job::new(
             "remundo::prod::web-1-scan",
             crate::domain::Schedule::Interval { every_minutes: 5 },
-            Payload::ScanRoutine { routine: "record_scan".into() },
+            Payload::ScanRoutine {
+                routine: "record_scan".into(),
+                target: Some(FqTarget::new("remundo", "prod", "web-1")),
+            },
         )
         .system();
 
@@ -1277,7 +1331,10 @@ mod tests {
         let job = Job::new(
             "remundo::prod::web-1-scan",
             crate::domain::Schedule::Interval { every_minutes: 5 },
-            Payload::ScanRoutine { routine: "record_scan".into() },
+            Payload::ScanRoutine {
+                routine: "record_scan".into(),
+                target: Some(FqTarget::new("remundo", "prod", "web-1")),
+            },
         )
         .system();
 

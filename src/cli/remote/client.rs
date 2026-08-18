@@ -17,8 +17,9 @@ use crate::cli::remote::session::Session;
 
 fn no_session_error() -> crate::Error {
     crate::Error::validation(
-        "not logged in — run `opsclaw-cli login --remote <gateway-url>` first (or set \
-         OPSCLAW_TOKEN/OPSCLAW_SERVER)",
+        "remote mode needs gateway credentials — sign in from a workstation with browser \
+         access using `opsclaw-cli login --remote <gateway-url>`, or set \
+         OPSCLAW_TOKEN/OPSCLAW_SERVER; omit --remote when this command supports local mode",
     )
 }
 
@@ -70,6 +71,16 @@ pub async fn post_json(session: &Session, path: &str, body: &Value) -> Result<Va
 
 pub async fn post(session: &Session, path: &str) -> Result<Value> {
     post_json(session, path, &Value::Null).await
+}
+
+pub async fn delete(session: &Session, path: &str) -> Result<Value> {
+    let resp = reqwest::Client::new()
+        .delete(format!("{}{path}", session.server))
+        .bearer_auth(&session.token)
+        .send()
+        .await
+        .map_err(|e| crate::Error::other(format!("could not reach {}: {e}", session.server)))?;
+    handle_response(resp).await
 }
 
 #[cfg(test)]

@@ -79,7 +79,7 @@ fn describe_outcome(outcome: PolicyOutcome) -> String {
              Tell the user it's awaiting approval; do not claim it happened."
         ),
         PolicyOutcome::Blocked { reason, dry_run_logged } => {
-            let logged = if dry_run_logged { " (logged to the dry-run log)" } else { "" };
+            let logged = if dry_run_logged { " (logged in blocked-actions)" } else { "" };
             format!("blocked by policy: {reason}{logged}. This command did NOT run.")
         }
         PolicyOutcome::EStopped => {

@@ -91,6 +91,8 @@ pub struct HistoryQuery {
     /// When present, page BACKWARD: the newest `PAGE` rows strictly before
     /// this seq (the client hands back the oldest seq it has rendered).
     pub before: Option<i64>,
+    /// Optional CLI page size. The web UI omits it and keeps the default.
+    pub limit: Option<i64>,
 }
 
 /// GET /api/chat/history[?before=<seq>] — the shared transcript for
@@ -110,11 +112,12 @@ async fn history(
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<Value>> {
     const PAGE: i64 = 100;
+    let limit = q.limit.unwrap_or(PAGE).clamp(1, 500);
     let rows = match q.before {
-        Some(before) => state.repos.before_chat(before, PAGE).await?,
-        None => state.repos.recent_chat(PAGE).await?,
+        Some(before) => state.repos.before_chat(before, limit).await?,
+        None => state.repos.recent_chat(limit).await?,
     };
-    let has_more = rows.len() as i64 == PAGE;
+    let has_more = rows.len() as i64 == limit;
     Ok(Json(json!({
         "history": rows.into_iter().map(|m| json!({
             "seq": m.seq,

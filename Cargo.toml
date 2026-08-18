@@ -79,7 +79,7 @@ async-trait = "0.1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
 
 [dev-dependencies]
 # Local mock HTTP server for provider/Hindsight/endpoint-tool tests (no real network).

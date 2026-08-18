@@ -25,7 +25,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use opsclaw::cli::prompt::StdioPrompter;
 use opsclaw::cli::remote::session::Session;
 use opsclaw::config::Config;
@@ -42,6 +43,49 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+fn completion_config_path() -> PathBuf {
+    let args: Vec<_> = std::env::args_os().collect();
+    args.windows(2)
+        .find(|pair| pair[0] == "--config")
+        .map(|pair| PathBuf::from(&pair[1]))
+        .unwrap_or_else(|| opsclaw_home().join("config.toml"))
+}
+
+fn configured_paths(targets_only: bool) -> Vec<CompletionCandidate> {
+    let Ok(config) = Config::load(Some(&completion_config_path())) else {
+        return Vec::new();
+    };
+    path_candidates_for(&config, targets_only)
+}
+
+fn path_candidates_for(config: &Config, targets_only: bool) -> Vec<CompletionCandidate> {
+    let mut paths = Vec::new();
+    for project in &config.projects {
+        if !targets_only {
+            paths.push(project.name.clone());
+        }
+        for environment in &project.envs {
+            let env_path = format!("{}::{}", project.name, environment.name);
+            if !targets_only {
+                paths.push(env_path.clone());
+            }
+            paths.extend(
+                environment.targets.iter().map(|target| format!("{env_path}::{}", target.name)),
+            );
+        }
+    }
+    paths.sort();
+    paths.into_iter().map(CompletionCandidate::new).collect()
+}
+
+fn target_candidates() -> Vec<CompletionCandidate> {
+    configured_paths(true)
+}
+
+fn config_path_candidates() -> Vec<CompletionCandidate> {
+    configured_paths(false)
 }
 
 /// Parse one `key=value` `--var` argument (runbook `run`'s `--var k=v`,
@@ -69,7 +113,7 @@ fn parse_auth_provider(s: &str) -> Result<opsclaw::config::AuthProvider, String>
 
 #[derive(Subcommand)]
 enum Command {
-    /// First-run wizard: provider key, channels, memory, gateway.
+    /// [local] First-run wizard: provider key, channels, memory, gateway.
     Onboard {
         /// Non-interactive: answer every prompt from flags, no stdin.
         #[arg(long)]
@@ -97,14 +141,14 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         hanko_audience: Vec<String>,
     },
-    /// Config + dependency health check.
+    /// [local] Config + dependency health check.
     Doctor {
         #[arg(long)]
         json: bool,
     },
-    /// Run the daemon (identical to the `opsclaw` binary).
+    /// [local] Run the daemon (identical to the `opsclaw` binary).
     Daemon,
-    /// Freeze all agent action across all targets instantly. LOCAL by
+    /// [local|remote] Freeze all agent action across all targets instantly. LOCAL by
     /// default (writes the sentinel file directly — works even with the
     /// daemon wedged, see `cli::estop`'s doc); `--remote` instead calls a
     /// live daemon's gateway (DESIGN §7 decision 14) for the "away from the
@@ -118,35 +162,36 @@ enum Command {
         #[arg(long)]
         remote: bool,
     },
-    /// Config management: project/env/target wizards, validation.
+    /// [local] Config management: project/env/target wizards, validation.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// List/show incidents.
+    /// [local|remote] List, acknowledge, and resolve incidents.
     Incidents {
         #[command(subcommand)]
         command: IncidentsCommand,
     },
-    /// Audit chain inspection.
+    /// [local] Audit chain inspection.
     Audit {
         #[command(subcommand)]
         command: AuditCommand,
     },
-    /// Render a structured postmortem for an incident.
+    /// [local] Render a structured postmortem for an incident.
     Postmortem { id: Uuid },
-    /// Runbook authoring + execution.
+    /// [local] Runbook authoring + execution.
+    #[command(name = "runbooks", alias = "runbook")]
     Runbook {
         #[command(subcommand)]
         command: RunbookCommand,
     },
-    /// Team memory: recall/store/forget (local mode; honest no-op when
+    /// [local] Team memory: recall/add/remove (honest no-op when
     /// memory.hindsight_url isn't configured).
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
     },
-    /// Talk to the agent. One-shot with a message, else a REPL. LOCAL by
+    /// [local|remote] Talk to the agent or read chat history. LOCAL by
     /// default (drives the daemon's own library wiring, no HTTP); `--remote`
     /// forces the saved gateway session instead — see module doc.
     Chat {
@@ -154,85 +199,105 @@ enum Command {
         message: Option<String>,
         #[arg(long)]
         remote: bool,
+        /// Read the durable shared transcript instead of starting a turn.
+        #[arg(long)]
+        history: bool,
+        #[arg(long)]
+        before: Option<i64>,
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+        #[arg(long)]
+        json: bool,
     },
-    /// Daemon status. LOCAL mode has no analogue for this (there is no
+    /// [remote] Daemon status. LOCAL mode has no analogue for this (there is no
     /// running-daemon introspection without a daemon to ask) — this
     /// command is REMOTE-ONLY, over the saved gateway session.
     Status {
         #[arg(long)]
         json: bool,
     },
-    /// The approval queue: list what is waiting, see the exact command, and
+    /// [local|remote] Show today's OpsClaw + Hindsight LLM spend and cap headroom.
+    Usage {
+        #[arg(long)]
+        remote: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// [local] The approval queue: list what is waiting, see the exact command, and
     /// decide. LOCAL by default, so it works with no gateway session.
     Approvals {
         #[command(subcommand)]
         command: ApprovalsCommand,
     },
-    /// Approve a pending approval. Kept as a top-level alias for
+    /// [remote] Approve a pending approval. Kept as a top-level alias for
     /// `approvals approve`; REMOTE-only, over the saved gateway session.
     Approve {
         id: Uuid,
         #[arg(long)]
         json: bool,
     },
-    /// Deny a pending approval. Alias for `approvals deny`; remote-only.
+    /// [remote] Deny a pending approval. Alias for `approvals deny`.
     Deny {
         id: Uuid,
         #[arg(long)]
         json: bool,
     },
-    /// Sign in to a gateway's remote CLI surface (browser hand-off); saves
+    /// [remote] Sign in to a gateway's CLI surface (browser hand-off); saves
     /// a revocable token under ~/.opsclaw/cli.toml.
     Login {
         /// The gateway to sign in to.
         #[arg(long)]
         remote: String,
     },
-    /// Revoke the saved remote session (server-side) and delete it locally.
+    /// [remote] Revoke the saved session server-side and delete it locally.
     Logout,
-    /// Show which account the saved remote session belongs to.
+    /// [remote] Show which account the saved remote session belongs to.
     Whoami {
         #[arg(long)]
         json: bool,
     },
-    /// Operator accounts: `create` bootstraps the FIRST web-UI login
+    /// [local] Operator accounts: `add` bootstraps the FIRST web-UI login
     /// (local, direct to the daemon's DB); later teammates join via the
     /// web invite flow.
+    #[command(name = "accounts", alias = "account")]
     Account {
         #[command(subcommand)]
         command: AccountCommand,
     },
-    /// `ops_` CLI sessions: list them, revoke one. These never expire, so
+    /// [local] `ops_` CLI sessions: list them, revoke one. These never expire, so
     /// revoking is what actually ends someone's CLI access.
     Tokens {
         #[command(subcommand)]
         command: TokensCommand,
     },
-    /// Encrypted secret store management. Values NEVER pass through argv
+    /// [local] Encrypted secret store management. Values NEVER pass through argv
     /// (visible in ps/shell history) — `set` reads from a hidden prompt,
     /// piped stdin, --from-env, or --from-file.
+    #[command(name = "secrets", alias = "secret")]
     Secret {
         #[command(subcommand)]
         command: SecretCommand,
     },
-    /// Run one diagnose cycle against a configured target NOW and print
+    /// [local] Run one diagnose cycle against a configured target NOW and print
     /// the agent's report (same code path as a scheduled scan).
     Scan {
         /// `project::env::target` path.
+        #[arg(add = ArgValueCandidates::new(target_candidates))]
         target: String,
         #[arg(long)]
         json: bool,
     },
-    /// What the agent WOULD have run: mutations refused by observe-mode
+    /// [local] What the agent WOULD have run: mutations refused by observe-mode
     /// autonomy, from the audit chain. Read this before promoting a
     /// target's autonomy.
+    #[command(name = "blocked-actions", alias = "dry-run-log")]
     DryRunLog {
         #[arg(long, default_value_t = 50)]
         limit: usize,
         #[arg(long)]
         json: bool,
     },
-    /// Inspect and edit the scheduler's job table. Editing a seeded scan
+    /// [local] Inspect and edit the scheduler's job table. Editing a seeded scan
     /// job's prompt converts it to operator-owned free text (kept forever;
     /// re-seeding skips it) — unedited seeded jobs keep resolving their
     /// prompt from code and improve with every release.
@@ -240,7 +305,14 @@ enum Command {
         #[command(subcommand)]
         command: JobsCommand,
     },
-    /// Open the web UI in a browser ($BROWSER or the platform default);
+    /// [local|remote] Create, list, and revoke teammate invites.
+    Invites {
+        #[command(subcommand)]
+        command: InvitesCommand,
+    },
+    /// [local] Generate shell completion definitions to stdout.
+    Completions { shell: clap_complete::Shell },
+    /// [local] Open the web UI in a browser ($BROWSER or the platform default);
     /// with --tunnel, first stand up an SSH port-forward to a remote
     /// daemon and open the local end.
     Ui {
@@ -256,6 +328,7 @@ enum AccountCommand {
     /// Create an operator account (password via hidden prompt or piped
     /// stdin — never argv). Under `auth.provider = "hanko"`, pass
     /// `--hanko-subject` instead: no password is prompted or stored.
+    #[command(name = "add", alias = "create")]
     Create {
         email: String,
         #[arg(long)]
@@ -318,6 +391,13 @@ enum JobsCommand {
         #[arg(long)]
         enabled: Option<bool>,
     },
+    /// Permanently delete a job by name, including its failure history.
+    #[command(name = "remove", alias = "delete")]
+    Delete {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -346,6 +426,7 @@ enum TokensCommand {
 enum SecretCommand {
     /// Store a secret under NAME. Value source (in order): --from-env,
     /// --from-file, piped stdin, else a hidden interactive prompt.
+    #[command(name = "add", alias = "set")]
     Set {
         name: String,
         /// Read the value from this environment variable.
@@ -363,6 +444,7 @@ enum SecretCommand {
     },
     /// Remove one stored secret. Unrecoverable — the store holds the only
     /// copy — so it asks first.
+    #[command(name = "remove", aliases = ["rm", "delete"])]
     Rm {
         name: String,
         /// Skip the confirmation (needed where there is no terminal).
@@ -374,12 +456,14 @@ enum SecretCommand {
 #[derive(Subcommand)]
 enum ConfigCommand {
     /// Chaining project → env → target wizard.
+    #[command(name = "projects", alias = "project")]
     Project {
         #[command(subcommand)]
         command: ConfigProjectCommand,
     },
     /// Type-aware resource wizard: attach an elasticsearch/prometheus/
     /// argocd/service-bus/eventstore endpoint to an existing target.
+    #[command(name = "resources", alias = "resource")]
     Resource {
         #[command(subcommand)]
         command: ConfigResourceCommand,
@@ -396,6 +480,7 @@ enum ConfigCommand {
         /// Limit to these subtrees: `project`, `project::env`, or
         /// `project::env::target`. Repeatable, and they union — e.g.
         /// `config list remundo::dev remundo::prod`. Omit for everything.
+        #[arg(add = ArgValueCandidates::new(config_path_candidates))]
         paths: Vec<String>,
         #[arg(long)]
         json: bool,
@@ -416,7 +501,9 @@ enum ConfigCommand {
     /// Remove a project, environment, or target by its
     /// `project[::env[::target]]` path. Prints the whole subtree it would
     /// delete and asks first.
+    #[command(name = "remove", aliases = ["rm", "delete"])]
     Rm {
+        #[arg(add = ArgValueCandidates::new(config_path_candidates))]
         path: String,
         /// Skip the confirmation. Required where there is no terminal to ask
         /// on, e.g. under `docker compose exec -T`.
@@ -493,6 +580,45 @@ enum IncidentsCommand {
         #[arg(long)]
         remote: bool,
     },
+    Ack {
+        id: Uuid,
+        #[arg(long)]
+        remote: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Resolve {
+        id: Uuid,
+        #[arg(long)]
+        remote: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum InvitesCommand {
+    List {
+        #[arg(long)]
+        remote: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Add {
+        #[arg(long = "as")]
+        as_email: Option<String>,
+        #[arg(long)]
+        remote: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Remove {
+        code: String,
+        #[arg(long)]
+        remote: bool,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -524,6 +650,7 @@ enum AuditCommand {
 #[derive(Subcommand)]
 enum RunbookCommand {
     /// Write a starter runbook file.
+    #[command(name = "add", alias = "init")]
     Init { name: String },
     /// List every runbook.
     List {
@@ -541,13 +668,16 @@ enum RunbookCommand {
         /// The runbook's TITLE (its `title` front-matter field, not the
         /// file name — matches `RunbookStore`'s own title-keyed identity).
         title: String,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(target_candidates))]
         target: String,
         /// `key=value`, repeatable — overrides the runbook's `[default_vars]`.
         #[arg(long = "var", value_parser = parse_var)]
         vars: Vec<(String, String)>,
         #[arg(long)]
         json: bool,
+        /// Render every command without executing or recording the run.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -562,6 +692,7 @@ enum MemoryCommand {
         json: bool,
     },
     /// Store an explicit note.
+    #[command(name = "add", alias = "store")]
     Store {
         text: String,
         /// Attribution label. Defaults to the same "no authenticated local
@@ -576,6 +707,7 @@ enum MemoryCommand {
     },
     /// Forget one fact by id, or every fact matching a query. A query can
     /// match many facts, so it prints them and asks before forgetting.
+    #[command(name = "remove", aliases = ["forget", "delete"])]
     Forget {
         /// An opaque memory id (no spaces), or a free-text query.
         target: String,
@@ -633,6 +765,7 @@ fn resolve_db_path(config_path: &std::path::Path) -> Option<String> {
 
 #[tokio::main]
 async fn main() {
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
     let cfg_path = config_path(&cli.config);
     let home = opsclaw_home();
@@ -873,6 +1006,54 @@ async fn dispatch(
                     std::process::exit(1);
                 }
             }
+            IncidentsCommand::Ack { id, remote: true, json } => {
+                let body =
+                    opsclaw::cli::remote::incidents::transition(&remote_session()?, id, "ack")
+                        .await?;
+                if json {
+                    opsclaw::cli::output::print_json(&body);
+                } else {
+                    println!("incident {id}: {}", body["state"].as_str().unwrap_or("acknowledged"));
+                }
+            }
+            IncidentsCommand::Resolve { id, remote: true, json } => {
+                let body =
+                    opsclaw::cli::remote::incidents::transition(&remote_session()?, id, "resolve")
+                        .await?;
+                if json {
+                    opsclaw::cli::output::print_json(&body);
+                } else {
+                    println!("incident {id}: {}", body["state"].as_str().unwrap_or("resolved"));
+                }
+            }
+            IncidentsCommand::Ack { id, remote: false, json } => {
+                let db = open_db(cfg_path).await?;
+                let incident = opsclaw::cli::incidents_cmd::transition(
+                    &db,
+                    id,
+                    opsclaw::domain::IncidentState::Acknowledged,
+                )
+                .await?;
+                if json {
+                    opsclaw::cli::output::print_json(&incident);
+                } else {
+                    println!("incident {id}: {:?}", incident.state);
+                }
+            }
+            IncidentsCommand::Resolve { id, remote: false, json } => {
+                let db = open_db(cfg_path).await?;
+                let incident = opsclaw::cli::incidents_cmd::transition(
+                    &db,
+                    id,
+                    opsclaw::domain::IncidentState::Resolved,
+                )
+                .await?;
+                if json {
+                    opsclaw::cli::output::print_json(&incident);
+                } else {
+                    println!("incident {id}: {:?}", incident.state);
+                }
+            }
         },
 
         Command::Audit { command } => match command {
@@ -1000,32 +1181,36 @@ async fn dispatch(
                     }
                 }
             }
-            RunbookCommand::Run { title, target, vars, json } => {
+            RunbookCommand::Run { title, target, vars, json, dry_run } => {
                 let config = Config::load(Some(cfg_path))?;
                 config.validate()?;
                 let target = opsclaw::domain::FqTarget::parse(&target)?;
                 let cli_vars: std::collections::BTreeMap<String, String> =
                     vars.into_iter().collect();
 
-                // Full daemon wiring (no HTTP bind) — a real command needs
-                // the policy engine, which needs executors/e-stop/audit
-                // (same reasoning as `Chat`'s local arm below).
-                let state =
-                    opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
                 let store = opsclaw::runbooks::RunbookStore::load(
                     opsclaw::cli::runbook_cmd::runbooks_dir(home),
                 )?;
-                let runs: std::sync::Arc<dyn opsclaw::db::RunbookRunRepo> = state.repos.clone();
-                let outcome = opsclaw::cli::runbook_cmd::run(
-                    &store,
-                    &state.policy,
-                    &runs,
-                    opsclaw::domain::Principal::System,
-                    &title,
-                    &target,
-                    &cli_vars,
-                )
-                .await?;
+                let (outcome, state) = if dry_run {
+                    (opsclaw::cli::runbook_cmd::dry_run(&store, &title, &target, &cli_vars)?, None)
+                } else {
+                    // Full daemon wiring (no HTTP bind) — a real command
+                    // needs policy/executors/e-stop/audit.
+                    let state =
+                        opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
+                    let runs: std::sync::Arc<dyn opsclaw::db::RunbookRunRepo> = state.repos.clone();
+                    let outcome = opsclaw::cli::runbook_cmd::run(
+                        &store,
+                        &state.policy,
+                        &runs,
+                        opsclaw::domain::Principal::System,
+                        &title,
+                        &target,
+                        &cli_vars,
+                    )
+                    .await?;
+                    (outcome, Some(state))
+                };
 
                 if json {
                     opsclaw::cli::output::print_json(&outcome);
@@ -1050,6 +1235,9 @@ async fn dispatch(
                 }
                 if !outcome.succeeded {
                     std::process::exit(1);
+                }
+                if let Some(state) = state {
+                    state.chat.drain(std::time::Duration::from_secs(20)).await;
                 }
             }
         },
@@ -1122,7 +1310,38 @@ async fn dispatch(
         // otherwise it's always local (module doc: local is the default
         // for commands that support both, so a fresh install with no
         // `login` ever run still gets a working `chat`).
-        Command::Chat { message, remote } if remote => {
+        Command::Chat { message, remote: true, history: true, before, limit, json } => {
+            if message.is_some() {
+                return Err(opsclaw::Error::validation(
+                    "--history cannot be combined with a chat message",
+                ));
+            }
+            let body =
+                opsclaw::cli::remote::history::load(&remote_session()?, before, limit).await?;
+            if json {
+                opsclaw::cli::output::print_json(&body);
+            } else {
+                render_remote_history(&body);
+            }
+        }
+        Command::Chat { message, remote: false, history: true, before, limit, json } => {
+            if message.is_some() {
+                return Err(opsclaw::Error::validation(
+                    "--history cannot be combined with a chat message",
+                ));
+            }
+            let rows =
+                opsclaw::cli::chat_history_cmd::load(&open_db(cfg_path).await?, before, limit)
+                    .await?;
+            if json {
+                opsclaw::cli::output::print_json(&rows);
+            } else {
+                for row in rows {
+                    println!("{}  {}  {}: {}", row.seq, row.at, row.speaker, row.content);
+                }
+            }
+        }
+        Command::Chat { message, remote: true, history: false, .. } => {
             let session = remote_session()?;
             match message {
                 Some(m) => {
@@ -1131,7 +1350,7 @@ async fn dispatch(
                 None => opsclaw::cli::remote::chat::repl(&session).await?,
             }
         }
-        Command::Chat { message, remote: _ } => match message {
+        Command::Chat { message, remote: false, history: false, .. } => match message {
             Some(m) => {
                 let config = Config::load(Some(cfg_path))?;
                 config.validate()?;
@@ -1155,6 +1374,27 @@ async fn dispatch(
         Command::Status { json } => {
             let session = remote_session()?;
             opsclaw::cli::remote::status::status(&session, json).await?;
+        }
+
+        Command::Usage { remote: true, json } => {
+            let body = opsclaw::cli::remote::status::get(&remote_session()?).await?;
+            let spend = &body["spend"];
+            if json {
+                opsclaw::cli::output::print_json(spend);
+            } else {
+                render_remote_spend(spend);
+            }
+        }
+        Command::Usage { remote: false, json } => {
+            let config = Config::load(Some(cfg_path))?;
+            let db = open_db(cfg_path).await?;
+            let store = opsclaw::config::SecretStore::open(home)?;
+            let snapshot = opsclaw::cli::usage_cmd::load(&config, &store, db.repos()).await?;
+            if json {
+                opsclaw::cli::output::print_json(&snapshot);
+            } else {
+                print!("{}", opsclaw::cli::usage_cmd::render(&snapshot));
+            }
         }
 
         Command::Approvals { command } => match command {
@@ -1518,15 +1758,26 @@ async fn dispatch(
                         job.next_run_at.map(|t| t.to_rfc3339()).unwrap_or("(never)".into())
                     );
                 }
+                JobsCommand::Delete { name, yes } => {
+                    opsclaw::cli::confirm::destructive(
+                        &format!("will permanently delete job {name:?} and its failure history"),
+                        yes,
+                    )?;
+                    if opsclaw::cli::jobs_cmd::delete(&*db.repos(), &name).await? {
+                        println!("deleted job {name:?}");
+                    } else {
+                        return Err(opsclaw::Error::NotFound(format!("job {name:?}")));
+                    }
+                }
             }
         }
         Command::DryRunLog { limit, json } => {
             let db = open_db(cfg_path).await?;
-            let entries = opsclaw::cli::audit_cmd::dry_run_log(&db, limit).await?;
+            let entries = opsclaw::cli::audit_cmd::blocked_actions(&db, limit).await?;
             if json {
                 opsclaw::cli::output::print_json(&entries);
             } else if entries.is_empty() {
-                println!("(dry-run log is empty — no autonomy-blocked commands recorded)");
+                println!("(blocked-actions is empty — no autonomy-blocked commands recorded)");
             } else {
                 for e in &entries {
                     println!(
@@ -1546,8 +1797,141 @@ async fn dispatch(
             let outcome = opsclaw::cli::ui_cmd::run(cfg_path, tunnel.as_deref()).await?;
             println!("opened {}", outcome.url);
         }
+        Command::Invites { command } => handle_invites(command, cfg_path).await?,
+        Command::Completions { shell } => {
+            // Generate clap's dynamic registration so completion requests
+            // come back through this binary and can read the current config
+            // for project::env::target candidates.
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .env("COMPLETE", shell.to_string())
+                .output()?;
+            if !output.status.success() {
+                return Err(opsclaw::Error::other(format!(
+                    "completion generation failed with {}",
+                    output.status
+                )));
+            }
+            use std::io::Write;
+            std::io::stdout().write_all(&output.stdout)?;
+        }
     }
     Ok(())
+}
+
+async fn handle_invites(
+    command: InvitesCommand,
+    cfg_path: &std::path::Path,
+) -> opsclaw::Result<()> {
+    match command {
+        InvitesCommand::List { remote: true, json } => {
+            let body = opsclaw::cli::remote::invites::list(&remote_session()?).await?;
+            if json {
+                opsclaw::cli::output::print_json(&body["invites"]);
+            } else {
+                render_invites(body["invites"].as_array().map(Vec::as_slice).unwrap_or(&[]));
+            }
+        }
+        InvitesCommand::List { remote: false, json } => {
+            let db = open_db(cfg_path).await?;
+            let invites = opsclaw::cli::invites_cmd::list(db.repos().as_ref()).await?;
+            if json {
+                opsclaw::cli::output::print_json(&invites);
+            } else {
+                let rows = invites
+                    .iter()
+                    .map(|invite| {
+                        serde_json::json!({
+                            "code": invite.code,
+                            "issued_by": invite.issued_by,
+                            "expires_at": invite.expires_at,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                render_invites(&rows);
+            }
+        }
+        InvitesCommand::Add { remote: true, json, .. } => {
+            let body = opsclaw::cli::remote::invites::create(&remote_session()?).await?;
+            if json {
+                opsclaw::cli::output::print_json(&body);
+            } else {
+                println!(
+                    "invite {} expires {}",
+                    body["code"].as_str().unwrap_or("?"),
+                    body["expires_at"].as_str().unwrap_or("?")
+                );
+            }
+        }
+        InvitesCommand::Add { as_email, remote: false, json } => {
+            let db = open_db(cfg_path).await?;
+            let invite =
+                opsclaw::cli::invites_cmd::create(db.repos().as_ref(), as_email.as_deref()).await?;
+            if json {
+                opsclaw::cli::output::print_json(&invite);
+            } else {
+                println!("invite {} expires {}", invite.code, invite.expires_at.to_rfc3339());
+            }
+        }
+        InvitesCommand::Remove { code, remote: true, yes } => {
+            opsclaw::cli::confirm::destructive(&format!("will revoke invite {code}"), yes)?;
+            opsclaw::cli::remote::invites::revoke(&remote_session()?, &code).await?;
+            println!("revoked invite {code}");
+        }
+        InvitesCommand::Remove { code, remote: false, yes } => {
+            opsclaw::cli::confirm::destructive(&format!("will revoke invite {code}"), yes)?;
+            let db = open_db(cfg_path).await?;
+            if !opsclaw::cli::invites_cmd::revoke(db.repos().as_ref(), &code).await? {
+                return Err(opsclaw::Error::NotFound(format!("open invite {code}")));
+            }
+            println!("revoked invite {code}");
+        }
+    }
+    Ok(())
+}
+
+fn render_invites(invites: &[serde_json::Value]) {
+    if invites.is_empty() {
+        println!("(no open invites)");
+        return;
+    }
+    for invite in invites {
+        println!(
+            "{}  expires {}  issued by {}",
+            invite["code"].as_str().unwrap_or("?"),
+            invite["expires_at"].as_str().unwrap_or("?"),
+            invite["issued_by"].as_str().unwrap_or("?"),
+        );
+    }
+}
+
+fn render_remote_history(body: &serde_json::Value) {
+    for row in body["history"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+        println!(
+            "{}  {}  {}: {}",
+            row["seq"].as_i64().unwrap_or(0),
+            row["at"].as_str().unwrap_or("?"),
+            row["speaker"].as_str().unwrap_or("?"),
+            row["content"].as_str().unwrap_or(""),
+        );
+    }
+}
+
+fn render_remote_spend(spend: &serde_json::Value) {
+    println!("UTC day: {}", spend["day_utc"].as_str().unwrap_or("?"));
+    println!("OpsClaw: {:.1}¢", spend["opsclaw_cents"].as_f64().unwrap_or(0.0));
+    match spend["hindsight_cents"].as_f64() {
+        Some(value) => println!("Hindsight: {value:.1}¢"),
+        None => println!("Hindsight: unmetered"),
+    }
+    println!(
+        "Total: {:.1}¢ / {:.0}¢",
+        spend["total_cents"].as_f64().unwrap_or(0.0),
+        spend["cap_cents"].as_f64().unwrap_or(0.0),
+    );
+    println!(
+        "Coverage: {}",
+        if spend["complete"].as_bool().unwrap_or(false) { "complete" } else { "OpsClaw only" }
+    );
 }
 
 /// Acquire a secret VALUE without it ever appearing in argv: an env var, a
@@ -1715,8 +2099,20 @@ mod tests {
             &["opsclaw-cli", "chat"],
             &["opsclaw-cli", "chat", "is prod healthy?"],
             &["opsclaw-cli", "chat", "is prod healthy?", "--remote"],
+            &["opsclaw-cli", "chat", "--history"],
+            &["opsclaw-cli", "chat", "--history", "--before", "42", "--json"],
             &["opsclaw-cli", "status"],
             &["opsclaw-cli", "status", "--json"],
+            &["opsclaw-cli", "usage"],
+            &["opsclaw-cli", "usage", "--remote", "--json"],
+            &["opsclaw-cli", "incidents", "ack", "00000000-0000-0000-0000-000000000000"],
+            &[
+                "opsclaw-cli",
+                "incidents",
+                "resolve",
+                "00000000-0000-0000-0000-000000000000",
+                "--remote",
+            ],
             &["opsclaw-cli", "approve", "00000000-0000-0000-0000-000000000000"],
             &["opsclaw-cli", "deny", "00000000-0000-0000-0000-000000000000", "--json"],
             &["opsclaw-cli", "login", "--remote", "https://gw.example.com"],
@@ -1747,15 +2143,31 @@ mod tests {
             ],
             &["opsclaw-cli", "account", "set-password", "ops@example.com"],
             &["opsclaw-cli", "account", "list", "--json"],
+            &["opsclaw-cli", "accounts", "add", "ops@example.com"],
             &["opsclaw-cli", "secret", "set", "es-password"],
             &["opsclaw-cli", "secret", "set", "es-password", "--from-env", "ES_PASSWORD"],
             &["opsclaw-cli", "secret", "set", "ca-bundle", "--from-file", "/tmp/ca.crt"],
             &["opsclaw-cli", "secret", "list", "--json"],
             &["opsclaw-cli", "secret", "rm", "es-password"],
+            &["opsclaw-cli", "secrets", "add", "es-password"],
+            &["opsclaw-cli", "secrets", "remove", "es-password", "--yes"],
             &["opsclaw-cli", "scan", "remundo::sandbox::cluster"],
             &["opsclaw-cli", "scan", "remundo::sandbox::cluster", "--json"],
             &["opsclaw-cli", "dry-run-log"],
             &["opsclaw-cli", "dry-run-log", "--limit", "10", "--json"],
+            &["opsclaw-cli", "blocked-actions"],
+            &["opsclaw-cli", "config", "projects", "add"],
+            &["opsclaw-cli", "config", "resources", "add"],
+            &["opsclaw-cli", "config", "remove", "p::e::t", "--yes"],
+            &["opsclaw-cli", "runbooks", "add", "dlq-backlog"],
+            &["opsclaw-cli", "runbooks", "run", "DLQ backlog", "--target", "p::e::t", "--dry-run"],
+            &["opsclaw-cli", "memory", "add", "some fact"],
+            &["opsclaw-cli", "memory", "remove", "some-id", "--yes"],
+            &["opsclaw-cli", "jobs", "remove", "scan:p:e:t", "--yes"],
+            &["opsclaw-cli", "invites", "list"],
+            &["opsclaw-cli", "invites", "add", "--as", "ops@example.com"],
+            &["opsclaw-cli", "invites", "remove", "code", "--yes"],
+            &["opsclaw-cli", "completions", "zsh"],
             &["opsclaw-cli", "estop", "--remote"],
             &["opsclaw-cli", "estop", "--resume", "--remote"],
         ];
@@ -1763,6 +2175,27 @@ mod tests {
             let result = Cli::try_parse_from(*argv);
             assert!(result.is_ok(), "failed to parse {argv:?}: {:?}", result.err());
         }
+    }
+
+    #[test]
+    fn completion_candidates_include_double_colon_config_paths() {
+        let config: Config = toml::from_str(
+            r#"
+            [[project]]
+            name = "payments"
+            [[project.env]]
+            name = "prod"
+            [[project.env.target]]
+            name = "api"
+            kind = "local"
+            "#,
+        )
+        .unwrap();
+        let values = path_candidates_for(&config, false)
+            .into_iter()
+            .map(|candidate| candidate.get_value().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["payments", "payments::prod", "payments::prod::api"]);
     }
 
     #[test]

@@ -203,6 +203,42 @@ pub struct RunOutcome {
     pub succeeded: bool,
 }
 
+/// Render the exact runbook commands without executing policy, touching a
+/// target, or recording a run. This is a real dry run: placeholder errors
+/// still fail, while every rendered step is returned for inspection.
+pub fn dry_run(
+    store: &RunbookStore,
+    title: &str,
+    target: &FqTarget,
+    cli_vars: &BTreeMap<String, String>,
+) -> Result<RunOutcome> {
+    let loaded = store.get(title).ok_or_else(|| {
+        crate::Error::Config(format!(
+            "no runbook titled {title:?} — run `opsclaw-cli runbooks list` to see what's loaded"
+        ))
+    })?;
+    let steps = loaded
+        .runbook
+        .render_all(Some(target), cli_vars)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, (step, command))| StepReport {
+            index,
+            text: step.text,
+            command,
+            status: "dry-run".into(),
+            output: String::new(),
+        })
+        .collect();
+    Ok(RunOutcome {
+        run_id: Uuid::nil(),
+        runbook: title.into(),
+        target: target.to_string(),
+        steps,
+        succeeded: true,
+    })
+}
+
 fn step_status_str(s: StepStatus) -> &'static str {
     match s {
         StepStatus::Ok => "ok",
@@ -395,7 +431,7 @@ async fn run_one_step(
             (StepStatus::Failed, format!("queued for human approval (request {id}) — did not run"))
         }
         Ok(PolicyOutcome::Blocked { reason, dry_run_logged }) => {
-            let logged = if dry_run_logged { " (logged to the dry-run log)" } else { "" };
+            let logged = if dry_run_logged { " (logged in blocked-actions)" } else { "" };
             (StepStatus::Failed, format!("blocked by policy: {reason}{logged}"))
         }
         Ok(PolicyOutcome::EStopped) => {
@@ -631,6 +667,23 @@ mod tests {
 
     fn test_target() -> FqTarget {
         FqTarget::new("remundo", "prod", "web-1")
+    }
+
+    #[test]
+    fn dry_run_renders_commands_without_a_run_id() {
+        let store = store_with(
+            "+++\ntitle = \"t\"\n+++\n- inspect\n  ```sh\n  check {target} --queue {queue}\n  ```\n",
+        );
+        let mut vars = BTreeMap::new();
+        vars.insert("queue".into(), "orders".into());
+
+        let outcome = dry_run(&store, "t", &test_target(), &vars).unwrap();
+        assert_eq!(outcome.run_id, Uuid::nil());
+        assert_eq!(outcome.steps[0].status, "dry-run");
+        assert_eq!(
+            outcome.steps[0].command.as_deref().unwrap().trim(),
+            "check web-1 --queue orders"
+        );
     }
 
     #[tokio::test]

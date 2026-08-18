@@ -10,6 +10,7 @@ use crate::Result;
 use crate::cli::output::{print_json, print_table};
 use crate::db::{Db, IncidentRepo};
 use crate::domain::Incident;
+use crate::domain::IncidentState;
 
 pub async fn list(db: &Db, include_closed: bool, limit: i64, json: bool) -> Result<Vec<Incident>> {
     // Fully-qualified: `AllRepos` unions several repo traits that each
@@ -36,6 +37,17 @@ pub async fn list(db: &Db, include_closed: bool, limit: i64, json: bool) -> Resu
         print_table(&["id", "target", "severity", "state", "opened_at", "hypothesis"], &rows);
     }
     Ok(incidents)
+}
+
+pub async fn transition(db: &Db, id: Uuid, to: IncidentState) -> Result<Incident> {
+    let current = IncidentRepo::get(db.repos().as_ref(), id)
+        .await?
+        .ok_or_else(|| crate::Error::NotFound("incident".into()))?;
+    crate::incidents::lifecycle::validate_transition(current.state, to)?;
+    IncidentRepo::set_state(db.repos().as_ref(), id, to, None).await?;
+    IncidentRepo::get(db.repos().as_ref(), id)
+        .await?
+        .ok_or_else(|| crate::Error::NotFound("incident".into()))
 }
 
 pub async fn show(db: &Db, id: Uuid, json: bool) -> Result<Option<Incident>> {
@@ -122,5 +134,20 @@ mod tests {
 
         let found = show(&db, incident.id, false).await.unwrap().unwrap();
         assert_eq!(found.id, incident.id);
+    }
+
+    #[tokio::test]
+    async fn acknowledge_and_resolve_follow_the_lifecycle() {
+        let db = Db::fake();
+        let incident = sample_incident("web-1");
+        IncidentRepo::insert(db.repos().as_ref(), &incident).await.unwrap();
+
+        let acked = transition(&db, incident.id, IncidentState::Acknowledged).await.unwrap();
+        assert_eq!(acked.state, IncidentState::Acknowledged);
+        assert!(acked.acked_at.is_some());
+
+        let resolved = transition(&db, incident.id, IncidentState::Resolved).await.unwrap();
+        assert_eq!(resolved.state, IncidentState::Resolved);
+        assert!(resolved.resolved_at.is_some());
     }
 }

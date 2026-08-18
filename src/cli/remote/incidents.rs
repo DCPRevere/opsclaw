@@ -64,6 +64,10 @@ pub async fn show(session: &Session, id: Uuid, json: bool) -> Result<()> {
     Ok(())
 }
 
+pub async fn transition(session: &Session, id: Uuid, action: &str) -> Result<serde_json::Value> {
+    client::post(session, &format!("/api/incidents/{id}/{action}")).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

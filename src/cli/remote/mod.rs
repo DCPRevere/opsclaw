@@ -37,6 +37,8 @@ pub mod auth;
 pub mod chat;
 pub mod client;
 pub mod estop;
+pub mod history;
 pub mod incidents;
+pub mod invites;
 pub mod session;
 pub mod status;

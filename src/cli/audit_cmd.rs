@@ -92,9 +92,9 @@ pub async fn verify(db: &Db, from_seq: i64) -> Result<VerifyOutcome> {
     Ok(VerifyOutcome { ok: true, records_verified: total_verified, failure: None })
 }
 
-/// One dry-run-log entry: a mutation the agent WOULD have run, refused by
+/// One blocked-action entry: a mutation the agent WOULD have run, refused by
 /// the autonomy gate (observe mode) and recorded in the audit chain
-/// (`policy::mod`: "the audit record IS the dry-run log").
+/// (`policy::mod`: the audit record is the blocked-action log).
 #[derive(Debug, Serialize)]
 pub struct DryRunEntry {
     pub ts: chrono::DateTime<chrono::Utc>,
@@ -105,13 +105,13 @@ pub struct DryRunEntry {
     pub risk: String,
 }
 
-/// `opsclaw-cli dry-run-log` — the most recent `limit` autonomy-blocked
+/// `opsclaw-cli blocked-actions` — the most recent `limit` autonomy-blocked
 /// commands, oldest first (so reading top-to-bottom follows time). This is
 /// the promotion-review surface: before raising a target from `observe` to
 /// `suggest`, read what it WOULD have done. Walks the chain forward keeping
 /// a bounded tail — the chain is append-only and unbounded, the answer
 /// isn't.
-pub async fn dry_run_log(db: &Db, limit: usize) -> Result<Vec<DryRunEntry>> {
+pub async fn blocked_actions(db: &Db, limit: usize) -> Result<Vec<DryRunEntry>> {
     let mut cursor = 1i64;
     let mut tail: std::collections::VecDeque<DryRunEntry> = Default::default();
     loop {
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dry_run_log_returns_only_blocked_records_bounded_by_limit() {
+    async fn blocked_actions_returns_only_blocked_records_bounded_by_limit() {
         let db = Db::fake();
         let mut tail: Option<AuditRecord> = None;
         for seq in 1..=8 {
@@ -211,12 +211,12 @@ mod tests {
             tail = Some(sealed);
         }
 
-        let all = dry_run_log(&db, 10).await.unwrap();
+        let all = blocked_actions(&db, 10).await.unwrap();
         assert_eq!(all.len(), 4);
         assert!(all.iter().all(|e| e.command.starts_with("kubectl delete")));
 
         // Bounded: only the MOST RECENT `limit` entries survive, in time order.
-        let last_two = dry_run_log(&db, 2).await.unwrap();
+        let last_two = blocked_actions(&db, 2).await.unwrap();
         assert_eq!(last_two.len(), 2);
         assert_eq!(last_two[0].command, "kubectl delete pod x-5");
         assert_eq!(last_two[1].command, "kubectl delete pod x-7");

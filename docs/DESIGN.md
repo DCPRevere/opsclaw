@@ -20,6 +20,12 @@ attribution on everything said, approved, or learned. Multi-daemon federation
 is explicitly out of scope; if a team ever needs two daemons, that's a
 Postgres-backend problem for later, and the repo traits keep it cheap.
 
+Chat is shared by context, not by person. Every operator can read and continue
+the global `Operations` conversation and one conversation per configured
+project environment. An environment conversation scopes both replay history
+and the target allow-list; `Operations` cannot invoke target tools. There are
+no private operator transcripts.
+
 The daemon is **single-tenant**: one team, one config. No tenancy ids thread
 through the code (gianna's household boundary has no analog here); the
 isolation boundary that matters is per-target authorization at the policy

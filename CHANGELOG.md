@@ -6,6 +6,25 @@ release out.
 
 ## v0.3.0
 
+### Team chat follows operational context
+
+Chat now has a global `Operations` conversation and one team-visible
+conversation per configured project environment. Every operator can read and
+continue the same durable history. Environment selection constrains both the
+agent's replay context and its target allow-list; `Operations` cannot invoke
+target tools. Live events carry conversation and turn identities so activity
+in another room cannot complete or contaminate the current send. Local and
+remote CLI chat/history accept `--conversation project::environment` and
+default to `operations`.
+
+Existing chat history migrates into `Operations`. Environment turns exclude
+scans in the same environment while unrelated environments can continue.
+Incident and approval cards follow their target's environment conversation.
+
+**Deploying** — migration `0011_chat_conversations.sql` is applied
+automatically. The conversation picker is embedded in the binary, so deploy
+the new binary/image before expecting it in the web UI.
+
 ### Agent turns and daemon health are failure-safe
 
 Web and remote-CLI chat submissions now carry optional idempotency keys, and
@@ -14,9 +33,9 @@ are durable in SQLite: a retry after restart returns the original reply, while
 an in-progress or failed turn is never replayed automatically after it may
 have acted. A disconnected client no longer cancels an agent turn after a tool
 may have acted: turns are shutdown-tracked through their transcript and
-idempotency writes. Interactive work remains exclusive, while scheduled scans
-of different exact targets can run concurrently. Status now lists active and
-queued turns with their conflict domain and age.
+idempotency writes. Broad webhook work remains exclusive, while environment
+chat and scheduled scans use environment and exact-target conflict domains.
+Status lists active and queued turns with their conflict domain and age.
 
 Readiness now probes SQLite; `?deep=1` also probes Hindsight, and the standard
 Docker and Kubernetes readiness checks use the deep form. Authentication rate

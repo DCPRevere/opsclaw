@@ -30,9 +30,9 @@ use opsclaw::db::memory::InMemoryDb;
 use opsclaw::db::sqlite::SqliteDb;
 use opsclaw::db::{
     AUTH_PROVIDER_HANKO, AUTH_PROVIDER_LOCAL, Account, AccountRepo, ApprovalRepo, AuditRepo,
-    ChannelStateRepo, ChatRepo, CliToken, ControlRepo, IncidentRepo, Invite, InviteRepo, JobRepo,
-    PushSubscription, PushSubscriptionRepo, RunbookRun, RunbookRunRepo, StepOutcome, StepStatus,
-    TokenRepo,
+    ChannelStateRepo, ChatRepo, CliToken, ControlRepo, HealthRepo, IncidentRepo, Invite,
+    InviteRepo, JobRepo, PushSubscription, PushSubscriptionRepo, RunbookRun, RunbookRunRepo,
+    StepOutcome, StepStatus, TokenRepo,
 };
 use opsclaw::domain::{
     ApprovalRequest, ApprovalState, FqTarget, Incident, IncidentState, Job, Payload, Principal,
@@ -54,6 +54,7 @@ pub trait RepoSuite:
     + PushSubscriptionRepo
     + ChannelStateRepo
     + ChatRepo
+    + HealthRepo
 {
 }
 impl<T> RepoSuite for T where
@@ -69,6 +70,7 @@ impl<T> RepoSuite for T where
         + PushSubscriptionRepo
         + ChannelStateRepo
         + ChatRepo
+        + HealthRepo
 {
 }
 
@@ -711,6 +713,10 @@ control_prune_housekeeping_is_ok => |db| {
     // claim/approval timestamps to age by design — see its module doc);
     // this just pins the contract that the call always succeeds.
     db.prune_housekeeping(Utc::now()).await.unwrap();
+}
+
+health_ping_is_ok => |db| {
+    HealthRepo::ping(db).await.unwrap();
 }
 
 // ---- Jobs ----

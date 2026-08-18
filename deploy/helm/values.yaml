@@ -155,7 +155,7 @@ livenessProbe:
   periodSeconds: 15
 readinessProbe:
   httpGet:
-    path: /ready
+    path: /ready?deep=1
     port: http
   initialDelaySeconds: 5
   periodSeconds: 10

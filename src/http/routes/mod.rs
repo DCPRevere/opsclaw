@@ -128,14 +128,49 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+#[derive(serde::Deserialize, Default)]
+struct ReadyQuery {
+    #[serde(default)]
+    deep: Option<String>,
+}
+
 async fn ready(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({
-        "ok": true,
-        "version": crate::version(),
-        "fakes_mode": state.config.fully_faked(),
-    }))
+    axum::extract::Query(query): axum::extract::Query<ReadyQuery>,
+) -> impl axum::response::IntoResponse {
+    use axum::Json;
+    use axum::http::StatusCode;
+
+    if let Err(error) = state.repos.ping().await {
+        tracing::warn!(%error, "readiness check failed");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "ok": false,
+                "check": "sqlite",
+            })),
+        );
+    }
+    let deep = matches!(query.deep.as_deref(), Some("1" | "true"));
+    if deep && let Err(error) = state.memory.health().await {
+        tracing::warn!(%error, "deep readiness check failed");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "ok": false,
+                "check": "hindsight",
+            })),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "deep": deep,
+            "version": crate::version(),
+            "fakes_mode": state.config.fully_faked(),
+        })),
+    )
 }
 
 /// CORS: the operational web UI is embedded and same-origin (DESIGN §3 —
@@ -312,6 +347,8 @@ async fn ensure_request_id(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{CONTENT_SECURITY_POLICY, content_security_policy};
     use crate::config::Config;
 
@@ -320,6 +357,16 @@ mod tests {
     /// struct shape.
     fn parse(s: &str) -> Config {
         toml::from_str(s).unwrap()
+    }
+
+    async fn serve_state(
+        state: super::AppState,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let app = super::router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr, task)
     }
 
     /// One directive out of a policy string, without its trailing `;`.
@@ -466,5 +513,29 @@ mod tests {
             resp.headers().get("content-security-policy").unwrap().to_str().unwrap(),
             CONTENT_SECURITY_POLICY
         );
+    }
+
+    #[tokio::test]
+    async fn deep_readiness_probes_hindsight_and_reports_failure() {
+        let hindsight = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/health"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&hindsight)
+            .await;
+        let mut state = super::AppState::fake();
+        state.memory = Arc::new(crate::memory::Memory::disabled().with_hindsight(Arc::new(
+            crate::memory::hindsight::HindsightClient::new(hindsight.uri(), None, "test"),
+        )));
+        let (addr, task) = serve_state(state).await;
+
+        let shallow = reqwest::get(format!("http://{addr}/ready")).await.unwrap();
+        assert_eq!(shallow.status(), reqwest::StatusCode::OK);
+        let deep = reqwest::get(format!("http://{addr}/ready?deep=1")).await.unwrap();
+        assert_eq!(deep.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = deep.json().await.unwrap();
+        assert_eq!(body["check"], "hindsight");
+        task.abort();
     }
 }

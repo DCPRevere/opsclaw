@@ -78,3 +78,11 @@ impl SqliteDb {
         &self.pool
     }
 }
+
+#[async_trait::async_trait]
+impl crate::db::HealthRepo for SqliteDb {
+    async fn ping(&self) -> Result<()> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+}

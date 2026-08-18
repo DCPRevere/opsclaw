@@ -206,6 +206,10 @@ impl LlmProvider for OpenAiCompatProvider {
         }
         let payload: Value = serde_json::from_str(&raw)
             .map_err(|e| Error::llm_transient(format!("openai-compat tools bad json: {e}")))?;
+        if let Some(error) = embedded_error(&payload, retry_after) {
+            tracing::warn!(%principal, model = %self.model, %error, "openai-compat 200 response carried an embedded error");
+            return Err(error);
+        }
 
         let mut usage = crate::llm::TokenUsage::default();
         let mut ran_model = self.model.clone();
@@ -246,7 +250,14 @@ impl LlmProvider for OpenAiCompatProvider {
             .get("choices")
             .and_then(|c| c.get(0))
             .map(|c| &c["message"])
-            .ok_or_else(|| Error::llm_transient("openai-compat: response had no choices"))?;
+            .ok_or_else(|| {
+                let snippet: String = crate::policy::Scrubber::global()
+                    .scrub(&raw.chars().take(300).collect::<String>());
+                tracing::warn!(%principal, model = %ran_model, body = %snippet, "openai-compat response had no choices");
+                Error::llm_transient(format!(
+                    "openai-compat: response had no choices: {snippet}"
+                ))
+            })?;
         let (step, parse) = interpret_tool_message(msg, usage);
         // Surface the XML-recovery path: it means the provider's native
         // tool_calls were unusable. A WARN here makes a recurrence (new
@@ -291,6 +302,28 @@ enum ToolParse {
     /// args) and dropped, but at least one sibling parsed and no better XML
     /// was available, so we proceed with the survivors.
     PartialDroppedNative,
+}
+
+/// OpenRouter sometimes wraps an upstream failure in HTTP 200 with an
+/// `error` object and no choices. Preserve its embedded status so the normal
+/// provider retry/backoff policy applies.
+fn embedded_error(payload: &Value, retry_after_secs: Option<u64>) -> Option<Error> {
+    if payload["choices"].as_array().is_some_and(|choices| !choices.is_empty()) {
+        return None;
+    }
+    let error = payload.get("error")?;
+    let code = error["code"]
+        .as_u64()
+        .and_then(|code| u16::try_from(code).ok())
+        .or_else(|| error["code"].as_str().and_then(|code| code.parse().ok()))
+        .unwrap_or(500);
+    let message = crate::policy::Scrubber::global()
+        .scrub(error["message"].as_str().unwrap_or("(no message)"));
+    Some(Error::from_llm_status(
+        code,
+        format!("openai-compat embedded error {code}: {message}"),
+        retry_after_secs,
+    ))
 }
 
 /// Wrap a provider-neutral [`ToolSpec`] into an OpenAI/OpenRouter `function`
@@ -708,5 +741,23 @@ mod tests {
         let mut body = json!({ "model": "m" });
         p.apply_provider_quirks(&mut body);
         assert_eq!(body["usage"], json!({ "include": true }));
+    }
+
+    #[test]
+    fn embedded_errors_keep_their_retry_classification() {
+        let rate_limited = json!({
+            "error": { "message": "temporarily rate-limited upstream", "code": 429 }
+        });
+        let error = embedded_error(&rate_limited, Some(7)).unwrap();
+        assert!(error.is_retryable());
+        assert_eq!(error.llm_retry_after_secs(), Some(7));
+
+        let hard = json!({ "error": { "message": "bad request", "code": "400" } });
+        assert!(!embedded_error(&hard, None).unwrap().is_retryable());
+        assert!(
+            embedded_error(&json!({ "choices": [{ "message": { "content": "ok" } }] }), None)
+                .is_none()
+        );
+        assert!(embedded_error(&json!({}), None).is_none());
     }
 }

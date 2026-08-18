@@ -66,3 +66,10 @@ impl InMemoryDb {
         Self::default()
     }
 }
+
+#[async_trait::async_trait]
+impl crate::db::HealthRepo for InMemoryDb {
+    async fn ping(&self) -> crate::Result<()> {
+        Ok(())
+    }
+}

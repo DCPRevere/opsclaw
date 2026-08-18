@@ -9,13 +9,12 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// Fixed-window counter. `allow_at` returns false when the key exceeds
-/// `max` hits within `window_secs` (windows are derived from a caller-
-/// supplied timestamp so the limiter is testable without a clock).
+/// Windowed counter anchored at each key's first hit. Calendar-bucketed
+/// windows let a boundary-straddling burst spend twice the allowance.
 pub struct RateLimiter {
     max: u32,
     window_secs: i64,
-    hits: Mutex<HashMap<String, (i64, u32)>>, // key -> (window_start, count)
+    hits: Mutex<HashMap<String, (i64, u32)>>, // key -> (first_hit, count)
 }
 
 impl RateLimiter {
@@ -25,16 +24,15 @@ impl RateLimiter {
 
     /// Record a hit for `key` at unix time `now`. Returns true if allowed.
     pub fn allow_at(&self, key: &str, now: i64) -> bool {
-        let window = now / self.window_secs;
         let mut m = self.hits.lock().unwrap();
         // Eviction: every distinct key (IP) would otherwise be a permanent
         // entry — sweep past-window entries once the map is non-trivial.
         if m.len() > 4096 {
-            m.retain(|_, (w, _)| *w == window);
+            m.retain(|_, (start, _)| now - *start < self.window_secs);
         }
-        let entry = m.entry(key.to_string()).or_insert((window, 0));
-        if entry.0 != window {
-            *entry = (window, 0);
+        let entry = m.entry(key.to_string()).or_insert((now, 0));
+        if now - entry.0 >= self.window_secs {
+            *entry = (now, 0);
         }
         entry.1 += 1;
         entry.1 <= self.max
@@ -55,5 +53,15 @@ mod tests {
         assert!(!rl.allow_at("ip", t));
         assert!(rl.allow_at("ip", t + 60));
         assert!(rl.allow_at("other", t));
+    }
+
+    #[test]
+    fn calendar_boundary_does_not_reset_a_burst() {
+        let rl = RateLimiter::new(3, 60);
+        assert!(rl.allow_at("ip", 1_000_018));
+        assert!(rl.allow_at("ip", 1_000_019));
+        assert!(rl.allow_at("ip", 1_000_021));
+        assert!(!rl.allow_at("ip", 1_000_022));
+        assert!(rl.allow_at("ip", 1_000_078));
     }
 }

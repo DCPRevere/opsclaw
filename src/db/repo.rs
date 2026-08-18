@@ -458,3 +458,9 @@ pub trait ChatRepo: Send + Sync {
     /// an error) once the archive is exhausted.
     async fn before_chat(&self, before_seq: i64, limit: i64) -> Result<Vec<ChatMessage>>;
 }
+
+/// Cheap backing-store liveness used by readiness checks.
+#[async_trait]
+pub trait HealthRepo: Send + Sync {
+    async fn ping(&self) -> Result<()>;
+}

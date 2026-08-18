@@ -81,10 +81,10 @@ RUN useradd -m -u 10001 opsclaw \
 USER opsclaw
 ENV OPSCLAW_HOME=/home/opsclaw/.opsclaw
 
-# /ready is the daemon's minimal boot healthcheck today (src/http/server.rs).
+# Deep readiness covers both SQLite and the configured Hindsight backend.
 # start-period 30s: migrations run synchronously before the server binds;
 # failing checks in that window don't count against retries.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:8484/ready" || exit 1
+  CMD curl -fsS "http://127.0.0.1:8484/ready?deep=1" || exit 1
 
 CMD ["opsclaw"]

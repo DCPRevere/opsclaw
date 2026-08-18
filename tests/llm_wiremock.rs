@@ -163,6 +163,30 @@ async fn openai_compat_sends_function_tools_and_bearer_auth() {
 }
 
 #[tokio::test]
+async fn openai_compat_preserves_an_embedded_error_from_an_http_200() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).insert_header("retry-after", "11").set_body_json(
+            json!({
+                "error": {
+                    "code": 429,
+                    "message": "upstream capacity exhausted"
+                }
+            }),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiCompatProvider::new(server.uri(), "test-key", "vendor/model");
+    let error = provider.chat_step(&principal(), "sys", &[], &[a_tool()]).await.unwrap_err();
+    assert!(error.is_retryable());
+    assert_eq!(error.llm_retry_after_secs(), Some(11));
+    assert!(error.to_string().contains("embedded error 429"));
+}
+
+#[tokio::test]
 async fn openrouter_base_url_disables_reasoning_and_requests_cost() {
     let server = MockServer::start().await;
     // The base_url must literally contain "openrouter" for the quirks to

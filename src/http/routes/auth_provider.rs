@@ -25,7 +25,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::config::AuthProvider;
-use crate::http::handlers::{check_auth_rate, session_response};
+use crate::http::handlers::{ClientAddr, check_auth_rate, session_response};
 use crate::http::state::AppState;
 use crate::{Error, Result};
 
@@ -70,12 +70,12 @@ pub struct ExchangeReq {
 /// redeeming an invite.
 async fn hanko_exchange(
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
+    ClientAddr(peer): ClientAddr,
     axum::Json(req): axum::Json<ExchangeReq>,
 ) -> Result<axum::response::Response> {
     // First, before any outbound call: an unlimited endpoint here is a free
     // request amplifier pointed at the identity provider.
-    check_auth_rate(&state, &headers)?;
+    check_auth_rate(&state, peer)?;
     let hanko = state
         .hanko
         .as_ref()

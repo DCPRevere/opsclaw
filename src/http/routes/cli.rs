@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::db::CliToken;
 use crate::http::cli_auth;
-use crate::http::handlers::{self, Authed};
+use crate::http::handlers::{self, Authed, ClientAddr};
 use crate::http::state::AppState;
 use crate::{Error, Result};
 
@@ -100,10 +100,10 @@ pub struct ExchangeReq {
 /// rate limit with login.
 async fn exchange(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    ClientAddr(peer): ClientAddr,
     Json(req): Json<ExchangeReq>,
 ) -> Result<Json<Value>> {
-    handlers::check_auth_rate(&state, &headers)?;
+    handlers::check_auth_rate(&state, peer)?;
     let denied = || Error::unauthorized("invalid or expired authorization code");
 
     // One-time: the code leaves the map on FIRST presentation, valid or

@@ -54,7 +54,7 @@ pub async fn run(state: AppState) -> Result<()> {
     tracing::info!(%listen, version = crate::version(), "opsclaw listening");
 
     let bg_shutdown = shutdown.clone();
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(async move {
             // Either a process signal or an external cancel of the state's
             // token (in-process supervisors and the lifecycle e2e stop the
@@ -136,6 +136,7 @@ pub(crate) fn scheduler_deps(state: &AppState) -> crate::scheduler::SchedulerDep
         named_channels: state.named_channels.clone(),
         composer: state.composer.clone(),
         config: state.config.clone(),
+        scrubber: crate::policy::Scrubber::global().clone(),
     }
 }
 

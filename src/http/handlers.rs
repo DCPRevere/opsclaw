@@ -28,6 +28,7 @@ use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 use super::auth;
@@ -60,6 +61,24 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Result<&str> {
 
 pub(crate) struct Ctx {
     pub(crate) account_id: Uuid,
+}
+
+/// Socket peer when the router is served with Axum `ConnectInfo`; absent for
+/// in-process router tests. Unlike `ConnectInfo` itself this extractor is
+/// deliberately optional without turning a missing extension into a 500.
+pub(crate) struct ClientAddr(pub(crate) Option<SocketAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientAddr {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let peer =
+            parts.extensions.get::<axum::extract::ConnectInfo<SocketAddr>>().map(|info| info.0);
+        Ok(ClientAddr(peer))
+    }
 }
 
 pub(crate) async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Ctx> {
@@ -141,21 +160,17 @@ pub struct LoginReq {
     pub password: String,
 }
 
-/// Best-effort client IP for rate-limiting (a reverse proxy/tunnel in front
-/// sets `X-Forwarded-For`; falls back to a constant otherwise — matching
-/// gianna's stance that this is a blunt best-effort control, not the only
-/// line of defense).
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".into())
+/// Rate-limit identity from the TCP peer, never an attacker-controlled
+/// forwarding header. OpsClaw has no trusted-proxy configuration, so
+/// accepting X-Forwarded-For would let a direct client mint a new bucket per
+/// guess. Router-only tests have no ConnectInfo and share the conservative
+/// `unknown` bucket.
+fn client_ip(peer: Option<SocketAddr>) -> String {
+    peer.map(|addr| addr.ip().to_string()).unwrap_or_else(|| "unknown".into())
 }
 
-pub(crate) fn check_auth_rate(state: &AppState, headers: &HeaderMap) -> Result<()> {
-    if state.auth_limiter.allow_at(&client_ip(headers), Utc::now().timestamp()) {
+pub(crate) fn check_auth_rate(state: &AppState, peer: Option<SocketAddr>) -> Result<()> {
+    if state.auth_limiter.allow_at(&client_ip(peer), Utc::now().timestamp()) {
         Ok(())
     } else {
         Err(Error::rate_limited("too many attempts — please wait a minute", 60))
@@ -172,15 +187,15 @@ pub(crate) fn check_auth_rate(state: &AppState, headers: &HeaderMap) -> Result<(
 /// password, making the provider setting advisory rather than authoritative.
 /// The break-glass for a provider outage is an `ops_` CLI token minted
 /// beforehand, which reaches every `Authed` route including e-stop.
-pub async fn login(
+pub(crate) async fn login(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    ClientAddr(peer): ClientAddr,
     axum::Json(req): axum::Json<LoginReq>,
 ) -> Result<Response> {
     if state.config.auth.provider != crate::config::AuthProvider::Local {
         return Err(Error::validation("password sign-in is disabled — this daemon uses hanko"));
     }
-    check_auth_rate(&state, &headers)?;
+    check_auth_rate(&state, peer)?;
     let invalid = || Error::unauthorized("invalid email or password");
     let account = state.repos.by_email(&req.email).await?.ok_or_else(invalid)?;
     if !auth::verify_password(&req.password, &account.password_hash)? {
@@ -228,4 +243,21 @@ pub async fn me(State(state): State<AppState>, Authed(ctx): Authed) -> Result<ax
         "email": account.email,
         "display_name": account.display_name,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_rate_limit_is_keyed_by_socket_peer() {
+        let state = AppState::fake();
+        let first: SocketAddr = "192.0.2.10:1234".parse().unwrap();
+        let second: SocketAddr = "192.0.2.11:5678".parse().unwrap();
+        for _ in 0..10 {
+            check_auth_rate(&state, Some(first)).unwrap();
+        }
+        assert!(check_auth_rate(&state, Some(first)).is_err());
+        assert!(check_auth_rate(&state, Some(second)).is_ok());
+    }
 }

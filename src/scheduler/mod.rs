@@ -85,6 +85,10 @@ pub struct SchedulerDeps {
     pub named_channels: Vec<Arc<dyn Channel>>,
     pub composer: Arc<dyn JobComposer>,
     pub config: Arc<Config>,
+    /// The daemon's credential-aware scrubber. Approval rows retain raw
+    /// commands for verbatim execution; every scheduler-side rendering must
+    /// pass through this before it reaches logs or channels.
+    pub scrubber: Arc<crate::policy::Scrubber>,
 }
 
 /// Bumped at tick START (liveness, not success) — the dead-man's switch the

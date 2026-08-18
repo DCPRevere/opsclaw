@@ -50,6 +50,7 @@ fn deps_with(
         named_channels: vec![channel.clone()],
         composer,
         config: Arc::new(Config::default()),
+        scrubber: Arc::new(crate::policy::Scrubber::new()),
     };
     (deps, db, channel)
 }
@@ -409,6 +410,7 @@ async fn send_failure_gets_a_fresh_claim_on_genuine_retry_and_eventually_succeed
         named_channels: vec![flaky.clone()],
         composer: Arc::new(FixedComposer("payload".into())),
         config: Arc::new(Config::default()),
+        scrubber: Arc::new(crate::policy::Scrubber::new()),
     };
     let t0 = t(9, 0);
     let mut job = prompt_job("flaky-send", Schedule::Once { at: t0 });
@@ -515,6 +517,7 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
         named_channels: vec![channel],
         composer: Arc::new(NoopComposer),
         config: Arc::new(cfg),
+        scrubber: Arc::new(crate::policy::Scrubber::new()),
     };
 
     seed_default_scan_jobs(&deps, 5).await.unwrap();
@@ -718,6 +721,7 @@ async fn spawn_ticks_on_the_adaptive_interval_and_tighten_speeds_it_up() {
         named_channels: vec![channel.clone()],
         composer,
         config: Arc::new(Config::default()),
+        scrubber: Arc::new(crate::policy::Scrubber::new()),
     };
     let now = Utc::now();
     let mut job = prompt_job("heartbeat-probe", Schedule::Once { at: now });
@@ -946,6 +950,7 @@ async fn escalation_reopened_incident_pages_once_then_resumes_only_if_unacked() 
         named_channels: vec![],
         composer: Arc::new(NoopComposer),
         config: Arc::new(cfg),
+        scrubber: Arc::new(crate::policy::Scrubber::new()),
     };
     let handle = SchedulerHandle::new(60_000);
     let t0 = t(9, 0);
@@ -1023,6 +1028,7 @@ async fn escalation_walks_configured_steps_and_resolves_named_contacts() {
         named_channels: vec![named.clone()],
         composer: Arc::new(NoopComposer),
         config: Arc::new(cfg),
+        scrubber: Arc::new(crate::policy::Scrubber::new()),
     };
     let handle = SchedulerHandle::new(60_000);
     let t0 = t(9, 0);
@@ -1095,6 +1101,7 @@ async fn escalation_resolves_the_chain_per_incident_project() {
         named_channels: vec![named.clone()],
         composer: Arc::new(NoopComposer),
         config: Arc::new(cfg),
+        scrubber: Arc::new(crate::policy::Scrubber::new()),
     };
     let handle = SchedulerHandle::new(60_000);
     let t0 = t(9, 0);
@@ -1149,6 +1156,7 @@ async fn escalation_send_failure_releases_the_claim_and_the_next_tick_retries() 
         named_channels: vec![],
         composer: Arc::new(NoopComposer),
         config: Arc::new(Config::default()),
+        scrubber: Arc::new(crate::policy::Scrubber::new()),
     };
     let handle = SchedulerHandle::new(60_000);
     let t0 = t(9, 0);
@@ -1196,6 +1204,7 @@ async fn incident_pressure_tightens_while_open_and_relaxes_when_clear() {
 #[tokio::test]
 async fn expired_approvals_are_announced_exactly_once() {
     let (deps, db, channel) = deps();
+    deps.scrubber.register("API_TOKEN", "expiry-secret");
     let t0 = t(9, 0);
     let req = crate::incidents::new_approval_request(
         crate::incidents::NewApproval {
@@ -1203,7 +1212,7 @@ async fn expired_approvals_are_announced_exactly_once() {
             incident: None,
             target: crate::domain::FqTarget::new("remundo", "prod", "cluster"),
             tool: "kubernetes".into(),
-            command: "delete pod stuck-pod -n prod-backend".into(),
+            command: "delete pod stuck-pod -n prod-backend # expiry-secret".into(),
             risk: crate::domain::RiskClass::High,
             hypothesis: "pod wedged in Terminating".into(),
             expires_in: Some(Duration::minutes(30)),
@@ -1222,6 +1231,8 @@ async fn expired_approvals_are_announced_exactly_once() {
     assert_eq!(sent.len(), 1);
     assert!(sent[0].body.contains("EXPIRED"), "{}", sent[0].body);
     assert!(sent[0].body.contains("delete pod stuck-pod"), "{}", sent[0].body);
+    assert!(!sent[0].body.contains("expiry-secret"), "{}", sent[0].body);
+    assert!(sent[0].body.contains("<redacted:API_TOKEN>"), "{}", sent[0].body);
 
     // …and never again (expire_due only returns rows it just transitioned).
     escalations::expire_approvals(&deps, t0 + Duration::minutes(45)).await.unwrap();

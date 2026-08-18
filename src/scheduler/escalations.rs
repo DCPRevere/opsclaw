@@ -222,13 +222,14 @@ fn render_page(incident: &Incident, kind: &str, step: usize, total_steps: usize)
 pub(super) async fn expire_approvals(deps: &SchedulerDeps, now: DateTime<Utc>) -> Result<()> {
     let expired = crate::incidents::sweep_expired(&*deps.approvals, now).await?;
     for req in expired {
-        tracing::warn!(approval = %req.id, command = %req.command, "approval expired unactioned");
+        let scrubbed_command = deps.scrubber.scrub(&req.command);
+        tracing::warn!(approval = %req.id, command = %scrubbed_command, "approval expired unactioned");
         let body = format!(
             "approval request {id} EXPIRED unactioned: `{command}` ({tool}) on {target} \
              [{risk:?}] — nobody approved or denied it within its window, so it is \
              cancelled. Re-request from chat if the action is still needed.",
             id = req.id,
-            command = req.command,
+            command = scrubbed_command,
             tool = req.tool,
             target = req.target,
             risk = req.risk,

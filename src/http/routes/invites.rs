@@ -25,7 +25,7 @@ use uuid::Uuid;
 use crate::Error;
 use crate::Result;
 use crate::db::{Account, AccountRepo, Invite};
-use crate::http::handlers::{Authed, check_auth_rate, session_response};
+use crate::http::handlers::{Authed, ClientAddr, check_auth_rate, session_response};
 use crate::http::state::AppState;
 use crate::http::{auth, cli_auth};
 
@@ -135,17 +135,16 @@ mod join_order_tests {
         };
         AccountRepo::insert(&*state.repos, &existing).await.unwrap();
 
-        let headers = axum::http::HeaderMap::new();
         let known = join(
             axum::extract::State(state.clone()),
-            headers.clone(),
+            ClientAddr(None),
             axum::Json(req("bogus", "known@example.com", Some("longenough"))),
         )
         .await
         .unwrap_err();
         let unknown = join(
             axum::extract::State(state.clone()),
-            headers,
+            ClientAddr(None),
             axum::Json(req("bogus", "nobody@example.com", Some("longenough"))),
         )
         .await
@@ -159,12 +158,11 @@ mod join_order_tests {
     #[tokio::test]
     async fn a_failed_join_leaves_the_code_usable() {
         let (state, code) = seeded().await;
-        let headers = axum::http::HeaderMap::new();
         // Too-short password: fails during credential resolution.
         assert!(
             join(
                 axum::extract::State(state.clone()),
-                headers.clone(),
+                ClientAddr(None),
                 axum::Json(req(&code, "op@example.com", Some("short"))),
             )
             .await
@@ -176,7 +174,7 @@ mod join_order_tests {
         );
         join(
             axum::extract::State(state.clone()),
-            headers,
+            ClientAddr(None),
             axum::Json(req(&code, "op@example.com", Some("long-enough-password"))),
         )
         .await
@@ -206,10 +204,10 @@ pub struct JoinReq {
 /// it shares the per-IP auth rate limit with login.
 async fn join(
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
+    ClientAddr(peer): ClientAddr,
     Json(req): Json<JoinReq>,
 ) -> Result<axum::response::Response> {
-    check_auth_rate(&state, &headers)?;
+    check_auth_rate(&state, peer)?;
     if !crate::http::handlers::plausible_email(&req.email) {
         return Err(Error::validation("that doesn't look like a valid email address"));
     }

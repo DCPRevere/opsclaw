@@ -49,6 +49,7 @@ pub struct HindsightClient {
     /// This team's bank id (`opsclaw-{team_id}`), fixed for the client's
     /// lifetime — single-tenant, so there is nothing to key per call.
     bank: String,
+    cost_guard: Option<std::sync::Arc<crate::llm::CostGuard>>,
 }
 
 impl HindsightClient {
@@ -63,7 +64,20 @@ impl HindsightClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             auth,
             bank: format!("opsclaw-{team_id}"),
+            cost_guard: None,
         }
+    }
+
+    pub fn with_cost_guard(mut self, guard: std::sync::Arc<crate::llm::CostGuard>) -> Self {
+        self.cost_guard = Some(guard);
+        self
+    }
+
+    async fn check_cost_cap(&self) -> Result<()> {
+        if let Some(guard) = &self.cost_guard {
+            guard.ensure_under_cap().await?;
+        }
+        Ok(())
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -132,6 +146,7 @@ impl HindsightClient {
     /// - `context` — a short situational note ("operator chat", "scan finding");
     ///   omitting it measurably hurts extraction quality.
     pub async fn retain(&self, framed_content: &str, opts: &RetainOpts) -> Result<()> {
+        self.check_cost_cap().await?;
         let body = retain_body(framed_content, opts);
         // Shape + ids at info (no fact text — may carry operational detail); full
         // content at debug.
@@ -314,6 +329,7 @@ impl HindsightClient {
     /// (the query alone drives all four), so the plain `{query, max_tokens}`
     /// body below already gets keyword AND semantic matching on every call.
     pub async fn recall(&self, query: &str, max_tokens: u32) -> Result<Vec<MemoryItem>> {
+        self.check_cost_cap().await?;
         let body = recall_body(query, max_tokens);
         tracing::debug!(bank = %self.bank, query, max_tokens, "memory.recall query");
         let started = std::time::Instant::now();
@@ -395,6 +411,7 @@ impl HindsightClient {
     /// reflect: Hindsight synthesises a single answer from the team's shared
     /// memory.
     pub async fn reflect(&self, query: &str) -> Result<String> {
+        self.check_cost_cap().await?;
         let body = reflect_body(query);
         tracing::debug!(bank = %self.bank, query, "memory.reflect query");
         let started = std::time::Instant::now();

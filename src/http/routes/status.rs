@@ -65,6 +65,14 @@ async fn status(State(state): State<AppState>, Authed(_ctx): Authed) -> Result<J
         }));
     }
     let jobs = rows;
+    let spend = match state.cost_guard.spend_snapshot().await {
+        Ok(snapshot) => serde_json::to_value(snapshot).unwrap_or(Value::Null),
+        Err(error) => json!({
+            "cap_cents": state.cost_guard.cap_cents(),
+            "complete": false,
+            "error": error.to_string(),
+        }),
+    };
     Ok(Json(json!({
         "version": crate::version(),
         "fakes_mode": state.config.fully_faked(),
@@ -73,6 +81,7 @@ async fn status(State(state): State<AppState>, Authed(_ctx): Authed) -> Result<J
         "last_tick_ms": state.scheduler.last_tick_at_ms(),
         "lag_ms": state.scheduler.lag(),
         "estop_engaged": estop_engaged,
+        "spend": spend,
         "jobs": jobs,
     })))
 }

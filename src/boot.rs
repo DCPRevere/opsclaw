@@ -74,25 +74,46 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     // `env` dump on a kind=local target, or an error message formatting the
     // key, comes back `<redacted:LLM_API_KEY>` (a real DoD #4 exposure —
     // OPENROUTER_API_KEY sits in this process's environment).
-    if let Some(key_ref) = &config.llm.api_key {
-        scrubber.register("LLM_API_KEY", &key_ref.resolve(&secret_store)?);
-    }
+    let opsclaw_llm_key = match &config.llm.api_key {
+        Some(key_ref) => {
+            let key = key_ref.resolve(&secret_store)?;
+            scrubber.register("LLM_API_KEY", &key);
+            Some(key)
+        }
+        None => None,
+    };
     let base_llm = crate::llm::build_chain(&config.llm, &secret_store)?;
-    let cost_guard = Arc::new(crate::llm::CostGuard::new(
-        base_llm,
-        repos.clone(),
-        config.limits.max_cost_per_day_cents,
-    ));
+    let mut cost_guard =
+        crate::llm::CostGuard::new(base_llm, repos.clone(), config.limits.max_cost_per_day_cents);
+    if config.memory.hindsight_url.is_some() {
+        let hindsight_key =
+            std::env::var("HINDSIGHT_LLM_API_KEY").ok().filter(|key| !key.trim().is_empty());
+        let hindsight_base = std::env::var("HINDSIGHT_LLM_BASE_URL").unwrap_or_default();
+        if let Some(key) = &hindsight_key {
+            scrubber.register("HINDSIGHT_LLM_API_KEY", key);
+        }
+        cost_guard = match hindsight_key {
+            Some(key) if hindsight_base.contains("openrouter.ai") => {
+                let shared = opsclaw_llm_key.as_deref() == Some(key.as_str());
+                cost_guard.with_hindsight_openrouter_meter(key, shared)
+            }
+            _ => cost_guard.with_unmetered_hindsight(),
+        };
+    }
+    let cost_guard = Arc::new(cost_guard);
     let llm: Arc<dyn crate::llm::LlmProvider> = cost_guard.clone();
 
     // Memory: Hindsight when configured, honest no-op otherwise.
     let memory = match &config.memory.hindsight_url {
         Some(url) => {
-            let client = Arc::new(crate::memory::hindsight::HindsightClient::new(
-                url.clone(),
-                None,
-                &config.memory.team_id,
-            ));
+            let client = Arc::new(
+                crate::memory::hindsight::HindsightClient::new(
+                    url.clone(),
+                    None,
+                    &config.memory.team_id,
+                )
+                .with_cost_guard(cost_guard.clone()),
+            );
             Arc::new(Memory::disabled().with_hindsight(client))
         }
         None => Arc::new(Memory::disabled()),
@@ -155,6 +176,7 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         estop,
         scheduler_handle,
     )?;
+    state.cost_guard = cost_guard.clone();
     // The web-session and webhook signing secrets, resolved by
     // `AppState::new` just above — registered for the same reason as the
     // LLM key: no resolved secret stays scrub-invisible.

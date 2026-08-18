@@ -19,7 +19,7 @@ use crate::cli::remote::client;
 use crate::cli::remote::session::Session;
 
 pub async fn status(session: &Session, json: bool) -> Result<()> {
-    let body = client::get(session, "/cli/v1/status").await?;
+    let body = get(session).await?;
     if json {
         print_json(&body);
     } else {
@@ -27,6 +27,10 @@ pub async fn status(session: &Session, json: bool) -> Result<()> {
         println!("estop_engaged:  {}", body["estop_engaged"].as_bool().unwrap_or(false));
     }
     Ok(())
+}
+
+pub async fn get(session: &Session) -> Result<serde_json::Value> {
+    client::get(session, "/cli/v1/status").await
 }
 
 pub async fn whoami(session: &Session, json: bool) -> Result<()> {

@@ -82,7 +82,7 @@ pub mod pricing;
 
 pub use anthropic::{AnthropicAuth, AnthropicProvider};
 pub use chain::build_chain;
-pub use cost_guard::CostGuard;
+pub use cost_guard::{CostGuard, SpendSnapshot};
 pub use fakes::{FakeLlm, ScriptedLlm};
 pub use fallback::FallbackLlm;
 pub use openai_compat::OpenAiCompatProvider;

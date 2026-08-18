@@ -59,6 +59,8 @@ pub struct AppState {
     /// nothing needs scrubbing from logs.
     pub hanko: Option<Arc<crate::http::hanko::HankoClient>>,
     pub repos: Arc<dyn AllRepos>,
+    /// Shared budget reporter/gate for OpsClaw and metered Hindsight calls.
+    pub cost_guard: Arc<crate::llm::CostGuard>,
     /// The safety-invariant seam (AGENTS.md): the ONLY way any handler may
     /// reach a `TargetExecutor` is through one of these two traits — never
     /// a concrete `Policy`, never a `TargetExecutor` directly. `policy` is
@@ -146,6 +148,11 @@ impl AppState {
         };
         let hanko = build_hanko(&config)?;
         let web = Arc::new(WebHub::new());
+        let cost_guard = Arc::new(crate::llm::CostGuard::new(
+            Arc::new(crate::llm::FakeLlm::new()),
+            repos.clone(),
+            config.limits.max_cost_per_day_cents,
+        ));
         Ok(AppState {
             config: Arc::new(config),
             config_path,
@@ -153,6 +160,7 @@ impl AppState {
             webhook_secret,
             hanko,
             repos,
+            cost_guard,
             policy,
             approved,
             estop,
@@ -229,6 +237,11 @@ impl AppState {
         let config_path = std::env::temp_dir()
             .join(format!("opsclaw-fake-config-{}", uuid::Uuid::new_v4()))
             .join("config.toml");
+        let cost_guard = Arc::new(crate::llm::CostGuard::new(
+            Arc::new(crate::llm::FakeLlm::new()),
+            repos.clone(),
+            config.limits.max_cost_per_day_cents,
+        ));
         AppState {
             config: Arc::new(config),
             config_path,
@@ -236,6 +249,7 @@ impl AppState {
             webhook_secret: None,
             hanko,
             repos,
+            cost_guard,
             policy: policy.clone(),
             approved: policy,
             estop,

@@ -173,9 +173,18 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> Result<Jso
     let now_ms = Utc::now().timestamp_millis();
     let heartbeat = state.scheduler.heartbeat_status(now_ms);
     let estop_engaged = state.estop.engaged().await?;
+    let spend = match state.cost_guard.spend_snapshot().await {
+        Ok(snapshot) => serde_json::to_value(snapshot).unwrap_or(Value::Null),
+        Err(error) => json!({
+            "cap_cents": state.cost_guard.cap_cents(),
+            "complete": false,
+            "error": error.to_string(),
+        }),
+    };
     Ok(Json(json!({
         "heartbeat": heartbeat.as_str(),
         "estop_engaged": estop_engaged,
+        "spend": spend,
     })))
 }
 

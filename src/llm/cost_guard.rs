@@ -22,6 +22,7 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use serde::Serialize;
 
 use crate::Result;
 use crate::channels::{Channel, OutboundMessage};
@@ -55,6 +56,27 @@ pub struct CostGuard {
     /// (utc day, cents spent) — cache over the KV row, serialized so
     /// concurrent turns can't lose an increment.
     ledger: tokio::sync::Mutex<Option<(String, f64)>>,
+    hindsight_meter: Option<ProviderMeter>,
+    hindsight_configured: bool,
+}
+
+struct ProviderMeter {
+    http: reqwest::Client,
+    url: String,
+    key: String,
+    shared_with_opsclaw: bool,
+    cache: tokio::sync::Mutex<Option<(std::time::Instant, f64)>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SpendSnapshot {
+    pub day_utc: String,
+    pub opsclaw_cents: f64,
+    pub hindsight_cents: Option<f64>,
+    pub total_cents: f64,
+    pub cap_cents: f64,
+    pub remaining_cents: f64,
+    pub complete: bool,
 }
 
 impl CostGuard {
@@ -65,7 +87,41 @@ impl CostGuard {
             cap_cents: f64::from(cap_cents),
             notifier: OnceLock::new(),
             ledger: tokio::sync::Mutex::new(None),
+            hindsight_meter: None,
+            hindsight_configured: false,
         }
+    }
+
+    /// Include Hindsight's OpenRouter key in the same daily budget. The
+    /// current-key endpoint reports `usage_daily` in dollars; when both
+    /// components share a key that value is already the combined total.
+    pub fn with_hindsight_openrouter_meter(
+        mut self,
+        key: String,
+        shared_with_opsclaw: bool,
+    ) -> Self {
+        self.install_hindsight_meter(
+            key,
+            shared_with_opsclaw,
+            "https://openrouter.ai/api/v1/key".into(),
+        );
+        self
+    }
+
+    fn install_hindsight_meter(&mut self, key: String, shared_with_opsclaw: bool, url: String) {
+        self.hindsight_configured = true;
+        self.hindsight_meter = Some(ProviderMeter {
+            http: reqwest::Client::new(),
+            url,
+            key,
+            shared_with_opsclaw,
+            cache: tokio::sync::Mutex::new(None),
+        });
+    }
+
+    pub fn with_unmetered_hindsight(mut self) -> Self {
+        self.hindsight_configured = true;
+        self
     }
 
     /// Install the escalation channel (idempotent; first caller wins).
@@ -83,6 +139,50 @@ impl CostGuard {
     /// The configured daily cap in cents.
     pub fn cap_cents(&self) -> f64 {
         self.cap_cents
+    }
+
+    pub async fn spend_snapshot(&self) -> Result<SpendSnapshot> {
+        let day = today_utc();
+        let opsclaw = self.spent_today_cents().await;
+        let (hindsight, total, complete) = match &self.hindsight_meter {
+            Some(meter) => {
+                let provider_total = meter.daily_cents().await?;
+                if meter.shared_with_opsclaw {
+                    (Some((provider_total - opsclaw).max(0.0)), provider_total.max(opsclaw), true)
+                } else {
+                    (Some(provider_total), opsclaw + provider_total, true)
+                }
+            }
+            None => (None, opsclaw, !self.hindsight_configured),
+        };
+        Ok(SpendSnapshot {
+            day_utc: day,
+            opsclaw_cents: opsclaw,
+            hindsight_cents: hindsight,
+            total_cents: total,
+            cap_cents: self.cap_cents,
+            remaining_cents: (self.cap_cents - total).max(0.0),
+            complete,
+        })
+    }
+
+    /// Shared preflight for OpsClaw and Hindsight model work.
+    pub async fn ensure_under_cap(&self) -> Result<SpendSnapshot> {
+        let snapshot = self.spend_snapshot().await?;
+        if !snapshot.complete {
+            return Err(crate::Error::llm_hard(
+                "daily LLM cost cap cannot include Hindsight — set HINDSIGHT_LLM_BASE_URL to \
+                 OpenRouter and HINDSIGHT_LLM_API_KEY to its key",
+            ));
+        }
+        if snapshot.total_cents >= self.cap_cents {
+            self.notify_cap_reached(&snapshot.day_utc, snapshot.total_cents).await;
+            return Err(crate::Error::llm_hard(format!(
+                "daily LLM cost cap reached ({:.1}¢ of {:.0}¢) — no further LLM calls until UTC midnight",
+                snapshot.total_cents, self.cap_cents
+            )));
+        }
+        Ok(snapshot)
     }
 
     /// Resolve the cached ledger for `day`, (re)loading from the durable KV
@@ -122,7 +222,7 @@ impl CostGuard {
             return;
         }
         let body = format!(
-            "🛑 Daily LLM cost cap reached: spent {:.1}¢ of the {:.0}¢/day limit \
+            "Daily LLM cost cap reached: spent {:.1}¢ of the {:.0}¢/day limit \
              (limits.max_cost_per_day_cents). No further LLM calls will be made until UTC \
              midnight. Monitoring ticks, the dead-man ping, and approvals of already-proposed \
              actions continue. Raise the cap in config and restart if this is too tight.",
@@ -164,18 +264,7 @@ impl LlmProvider for CostGuard {
         tools: &[ToolSpec],
     ) -> Result<ChatStep> {
         let day = today_utc();
-        let spent = {
-            let mut guard = self.ledger.lock().await;
-            self.loaded_spend(&mut guard, &day).await
-        };
-        if spent >= self.cap_cents {
-            self.notify_cap_reached(&day, spent).await;
-            return Err(crate::Error::llm_hard(format!(
-                "daily LLM cost cap reached ({spent:.1}¢ of {:.0}¢) — no further LLM calls \
-                 until UTC midnight (limits.max_cost_per_day_cents)",
-                self.cap_cents
-            )));
-        }
+        self.ensure_under_cap().await?;
 
         let mut step = self.inner.chat_step(principal, system, history, tools).await?;
 
@@ -199,6 +288,41 @@ impl LlmProvider for CostGuard {
 
     fn name(&self) -> &str {
         self.inner.name()
+    }
+}
+
+impl ProviderMeter {
+    async fn daily_cents(&self) -> Result<f64> {
+        let mut cache = self.cache.lock().await;
+        if let Some((at, cents)) = *cache
+            && at.elapsed() < std::time::Duration::from_secs(15)
+        {
+            return Ok(cents);
+        }
+        let response = self
+            .http
+            .get(&self.url)
+            .bearer_auth(&self.key)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| crate::Error::other(format!("OpenRouter spend lookup: {e}")))?;
+        let status = response.status();
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| crate::Error::other(format!("OpenRouter spend response: {e}")))?;
+        if !status.is_success() {
+            return Err(crate::Error::other(format!(
+                "OpenRouter spend lookup returned HTTP {status}"
+            )));
+        }
+        let dollars = body["data"]["usage_daily"].as_f64().ok_or_else(|| {
+            crate::Error::other("OpenRouter spend response omitted data.usage_daily")
+        })?;
+        let cents = dollars * 100.0;
+        *cache = Some((std::time::Instant::now(), cents));
+        Ok(cents)
     }
 }
 
@@ -343,5 +467,40 @@ mod tests {
         step(&guard).await.unwrap();
         // 1M input at the unknown-model default (300¢/Mtok input).
         assert_eq!(guard.spent_today_cents().await, 300.0);
+    }
+
+    #[tokio::test]
+    async fn separate_hindsight_key_is_reported_and_enforced() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/key"))
+            .and(wiremock::matchers::header("authorization", "Bearer hs-key"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": {"usage_daily": 4.25}})),
+            )
+            .mount(&server)
+            .await;
+
+        let (mut guard, _repos) = guard_with(1.0, 400);
+        guard.install_hindsight_meter(
+            "hs-key".into(),
+            false,
+            format!("{}/api/v1/key", server.uri()),
+        );
+        let snapshot = guard.spend_snapshot().await.unwrap();
+        assert_eq!(snapshot.hindsight_cents, Some(425.0));
+        assert_eq!(snapshot.total_cents, 425.0);
+        assert!(step(&guard).await.unwrap_err().to_string().contains("cost cap"));
+    }
+
+    #[tokio::test]
+    async fn configured_but_unmetered_hindsight_fails_closed() {
+        let (guard, _repos) = guard_with(1.0, 500);
+        let guard = guard.with_unmetered_hindsight();
+        let snapshot = guard.spend_snapshot().await.unwrap();
+        assert!(!snapshot.complete);
+        let err = step(&guard).await.unwrap_err();
+        assert!(err.to_string().contains("cannot include Hindsight"), "{err}");
     }
 }

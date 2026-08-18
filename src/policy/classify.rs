@@ -67,6 +67,30 @@ pub fn classify_command(line: &str) -> Classification {
             rule: "endpoint-read",
         };
     }
+    // Shell command substitution is a second command channel hidden inside
+    // the segment's arguments: `echo "$(rm -rf /)"` starts with a read rule,
+    // but the shell still executes the nested mutation. We deliberately do
+    // not try to grow a partial shell parser here. Refuse active `$()` /
+    // backtick / process-substitution syntax outright; callers can express
+    // the diagnostic as an ordinary pipeline whose segments we can classify.
+    if has_active_shell_substitution(line) {
+        return Classification {
+            risk: RiskClass::Destructive,
+            hard_blocked: true,
+            rule: "hard:shell-substitution",
+        };
+    }
+    // The command already runs under `/bin/sh -c`. Starting another shell
+    // with an opaque `-c` payload makes its contents invisible to the segment
+    // classifier (most commonly because the payload is single-quoted).
+    // Refuse that second parsing layer instead of pretending to classify it.
+    if invokes_nested_shell(line) {
+        return Classification {
+            risk: RiskClass::Destructive,
+            hard_blocked: true,
+            rule: "hard:nested-shell",
+        };
+    }
     // Hard-block patterns that SPAN shell operators (the fork bomb is `:|:&`)
     // must see the whole raw line — segment splitting would dismember them.
     if HB_FORKBOMB.is_match(line) {
@@ -91,6 +115,47 @@ pub fn classify_command(line: &str) -> Classification {
         }
     }
     result
+}
+
+/// Detect shell constructs that execute a nested command while ignoring
+/// literal examples inside single quotes. Command and process substitution
+/// remain active inside double quotes, so those are intentionally detected.
+fn has_active_shell_substitution(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let (mut in_single, mut escaped) = (false, false);
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if escaped {
+            escaped = false;
+        } else if c == b'\\' && !in_single {
+            escaped = true;
+        } else if c == b'\'' {
+            in_single = !in_single;
+        } else if !in_single
+            && (c == b'`'
+                || (i + 1 < bytes.len()
+                    && matches!((c, bytes[i + 1]), (b'$', b'(') | (b'<', b'(') | (b'>', b'('))))
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn invokes_nested_shell(line: &str) -> bool {
+    split_segments(line).into_iter().any(|segment| {
+        let segment = strip_wrappers(segment.trim());
+        let mut words = segment.split_whitespace();
+        let Some(program) = words.next() else { return false };
+        let program = program.rsplit('/').next().unwrap_or(program);
+        matches!(program, "sh" | "bash" | "dash" | "zsh" | "ksh" | "csh" | "fish")
+            && words.any(|word| {
+                word == "--command"
+                    || (word.starts_with('-') && !word.starts_with("--") && word[1..].contains('c'))
+            })
+    })
 }
 
 /// Split on unquoted `|`, `;`, `&&`, `||`, `&`, and newlines. Quote-aware so
@@ -530,6 +595,24 @@ mod tests {
             assert!(hard(cmd), "{cmd} must be hard-blocked");
             assert_eq!(risk(cmd), Destructive, "{cmd}");
         }
+    }
+
+    #[test]
+    fn active_nested_shell_commands_are_hard_blocked() {
+        for cmd in [
+            r#"echo "$(rm -rf /)""#,
+            "echo `rm -rf /`",
+            "diff <(cat a) <(cat b)",
+            "cat >(rm -rf /tmp/x)",
+            "sh -c 'rm -rf /'",
+            "sudo /bin/bash -lc 'rm -rf /'",
+        ] {
+            assert!(hard(cmd), "{cmd} must not hide a nested command from policy");
+            assert_eq!(risk(cmd), Destructive, "{cmd}");
+        }
+
+        assert_eq!(risk(r#"grep '\$(rm -rf /)' audit.log"#), Read);
+        assert_eq!(risk(r#"grep '`rm -rf /`' audit.log"#), Read);
     }
 
     #[test]

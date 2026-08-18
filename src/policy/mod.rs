@@ -645,6 +645,61 @@ impl ExecuteApproved for Policy {
                 dry_run_logged: false,
             });
         }
+        // Approval skips only the autonomy decision. Configured hard bounds
+        // remain live policy and may have tightened since this row queued
+        // (including across a daemon restart), so reapply them at fire time.
+        if let Some(path) = self
+            .config
+            .policy
+            .forbidden_paths
+            .iter()
+            .find(|p| approval.command.contains(p.as_str()))
+        {
+            self.audit_one(
+                principal,
+                &fq,
+                &approval.tool,
+                &scrubbed,
+                risk,
+                AuditOutcome::Blocked,
+                None,
+            )
+            .await?;
+            return Ok(PolicyOutcome::Blocked {
+                reason: format!("command touches forbidden path {path:?}"),
+                dry_run_logged: false,
+            });
+        }
+        let approved_req = CommandRequest {
+            principal: approval.requested_by.clone(),
+            tool: approval.tool.clone(),
+            target: approval.target.clone(),
+            command: approval.command.clone(),
+            declared_risk: approval.risk,
+            hypothesis: Some(approval.hypothesis.clone()),
+            // Approval rows predate/stay independent of runbook matching; a
+            // runbook-only allowlist therefore fails closed after restart.
+            runbook: None,
+        };
+        if risk != RiskClass::Read
+            && !self.config.policy.command_allowlist.is_empty()
+            && !bounds_match(&self.config.policy.command_allowlist, &approved_req)
+        {
+            self.audit_one(
+                principal,
+                &fq,
+                &approval.tool,
+                &scrubbed,
+                risk,
+                AuditOutcome::Blocked,
+                None,
+            )
+            .await?;
+            return Ok(PolicyOutcome::Blocked {
+                reason: "mutation is not on policy.command_allowlist".into(),
+                dry_run_logged: false,
+            });
+        }
         self.run_capped(
             principal,
             &approval.tool,
@@ -1233,6 +1288,56 @@ mod tests {
             decided_by: Some(Uuid::new_v4()),
         };
         let out = rig.policy.execute_approved(&row, Uuid::new_v4()).await.unwrap();
+        assert!(matches!(out, PolicyOutcome::Blocked { .. }), "got {out:?}");
+        assert!(rig.executor.ran.lock().unwrap().is_empty());
+    }
+
+    fn approved_row(command: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            id: Uuid::new_v4(),
+            incident: None,
+            requested_by: Principal::System,
+            target: FqTarget::new("remundo", "prod", "bastion"),
+            tool: "shell".into(),
+            command: command.into(),
+            risk: RiskClass::High,
+            hypothesis: String::new(),
+            state: ApprovalState::Approved,
+            requested_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::minutes(30),
+            decided_at: Some(Utc::now()),
+            decided_by: Some(Uuid::new_v4()),
+        }
+    }
+
+    #[tokio::test]
+    async fn approved_command_rechecks_current_forbidden_paths() {
+        let mut config = config_at(Autonomy::Suggest);
+        config.policy.forbidden_paths = vec!["/srv/protected".into()];
+        let rig = rig_with(config, FakeExecutor::ok(""));
+
+        let out = rig
+            .policy
+            .execute_approved(&approved_row("rm -f /srv/protected/data"), Uuid::new_v4())
+            .await
+            .unwrap();
+
+        assert!(matches!(out, PolicyOutcome::Blocked { .. }), "got {out:?}");
+        assert!(rig.executor.ran.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn approved_command_rechecks_current_command_allowlist() {
+        let mut config = config_at(Autonomy::Suggest);
+        config.policy.command_allowlist = vec!["systemd".into()];
+        let rig = rig_with(config, FakeExecutor::ok(""));
+
+        let out = rig
+            .policy
+            .execute_approved(&approved_row("systemctl restart nginx"), Uuid::new_v4())
+            .await
+            .unwrap();
+
         assert!(matches!(out, PolicyOutcome::Blocked { .. }), "got {out:?}");
         assert!(rig.executor.ran.lock().unwrap().is_empty());
     }

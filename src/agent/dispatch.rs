@@ -1006,6 +1006,10 @@ mod tests {
         let heartbeat_names: Vec<&str> = heartbeat_registry.iter().map(|t| t.name()).collect();
         let full_names: Vec<&str> = full_registry.iter().map(|t| t.name()).collect();
 
+        assert!(full_names.contains(&"shell"), "local target should expose shell");
+        assert!(!full_names.contains(&"ssh"), "local target must not expose ssh");
+        assert!(!full_names.contains(&"kubernetes"), "local target must not expose kubernetes");
+
         assert!(
             full_names.len() > heartbeat_names.len(),
             "heartbeat mode must be a strict subset (full={full_names:?}, heartbeat={heartbeat_names:?})"

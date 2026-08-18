@@ -348,8 +348,15 @@ pub fn registry(ctx: &ToolCtx, heartbeat: bool) -> Vec<Box<dyn Tool>> {
     }
 
     // --- Executor-backed: register only when a usable target exists. ---
-    let has_ssh_or_local = ctx.known_targets.iter().any(|t| {
-        ctx.config.as_ref().is_some_and(|c| target_kind_of(c, t).is_some_and(is_ssh_or_local))
+    let has_ssh = ctx.known_targets.iter().any(|t| {
+        ctx.config
+            .as_ref()
+            .is_some_and(|c| configured_kind(c, t) == Some(crate::config::TargetKindName::Ssh))
+    });
+    let has_local = ctx.known_targets.iter().any(|t| {
+        ctx.config
+            .as_ref()
+            .is_some_and(|c| configured_kind(c, t) == Some(crate::config::TargetKindName::Local))
     });
     let has_kubernetes = ctx.known_targets.iter().any(|t| {
         ctx.config
@@ -357,9 +364,13 @@ pub fn registry(ctx: &ToolCtx, heartbeat: bool) -> Vec<Box<dyn Tool>> {
             .is_some_and(|c| target_kind_of(c, t) == Some(RegistryTargetClass::Kubernetes))
     });
 
-    if has_ssh_or_local {
+    if has_ssh {
         tools.push(Box::new(ssh::SshTool));
+    }
+    if has_local {
         tools.push(Box::new(shell::ShellTool));
+    }
+    if has_ssh || has_local {
         tools.push(Box::new(monitor::MonitorTool));
         tools.push(Box::new(systemd::SystemdTool));
         tools.push(Box::new(docker::DockerTool));
@@ -418,10 +429,6 @@ enum RegistryTargetClass {
     SshOrLocal,
     Kubernetes,
     Cloud,
-}
-
-fn is_ssh_or_local(k: RegistryTargetClass) -> bool {
-    k == RegistryTargetClass::SshOrLocal
 }
 
 /// Look up an `FqTarget`'s configured kind by walking `Config`'s

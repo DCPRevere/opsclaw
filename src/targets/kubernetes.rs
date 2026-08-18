@@ -74,8 +74,16 @@ impl KubernetesExecutor {
                     stated_namespace = Some(value.clone());
                     i += 1;
                 }
+                arg if arg.starts_with("--all-namespaces=") || arg.starts_with("-A=") => {
+                    return Err(Error::Policy(format!(
+                        "namespace-scoped kubernetes target cannot use {arg}"
+                    )));
+                }
                 arg if arg.starts_with("--namespace=") || arg.starts_with("-n=") => {
                     stated_namespace = arg.split_once('=').map(|(_, value)| value.to_string());
+                }
+                arg if arg.starts_with("-n") && arg.len() > 2 => {
+                    stated_namespace = Some(arg[2..].to_string());
                 }
                 _ => {}
             }
@@ -136,7 +144,14 @@ impl TargetExecutor for KubernetesExecutor {
         // Strip a leading "kubectl" if the tool included it — the classifier
         // matches on the full `kubectl ...` line (policy/classify.rs), but
         // the executor supplies the binary itself.
-        let line = cmd.line.strip_prefix("kubectl").map(str::trim).unwrap_or(&cmd.line);
+        let trimmed = cmd.line.trim_start();
+        let line = if trimmed == "kubectl" {
+            ""
+        } else if let Some(rest) = trimmed.strip_prefix("kubectl ") {
+            rest.trim_start()
+        } else {
+            &cmd.line
+        };
         let args = self.scoped_args(line)?;
         self.run_kubectl(&args, timeout).await
     }
@@ -199,7 +214,15 @@ mod tests {
         assert!(exec.scoped_args("get pods -A").is_err());
         assert!(exec.scoped_args("get pods -n dev").is_err());
         assert!(exec.scoped_args("get pods --namespace=dev").is_err());
+        assert!(exec.scoped_args("get pods -ndev").is_err());
+        assert!(exec.scoped_args("get pods --all-namespaces=true").is_err());
         assert!(exec.scoped_args("get pods -n prod").is_ok());
+    }
+
+    #[test]
+    fn kubectlx_is_not_mistaken_for_the_kubectl_binary_prefix() {
+        let exec = KubernetesExecutor::new(params());
+        assert_eq!(exec.scoped_args("kubectlx get pods").unwrap()[2], "kubectlx");
     }
 
     #[tokio::test]

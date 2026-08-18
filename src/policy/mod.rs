@@ -233,7 +233,8 @@ impl Policy {
         let trimmed = req.command.trim_start();
         if req.target.resource.is_none()
             && configured.kind == TargetKindName::Kubernetes
-            && !trimmed.starts_with("kubectl")
+            && trimmed != "kubectl"
+            && !trimmed.starts_with("kubectl ")
         {
             Ok(format!("kubectl {trimmed}"))
         } else {

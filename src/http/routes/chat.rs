@@ -33,6 +33,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::Result;
+use crate::db::{ChatRepo, ChatRequestClaim};
 use crate::domain::Principal;
 use crate::http::handlers::Authed;
 use crate::http::state::AppState;
@@ -65,9 +66,28 @@ pub(crate) async fn run_chat_turn(
     message: &str,
     idempotency_key: Option<&str>,
 ) -> Result<(String, bool)> {
-    if !state.chat_idempotency.accept(account, idempotency_key) {
-        tracing::info!(%account, "dropping duplicate chat send (idempotency key seen)");
-        return Ok((String::new(), true));
+    let key = idempotency_key.map(str::trim).filter(|key| !key.is_empty());
+    if key.is_some_and(|key| key.len() > 128) {
+        return Err(crate::Error::validation("idempotency_key must be at most 128 bytes"));
+    }
+    if let Some(key) = key {
+        match ChatRepo::claim_chat_request(&*state.repos, account, key, chrono::Utc::now()).await? {
+            ChatRequestClaim::Claimed => {}
+            ChatRequestClaim::Complete(reply) => {
+                tracing::info!(%account, "returning completed chat request replay");
+                return Ok((reply, true));
+            }
+            ChatRequestClaim::Pending => {
+                return Err(crate::Error::Conflict(
+                    "this chat request is already in progress".into(),
+                ));
+            }
+            ChatRequestClaim::Failed => {
+                return Err(crate::Error::Conflict(
+                    "this chat request previously failed and cannot be replayed safely; send it again as a new request after checking the transcript and audit log".into(),
+                ));
+            }
+        }
     }
 
     // Own the turn in a tracked task. If a browser refresh or network drop
@@ -76,12 +96,41 @@ pub(crate) async fn run_chat_turn(
     let state = state.clone();
     let speaker = speaker.to_string();
     let message = message.to_string();
+    let key = key.map(str::to_string);
     use tracing::Instrument;
     let span = tracing::Span::current();
-    let turn = state.tasks.spawn(
-        async move { state.chat.chat(Principal::Operator { account }, &speaker, &message).await }
-            .instrument(span),
-    );
+    let turn = state.tasks.spawn(async move {
+        let result = state.chat.chat(Principal::Operator { account }, &speaker, &message).await;
+        match result {
+            Ok(reply) => {
+                if let Some(key) = &key {
+                    ChatRepo::complete_chat_request(
+                        &*state.repos,
+                        account,
+                        key,
+                        &reply,
+                        chrono::Utc::now(),
+                    )
+                    .await?;
+                }
+                Ok(reply)
+            }
+            Err(error) => {
+                if let Some(key) = &key
+                    && let Err(store_error) = ChatRepo::fail_chat_request(
+                        &*state.repos,
+                        account,
+                        key,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                {
+                    tracing::error!(%account, %store_error, "could not mark failed chat request");
+                }
+                Err(error)
+            }
+        }
+    }.instrument(span));
     match turn.await {
         Ok(result) => result.map(|reply| (reply, false)),
         Err(error) => {
@@ -212,25 +261,24 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), finished.notified())
             .await
             .expect("detached turn must finish after the request disappears");
-    }
-
-    #[test]
-    fn idempotency_is_scoped_to_the_account_and_bounded() {
-        let state = AppState::fake();
-        let a = uuid::Uuid::new_v4();
-        let b = uuid::Uuid::new_v4();
-        assert!(state.chat_idempotency.accept(a, Some("same")));
-        assert!(!state.chat_idempotency.accept(a, Some("same")));
-        assert!(state.chat_idempotency.accept(b, Some("same")));
-        assert!(state.chat_idempotency.accept(a, None));
-
-        for index in 0..crate::http::state::CHAT_IDEMPOTENCY_MAX {
-            assert!(state.chat_idempotency.accept(a, Some(&format!("request-{index}"))));
-        }
-        assert!(state.chat_idempotency.accept(a, Some("same")), "oldest entry was evicted");
-        assert!(
-            !state.chat_idempotency.accept(a, Some("request-511")),
-            "newest entry remains protected"
-        );
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let outcome = ChatRepo::claim_chat_request(
+                    &*state.repos,
+                    account,
+                    "request-1",
+                    chrono::Utc::now(),
+                )
+                .await
+                .unwrap();
+                if outcome != ChatRequestClaim::Pending {
+                    break outcome;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached turn must persist its terminal outcome");
+        assert_eq!(outcome, ChatRequestClaim::Complete("done".into()));
     }
 }

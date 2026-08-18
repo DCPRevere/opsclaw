@@ -27,6 +27,10 @@ let streamConnecting = false;
 let streamBackoff = 2000;
 let streamRetryTimer = null;
 let pendingRow = null;
+// A transport failure does not tell us whether the daemon accepted the POST.
+// Preserve that exact request key for an explicit retry; changing it could
+// execute a second turn after the first already acted.
+let uncertainSend = null;
 // Day-separator tracking (gianna's WhatsApp-style pills): the local
 // calendar day of the last rendered row; reset whenever the log reloads.
 let lastMsgDay = null;
@@ -447,13 +451,33 @@ export function initChat() {
       }
       input.value = '';
       showPending();
-      const idempotencyKey = (globalThis.crypto && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const idempotencyKey = uncertainSend && uncertainSend.message === message
+        ? uncertainSend.key
+        : ((globalThis.crypto && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
       const r = await api('/api/chat', 'POST', { message, idempotency_key: idempotencyKey });
       if (!r.ok) {
         clearPending();
-        showError(r.data.error || 'The chat turn failed — please try again.');
+        const stillRunning = r.status === 409 && String(r.data.error || '').includes('already in progress');
+        if (r.status === 0 || stillRunning) {
+          uncertainSend = { message, key: idempotencyKey };
+          input.value = message;
+          showError(stillRunning
+            ? 'That request is still running — wait, then retry to retrieve its reply.'
+            : 'Delivery is uncertain — retrying this message will safely reuse its request key.');
+        } else {
+          uncertainSend = null;
+          showError(r.data.error || 'The chat turn failed — please try again.');
+        }
+      } else {
+        uncertainSend = null;
+        // A completed replay is not broadcast again over SSE. Render the
+        // stored response returned by the idempotency record in this tab.
+        if (r.data.duplicate && r.data.reply) {
+          clearPending();
+          addMsg({ role: 'assistant', speaker: 'assistant', content: r.data.reply });
+        }
       }
       // On success the reply (and the echo of this message, and the tool
       // rows) arrive via the SSE `chat` event — see the module doc.

@@ -25,6 +25,17 @@ pub async fn status(session: &Session, json: bool) -> Result<()> {
     } else {
         println!("heartbeat:      {}", body["heartbeat"].as_str().unwrap_or("?"));
         println!("estop_engaged:  {}", body["estop_engaged"].as_bool().unwrap_or(false));
+        let turns = body["turns"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        println!("agent_turns:    {}", turns.len());
+        for turn in turns {
+            println!(
+                "  {} {} — {} ({}s)",
+                turn["state"].as_str().unwrap_or("?"),
+                turn["kind"].as_str().unwrap_or("?"),
+                turn["conflict_domain"].as_str().unwrap_or("?"),
+                turn["age_ms"].as_i64().unwrap_or(0).max(0) / 1000,
+            );
+        }
     }
     Ok(())
 }
@@ -64,6 +75,10 @@ mod tests {
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "heartbeat": "healthy",
                 "estop_engaged": false,
+                "turns": [{
+                    "kind": "chat", "conflict_domain": "all targets",
+                    "state": "queued", "age_ms": 1200
+                }],
             })))
             .mount(&server)
             .await;

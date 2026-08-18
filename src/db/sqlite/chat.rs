@@ -7,10 +7,64 @@ use sqlx::Row;
 
 use super::SqliteDb;
 use crate::Result;
-use crate::db::ChatMessage;
+use crate::db::{ChatMessage, ChatRequestClaim};
 
 #[async_trait]
 impl crate::db::ChatRepo for SqliteDb {
+    async fn claim_chat_request(
+        &self,
+        account: uuid::Uuid,
+        key: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<ChatRequestClaim> {
+        let inserted = sqlx::query(
+            "INSERT INTO chat_requests
+             (account_id, idempotency_key, state, started_at)
+             VALUES (?, ?, 'pending', ?) ON CONFLICT DO NOTHING",
+        )
+        .bind(account.to_string())
+        .bind(key)
+        .bind(started_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        if inserted.rows_affected() == 1 {
+            return Ok(ChatRequestClaim::Claimed);
+        }
+        let row = sqlx::query(
+            "SELECT state, reply FROM chat_requests
+             WHERE account_id = ? AND idempotency_key = ?",
+        )
+        .bind(account.to_string())
+        .bind(key)
+        .fetch_one(&self.pool)
+        .await?;
+        match row.get::<String, _>("state").as_str() {
+            "pending" => Ok(ChatRequestClaim::Pending),
+            "complete" => Ok(ChatRequestClaim::Complete(row.try_get("reply")?)),
+            "failed" => Ok(ChatRequestClaim::Failed),
+            other => Err(crate::Error::other(format!("chat request has invalid state {other:?}"))),
+        }
+    }
+
+    async fn complete_chat_request(
+        &self,
+        account: uuid::Uuid,
+        key: &str,
+        reply: &str,
+        finished_at: DateTime<Utc>,
+    ) -> Result<()> {
+        finish(&self.pool, account, key, "complete", Some(reply), finished_at).await
+    }
+
+    async fn fail_chat_request(
+        &self,
+        account: uuid::Uuid,
+        key: &str,
+        finished_at: DateTime<Utc>,
+    ) -> Result<()> {
+        finish(&self.pool, account, key, "failed", None, finished_at).await
+    }
+
     async fn append_chat(
         &self,
         at: DateTime<Utc>,
@@ -53,6 +107,32 @@ impl crate::db::ChatRepo for SqliteDb {
         .fetch_all(&self.pool)
         .await?;
         Ok(page_ascending(rows))
+    }
+}
+
+async fn finish(
+    pool: &sqlx::SqlitePool,
+    account: uuid::Uuid,
+    key: &str,
+    state: &str,
+    reply: Option<&str>,
+    finished_at: DateTime<Utc>,
+) -> Result<()> {
+    let result = sqlx::query(
+        "UPDATE chat_requests SET state = ?, reply = ?, finished_at = ?
+         WHERE account_id = ? AND idempotency_key = ? AND state = 'pending'",
+    )
+    .bind(state)
+    .bind(reply)
+    .bind(finished_at.to_rfc3339())
+    .bind(account.to_string())
+    .bind(key)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(crate::Error::Conflict("chat request is missing or already terminal".into()))
     }
 }
 

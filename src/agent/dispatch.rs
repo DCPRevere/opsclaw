@@ -56,7 +56,7 @@ pub struct DispatchDeps {
     pub llm: Arc<dyn LlmProvider>,
     /// Conflict-domain gate shared by every entry point. Interactive turns
     /// exclude all other work; background scans only exclude the same target.
-    pub turn_gate: crate::agent::turn_gate::TurnGate,
+    pub(crate) turn_gate: crate::agent::turn_gate::TurnGate,
 }
 
 impl DispatchDeps {
@@ -257,17 +257,17 @@ impl JobComposer for AgentJobComposer {
         prompt: &str,
         _now_utc: DateTime<Utc>,
     ) -> Result<Option<String>> {
-        let scan_target = match &job.payload {
-            Payload::ScanRoutine { target: Some(target), .. } => Some(target),
+        let (turn_kind, scan_target) = match &job.payload {
+            Payload::ScanRoutine { target: Some(target), .. } => ("scan", Some(target)),
             Payload::ScanRoutine { target: None, .. } => {
                 return Err(crate::Error::Config(format!(
                     "seeded scan job {:?} has no bound target; run startup reconciliation",
                     job.name
                 )));
             }
-            _ => None,
+            _ => ("job", None),
         };
-        let _turn = self.deps.turn_gate.acquire_for_target(scan_target).await;
+        let _turn = self.deps.turn_gate.acquire_for_target(turn_kind, scan_target).await;
         let principal = Principal::Agent { job: Some(job.id) };
         let mut ctx = build_tool_ctx(&self.deps, principal);
         if let Payload::ScanRoutine { target, .. } = &job.payload {
@@ -375,7 +375,7 @@ impl WebhookIngest {
 #[async_trait]
 impl IngestAlert for WebhookIngest {
     async fn ingest(&self, source: &str, payload: &Value) -> Result<()> {
-        let _turn = self.deps.turn_gate.acquire_interactive().await;
+        let _turn = self.deps.turn_gate.acquire_interactive("webhook").await;
         let principal = Principal::Agent { job: None };
         let ctx = build_tool_ctx(&self.deps, principal);
         // Full registry, NOT heartbeat — an alert is interactive-priority.
@@ -619,7 +619,7 @@ impl ChatHandler for ChatTurn {
         // the transcript snapshotted here is always the one the reply
         // appends after. The std mutex below is still only held for the
         // clone, never across the turn (poison hygiene).
-        let _turn = self.deps.turn_gate.acquire_interactive().await;
+        let _turn = self.deps.turn_gate.acquire_interactive("chat").await;
         let prior = self.transcript.lock().expect("chat transcript lock poisoned").clone();
 
         // The user's message is durable and broadcast BEFORE the turn runs

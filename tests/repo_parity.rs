@@ -30,9 +30,9 @@ use opsclaw::db::memory::InMemoryDb;
 use opsclaw::db::sqlite::SqliteDb;
 use opsclaw::db::{
     AUTH_PROVIDER_HANKO, AUTH_PROVIDER_LOCAL, Account, AccountRepo, ApprovalRepo, AuditRepo,
-    ChannelStateRepo, ChatRepo, CliToken, ControlRepo, HealthRepo, IncidentRepo, Invite,
-    InviteRepo, JobRepo, PushSubscription, PushSubscriptionRepo, RunbookRun, RunbookRunRepo,
-    StepOutcome, StepStatus, TokenRepo,
+    ChannelStateRepo, ChatRepo, ChatRequestClaim, CliToken, ControlRepo, HealthRepo, IncidentRepo,
+    Invite, InviteRepo, JobRepo, PushSubscription, PushSubscriptionRepo, RunbookRun,
+    RunbookRunRepo, StepOutcome, StepStatus, TokenRepo,
 };
 use opsclaw::domain::{
     ApprovalRequest, ApprovalState, FqTarget, Incident, IncidentState, Job, Payload, Principal,
@@ -84,6 +84,31 @@ async fn sqlite() -> (SqliteDb, tempfile::TempDir) {
         .await
         .expect("connect + migrate temp sqlite");
     (db, dir)
+}
+
+#[tokio::test]
+async fn sqlite_chat_request_outcome_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("durable-chat.sqlite3");
+    let path = path.to_str().unwrap();
+    let account_id = Uuid::new_v4();
+    let db = SqliteDb::connect(path).await.unwrap();
+    AccountRepo::insert(&db, &account(account_id, "durable@example.com")).await.unwrap();
+    let now = Utc::now();
+    assert_eq!(
+        ChatRepo::claim_chat_request(&db, account_id, "durable-key", now).await.unwrap(),
+        ChatRequestClaim::Claimed
+    );
+    ChatRepo::complete_chat_request(&db, account_id, "durable-key", "saved reply", now)
+        .await
+        .unwrap();
+    db.pool().close().await;
+
+    let reopened = SqliteDb::connect(path).await.unwrap();
+    assert_eq!(
+        ChatRepo::claim_chat_request(&reopened, account_id, "durable-key", now).await.unwrap(),
+        ChatRequestClaim::Complete("saved reply".into())
+    );
 }
 
 /// Emit, per `name => |db| { .. }`, a private `async fn name(&dyn RepoSuite)`
@@ -717,6 +742,24 @@ control_prune_housekeeping_is_ok => |db| {
 
 health_ping_is_ok => |db| {
     HealthRepo::ping(db).await.unwrap();
+}
+
+chat_request_claim_is_atomic_scoped_and_terminal => |db| {
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    AccountRepo::insert(db, &account(first, "first-chat@example.com")).await.unwrap();
+    AccountRepo::insert(db, &account(second, "second-chat@example.com")).await.unwrap();
+    let now = Utc::now();
+
+    assert_eq!(ChatRepo::claim_chat_request(db, first, "request-1", now).await.unwrap(), ChatRequestClaim::Claimed);
+    assert_eq!(ChatRepo::claim_chat_request(db, first, "request-1", now).await.unwrap(), ChatRequestClaim::Pending);
+    ChatRepo::complete_chat_request(db, first, "request-1", "original reply", now).await.unwrap();
+    assert_eq!(ChatRepo::claim_chat_request(db, first, "request-1", now).await.unwrap(), ChatRequestClaim::Complete("original reply".into()));
+    assert!(ChatRepo::complete_chat_request(db, first, "request-1", "changed", now).await.is_err());
+
+    assert_eq!(ChatRepo::claim_chat_request(db, second, "request-1", now).await.unwrap(), ChatRequestClaim::Claimed);
+    ChatRepo::fail_chat_request(db, second, "request-1", now).await.unwrap();
+    assert_eq!(ChatRepo::claim_chat_request(db, second, "request-1", now).await.unwrap(), ChatRequestClaim::Failed);
 }
 
 // ---- Jobs ----

@@ -13,9 +13,10 @@ pub mod sqlite;
 
 pub use repo::{
     AUTH_PROVIDER_HANKO, AUTH_PROVIDER_LOCAL, Account, AccountRepo, ApprovalRepo, AuditRepo,
-    ChannelStateRepo, ChatMessage, ChatRepo, CliToken, ControlRepo, HealthRepo, IncidentRepo,
-    Invite, InviteRepo, JobFailure, JobRepo, PushSubscription, PushSubscriptionRepo, RunbookRun,
-    RunbookRunRepo, RunbookSuccessRate, StepOutcome, StepStatus, TelegramBinding, TokenRepo,
+    ChannelStateRepo, ChatMessage, ChatRepo, ChatRequestClaim, CliToken, ControlRepo, HealthRepo,
+    IncidentRepo, Invite, InviteRepo, JobFailure, JobRepo, PushSubscription, PushSubscriptionRepo,
+    RunbookRun, RunbookRunRepo, RunbookSuccessRate, StepOutcome, StepStatus, TelegramBinding,
+    TokenRepo,
 };
 
 use std::sync::Arc;

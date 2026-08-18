@@ -439,8 +439,41 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// Result of atomically claiming a client-generated chat request key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatRequestClaim {
+    Claimed,
+    Pending,
+    Complete(String),
+    Failed,
+}
+
 #[async_trait]
 pub trait ChatRepo: Send + Sync {
+    /// Atomically claim `(account, key)`. Only `Claimed` permits a new turn;
+    /// every other result is a durable replay outcome.
+    async fn claim_chat_request(
+        &self,
+        account: Uuid,
+        key: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<ChatRequestClaim>;
+    async fn complete_chat_request(
+        &self,
+        account: Uuid,
+        key: &str,
+        reply: &str,
+        finished_at: DateTime<Utc>,
+    ) -> Result<()>;
+    /// Mark a claimed turn terminal without retaining internal error text.
+    /// Retrying a failed key is deliberately refused: the turn may have acted
+    /// before failing, so automatic replay is unsafe.
+    async fn fail_chat_request(
+        &self,
+        account: Uuid,
+        key: &str,
+        finished_at: DateTime<Utc>,
+    ) -> Result<()>;
     /// Append one row (the backend assigns `seq`).
     async fn append_chat(
         &self,

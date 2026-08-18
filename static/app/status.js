@@ -27,6 +27,16 @@ function jobRow(j) {
     </tr>`;
 }
 
+function turnRow(turn) {
+  return `
+    <tr>
+      <td>${escapeHtml(turn.kind)}</td>
+      <td>${escapeHtml(turn.conflict_domain)}</td>
+      <td>${escapeHtml(turn.state)}</td>
+      <td>${Math.max(0, Math.round((turn.age_ms || 0) / 1000))} s</td>
+    </tr>`;
+}
+
 // A failing-jobs strip above the tables: streaks are the one status fact an
 // operator must not have to open a tab to notice (a dead LLM key silenced
 // scans for 20h while the UI showed every row on-cadence).
@@ -45,6 +55,7 @@ async function refresh() {
   const box = document.getElementById('status-card');
   if (box) {
     const jobs = r.data.jobs || [];
+    const turns = r.data.turns || [];
     box.innerHTML = `
       <h2>Daemon status</h2>
       <table>
@@ -61,6 +72,12 @@ async function refresh() {
         <button class="primary" id="estop-resume-btn" ${!r.data.estop_engaged ? 'disabled' : ''}>Resume</button>
       </div>
       ${failingStrip(jobs)}
+      <h2>Agent turns</h2>
+      ${turns.length === 0 ? '<p class="muted">No active or queued turns.</p>' : `
+      <table>
+        <tr><th>Kind</th><th>Conflict domain</th><th>State</th><th>Age</th></tr>
+        ${turns.map(turnRow).join('')}
+      </table>`}
       <h2>Scheduled jobs</h2>
       ${jobs.length === 0 ? '<p class="muted">No scheduled jobs.</p>' : `
       <table>

@@ -30,6 +30,7 @@ async fn status(State(state): State<AppState>, Authed(_ctx): Authed) -> Result<J
     let now_ms = Utc::now().timestamp_millis();
     let heartbeat = state.scheduler.heartbeat_status(now_ms);
     let estop_engaged = state.estop.engaged().await?;
+    let turns = state.turn_gate.snapshot(now_ms);
     // Per-target scan state (DESIGN §3): every scheduled job — the seeded
     // per-target scan jobs plus operator-authored ones — with its cadence
     // position. `kind_label` only, never the payload BODY (a prompt can be
@@ -82,6 +83,26 @@ async fn status(State(state): State<AppState>, Authed(_ctx): Authed) -> Result<J
         "lag_ms": state.scheduler.lag(),
         "estop_engaged": estop_engaged,
         "spend": spend,
+        "turns": turns,
         "jobs": jobs,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn status_exposes_live_turn_kind_domain_and_age() {
+        let state = AppState::fake();
+        let guard = state.turn_gate.acquire_interactive("chat").await;
+        let account_id = uuid::Uuid::new_v4();
+        let Json(body) =
+            status(State(state), Authed(crate::http::handlers::Ctx { account_id })).await.unwrap();
+        assert_eq!(body["turns"][0]["kind"], "chat");
+        assert_eq!(body["turns"][0]["conflict_domain"], "all targets");
+        assert_eq!(body["turns"][0]["state"], "active");
+        assert!(body["turns"][0]["age_ms"].as_i64().unwrap() >= 0);
+        drop(guard);
+    }
 }

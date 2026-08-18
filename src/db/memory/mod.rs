@@ -53,6 +53,7 @@ struct Store {
     channel_state: HashMap<String, String>,
     /// The durable shared chat log (append-only; `seq` assigned on append).
     chat_messages: Vec<crate::db::ChatMessage>,
+    chat_requests: HashMap<(Uuid, String), crate::db::ChatRequestClaim>,
 }
 
 /// A single in-memory store shared across all repo trait impls.

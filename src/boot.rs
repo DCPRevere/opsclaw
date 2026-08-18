@@ -178,6 +178,7 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     )?;
     state.cost_guard = cost_guard.clone();
     state.memory = memory;
+    state.turn_gate = deps.turn_gate.clone();
     // The web-session and webhook signing secrets, resolved by
     // `AppState::new` just above — registered for the same reason as the
     // LLM key: no resolved secret stays scrub-invisible.

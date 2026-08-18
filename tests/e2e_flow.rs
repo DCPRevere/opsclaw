@@ -1846,15 +1846,22 @@ async fn chat_on_the_fakes_spine_503s_with_a_clear_body_not_a_500() {
         )
         .await;
 
-    let resp = client
-        .post_json(&format!("{base}/api/chat"), &serde_json::json!({ "message": "hi" }))
-        .await;
+    let request = serde_json::json!({
+        "message": "hi",
+        "idempotency_key": "failed-request",
+    });
+    let resp = client.post_json(&format!("{base}/api/chat"), &request).await;
     assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(
         body["error"].as_str().unwrap_or("").contains("chat is not wired"),
         "expected a clear 'not wired' message, got: {body}"
     );
+
+    let replay = client.post_json(&format!("{base}/api/chat"), &request).await;
+    assert_eq!(replay.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = replay.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap_or("").contains("cannot be replayed safely"));
 }
 
 #[tokio::test]
@@ -1942,5 +1949,6 @@ async fn repeated_chat_idempotency_key_runs_the_turn_once() {
         client.post_json(&format!("{base}/api/chat"), &request).await.json().await.unwrap();
     assert_eq!(first["duplicate"], false);
     assert_eq!(second["duplicate"], true);
+    assert_eq!(second["reply"], "done");
     assert_eq!(fake.calls.lock().unwrap().len(), 1);
 }

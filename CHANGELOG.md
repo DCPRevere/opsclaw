@@ -6,6 +6,37 @@ release out.
 
 ## v0.3.0
 
+### Spend, scheduler retirement, and the CLI are operable
+
+`opsclaw-cli usage` and daemon status now show today's OpsClaw spend,
+Hindsight spend, the configured cap, and remaining headroom. The standard
+OpenRouter-backed Hindsight install is included in enforcement; an external
+Hindsight whose spend cannot be measured fails closed before model-backed
+memory or agent work instead of presenting a false cap.
+
+Retiring a seeded scan now deletes its job and failure history. Moving a
+target between environments therefore cannot leave an old disabled row to be
+revived later. Operators can also permanently remove jobs with `jobs remove`.
+
+The CLI now has shell completions (including configured `project::env::target`
+paths), consistent plural nouns and `add`/`remove` verbs, visible execution
+modes in short help, incident acknowledge/resolve, invite management, durable
+chat history, and a real `runbooks run --dry-run`. The old `dry-run-log` name
+remains as an alias for the accurately named `blocked-actions` report.
+
+The standard container refuses `local` targets because they inspect the
+container rather than its host. Put SSH or Kubernetes credentials in
+`./creds`; a one-shot compose service now copies them into a private volume
+with uid 10001 and safe file modes before the daemon starts.
+
+**Deploying** — before upgrading a container install, replace every `local`
+target with an SSH target for the host. Create `./creds`, copy each target
+credential into it, and update credential references to
+`/home/opsclaw/creds/<name>`. OpenRouter-backed installs need no new billing
+variables: the compose file now passes the existing `HINDSIGHT_LLM_BASE_URL`
+and `HINDSIGHT_LLM_API_KEY` into the daemon. Other Hindsight providers need an
+equivalent metering integration before live LLM work will resume.
+
 ### Destructive commands now have brakes
 
 `config rm`, `secret rm`, `memory forget` and `account revoke-sessions` all

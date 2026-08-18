@@ -791,15 +791,7 @@ async fn dispatch(
             // DoD #4's scrubbed sink doesn't exist on this path. Installed
             // only for `daemon`: operator commands print human output, not
             // a tracing stream.
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "opsclaw=info,info".into()),
-                )
-                .with_writer(opsclaw::policy::ScrubbingMakeWriter::stdout(
-                    opsclaw::policy::Scrubber::global().clone(),
-                ))
-                .init();
+            opsclaw::logging::init_daemon();
             let config = Config::load(Some(cfg_path))?;
             config.validate()?;
             let state = opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;

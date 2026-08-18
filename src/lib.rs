@@ -22,6 +22,7 @@ pub mod error;
 pub mod http;
 pub mod incidents;
 pub mod llm;
+pub mod logging;
 pub mod memory;
 pub mod policy;
 pub mod runbooks;

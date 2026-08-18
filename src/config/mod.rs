@@ -1043,7 +1043,32 @@ impl Config {
     /// offered `OPENROUTER_API_KEY` on the strength of a blank value would
     /// steer the operator into the very crash-loop v0.1.1 fixed.
     pub(crate) fn env_configured(name: &str) -> bool {
-        Self::value_is_configured(std::env::var_os(name).as_deref())
+        Self::value_is_configured(Self::overlay_env_os(name).as_deref())
+    }
+
+    /// Read a daemon config overlay variable. Unit tests deliberately ignore
+    /// the well-known ambient deployment variables: a developer's exported
+    /// provider key must not silently turn unrelated fakes-mode tests live.
+    /// Tests that exercise secret resolution use dedicated `*_TEST_*` names,
+    /// while integration tests compile the library without `cfg(test)` and
+    /// therefore still exercise the production path.
+    fn overlay_env_os(name: &str) -> Option<std::ffi::OsString> {
+        #[cfg(test)]
+        if matches!(
+            name,
+            "OPENROUTER_API_KEY"
+                | "OPSCLAW_MODELS"
+                | "HINDSIGHT_URL"
+                | "TELEGRAM_BOT_TOKEN"
+                | "OPSCLAW_LISTEN"
+        ) {
+            return None;
+        }
+        std::env::var_os(name)
+    }
+
+    fn overlay_env(name: &str) -> Option<String> {
+        Self::overlay_env_os(name).and_then(|value| value.into_string().ok())
     }
 
     /// Env vars override/fill file config. Only *references* are recorded —
@@ -1052,12 +1077,12 @@ impl Config {
         if Self::env_configured("OPENROUTER_API_KEY") && self.llm.api_key.is_none() {
             self.llm.api_key = Some(SecretRef::env("OPENROUTER_API_KEY"));
         }
-        if let Ok(models) = std::env::var("OPSCLAW_MODELS")
+        if let Some(models) = Self::overlay_env("OPSCLAW_MODELS")
             && !models.trim().is_empty()
         {
             self.llm.models = models.split(',').map(|m| m.trim().to_string()).collect();
         }
-        if let Ok(url) = std::env::var("HINDSIGHT_URL")
+        if let Some(url) = Self::overlay_env("HINDSIGHT_URL")
             && !url.trim().is_empty()
         {
             self.memory.hindsight_url = Some(url);
@@ -1065,7 +1090,7 @@ impl Config {
         if Self::env_configured("TELEGRAM_BOT_TOKEN") && self.telegram.bot_token.is_none() {
             self.telegram.bot_token = Some(SecretRef::env("TELEGRAM_BOT_TOKEN"));
         }
-        if let Ok(listen) = std::env::var("OPSCLAW_LISTEN")
+        if let Some(listen) = Self::overlay_env("OPSCLAW_LISTEN")
             && !listen.trim().is_empty()
         {
             self.daemon.listen = listen;

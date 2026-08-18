@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   advisories:
@@ -14,6 +15,31 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - id: audit
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories
+      - name: File security-advisory issue
+        if: steps.audit.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Dependency security advisory"
+          body="The scheduled dependency advisory check failed.
+
+          Run: $RUN_URL"
+          existing=$(gh issue list --state open --search "$title in:title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+      - name: Verdict
+        if: always()
+        env:
+          OUTCOME: ${{ steps.audit.outcome }}
+        run: |
+          [ "$OUTCOME" = "success" ] || exit 1

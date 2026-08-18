@@ -1,11 +1,11 @@
 //! `azure_service_bus` — queue/DLQ depth and peek (DESIGN.md §4 item 2;
-//! docs/REMUNDO.md: "DLQ depth/peek is daily on-call work" and "DLQ
+//! docs/REFERENCE.md: "DLQ depth/peek is daily on-call work" and "DLQ
 //! backlog: peek → classify poison vs transient → resubmit via Reprocessor
 //! strategy"). v1 is read-only per the brief's `azure_service_bus` scope —
 //! resubmit/purge (a genuine mutation) is a later addition once that
 //! workflow is scoped; this tool only informs the DECISION, matching
-//! REMUNDO.md's actual runbook shape where resubmission goes through
-//! `Remundo.Reprocessor`, not a direct queue mutation from the agent.
+//! REFERENCE.md's actual runbook shape where resubmission goes through
+//! `replay job`, not a direct queue mutation from the agent.
 //!
 //! Plain HTTP against the Service Bus management/REST API shape (Atom feed
 //! over HTTPS) rather than an Azure SDK — DESIGN.md's "no azure SDK dep"
@@ -154,7 +154,7 @@ mod tests {
 
     fn target() -> FqTarget {
         FqTarget {
-            project: "remundo".into(),
+            project: "example".into(),
             env: "prod".into(),
             target: "sb-worker".into(),
             resource: Some((ResourceType::AzureServiceBus, "orders".into())),

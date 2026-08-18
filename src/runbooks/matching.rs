@@ -58,14 +58,14 @@ fn score(runbook: &Runbook, ctx: &MatchContext) -> Option<u32> {
         if glob_matches(glob, &target_path(target)) {
             hit = true;
             // Reward specificity: fewer wildcard segments = a tighter
-            // match, so `remundo::prod::web-1` outranks `remundo::*::*`.
+            // match, so `example::prod::web-1` outranks `example::*::*`.
             let wildcard_segments = glob.split("::").filter(|seg| *seg == "*").count() as u32;
             let segments = glob.split("::").count() as u32;
             total += 100 + (segments.saturating_sub(wildcard_segments)) * 10;
         } else {
             // An explicit glob that does NOT match the target is a hard
             // miss for this runbook regardless of keyword/category hits —
-            // a DLQ runbook scoped to `remundo::*::*` must not fire for
+            // a DLQ runbook scoped to `example::*::*` must not fire for
             // `other-project::prod::db`.
             return None;
         }
@@ -216,21 +216,21 @@ mod tests {
 
     #[test]
     fn glob_wildcard_matches_segment() {
-        assert!(glob_matches("remundo::*::*", "remundo::prod::web-1"));
-        assert!(glob_matches("remundo::prod::*", "remundo::prod::web-1"));
-        assert!(!glob_matches("remundo::prod::*", "remundo::staging::web-1"));
+        assert!(glob_matches("example::*::*", "example::prod::web-1"));
+        assert!(glob_matches("example::prod::*", "example::prod::web-1"));
+        assert!(!glob_matches("example::prod::*", "example::staging::web-1"));
     }
 
     #[test]
     fn glob_segment_count_must_match() {
-        assert!(!glob_matches("remundo::*", "remundo::prod::web-1"));
-        assert!(!glob_matches("remundo::*::*::extra", "remundo::prod::web-1"));
+        assert!(!glob_matches("example::*", "example::prod::web-1"));
+        assert!(!glob_matches("example::*::*::extra", "example::prod::web-1"));
     }
 
     #[test]
     fn glob_exact_segment_must_equal() {
-        assert!(glob_matches("remundo::prod::web-1", "remundo::prod::web-1"));
-        assert!(!glob_matches("remundo::prod::web-2", "remundo::prod::web-1"));
+        assert!(glob_matches("example::prod::web-1", "example::prod::web-1"));
+        assert!(!glob_matches("example::prod::web-2", "example::prod::web-1"));
     }
 
     #[test]
@@ -239,7 +239,7 @@ mod tests {
         let ctx = MatchContext::new()
             .with_category("dlq_backlog")
             .with_text("dlq is backed up")
-            .with_target(FqTarget::new("remundo", "prod", "web-1"));
+            .with_target(FqTarget::new("example", "prod", "web-1"));
         assert!(!rb.matches(&ctx));
     }
 
@@ -266,9 +266,9 @@ mod tests {
 
     #[test]
     fn target_glob_match() {
-        let rb = runbook("[trigger]\ntarget_glob = \"remundo::*::*\"");
+        let rb = runbook("[trigger]\ntarget_glob = \"example::*::*\"");
         assert!(
-            rb.matches(&MatchContext::new().with_target(FqTarget::new("remundo", "prod", "web-1")))
+            rb.matches(&MatchContext::new().with_target(FqTarget::new("example", "prod", "web-1")))
         );
         assert!(
             !rb.matches(&MatchContext::new().with_target(FqTarget::new("other", "prod", "web-1")))
@@ -277,14 +277,14 @@ mod tests {
 
     #[test]
     fn target_glob_present_but_no_target_in_context_is_not_a_match_on_its_own() {
-        let rb = runbook("[trigger]\ntarget_glob = \"remundo::*::*\"");
+        let rb = runbook("[trigger]\ntarget_glob = \"example::*::*\"");
         // No target supplied and no other dimension hits -> no match.
         assert!(!rb.matches(&MatchContext::new()));
     }
 
     #[test]
     fn glob_mismatch_vetoes_even_with_keyword_hit() {
-        let rb = runbook("[trigger]\nkeywords = [\"dlq\"]\ntarget_glob = \"remundo::*::*\"");
+        let rb = runbook("[trigger]\nkeywords = [\"dlq\"]\ntarget_glob = \"example::*::*\"");
         let ctx = MatchContext::new().with_text("dlq backlog").with_target(FqTarget::new(
             "other-project",
             "prod",
@@ -295,9 +295,9 @@ mod tests {
 
     #[test]
     fn best_match_prefers_more_specific_glob() {
-        let broad = runbook("[trigger]\ntarget_glob = \"remundo::*::*\"");
-        let narrow = runbook("[trigger]\ntarget_glob = \"remundo::prod::web-1\"");
-        let ctx = MatchContext::new().with_target(FqTarget::new("remundo", "prod", "web-1"));
+        let broad = runbook("[trigger]\ntarget_glob = \"example::*::*\"");
+        let narrow = runbook("[trigger]\ntarget_glob = \"example::prod::web-1\"");
+        let ctx = MatchContext::new().with_target(FqTarget::new("example", "prod", "web-1"));
         let candidates = [broad.clone(), narrow.clone()];
         let picked = best_match(&candidates, &ctx).unwrap();
         assert_eq!(
@@ -330,13 +330,13 @@ mod tests {
     }
 
     fn prod_target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     #[test]
     fn command_match_requires_glob_and_keyword_together() {
         let rb =
-            runbook("[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::prod::web-1\"");
+            runbook("[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"example::prod::web-1\"");
         let hit = best_command_match(
             std::slice::from_ref(&rb),
             "systemctl restart nginx",
@@ -347,8 +347,8 @@ mod tests {
 
     #[test]
     fn command_match_glob_mismatch_vetoes_despite_keyword_hit() {
-        let rb = runbook("[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::prod::*\"");
-        let other = FqTarget::new("remundo", "staging", "web-1");
+        let rb = runbook("[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"example::prod::*\"");
+        let other = FqTarget::new("example", "staging", "web-1");
         assert!(
             best_command_match(std::slice::from_ref(&rb), "systemctl restart nginx", &other)
                 .is_none()
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn command_match_keyword_miss_vetoes_despite_glob_hit() {
-        let rb = runbook("[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"");
+        let rb = runbook("[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"example::*::*\"");
         assert!(
             best_command_match(
                 std::slice::from_ref(&rb),
@@ -387,7 +387,7 @@ mod tests {
     fn command_match_fails_closed_without_keywords() {
         // A keywordless runbook must not blanket-pre-approve every command
         // that lands on its targets.
-        let rb = runbook("[trigger]\ntarget_glob = \"remundo::*::*\"");
+        let rb = runbook("[trigger]\ntarget_glob = \"example::*::*\"");
         assert!(
             best_command_match(
                 std::slice::from_ref(&rb),
@@ -402,7 +402,7 @@ mod tests {
     fn command_match_empty_keyword_string_is_not_a_blanket_match() {
         // `haystack.contains("")` is always true — a stray empty keyword
         // must not turn into "pre-approve everything on these targets".
-        let rb = runbook("[trigger]\nkeywords = [\"\"]\ntarget_glob = \"remundo::*::*\"");
+        let rb = runbook("[trigger]\nkeywords = [\"\"]\ntarget_glob = \"example::*::*\"");
         assert!(
             best_command_match(
                 std::slice::from_ref(&rb),
@@ -418,7 +418,7 @@ mod tests {
         // Categories describe signals, not commands — a category-only
         // trigger can fire the SIGNAL matcher but never the command matcher.
         let rb = runbook(
-            "[trigger]\nalert_categories = [\"dlq_backlog\"]\ntarget_glob = \"remundo::*::*\"",
+            "[trigger]\nalert_categories = [\"dlq_backlog\"]\ntarget_glob = \"example::*::*\"",
         );
         assert!(
             best_command_match(
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn command_match_keyword_is_case_insensitive() {
-        let rb = runbook("[trigger]\nkeywords = [\"NGINX\"]\ntarget_glob = \"remundo::*::*\"");
+        let rb = runbook("[trigger]\nkeywords = [\"NGINX\"]\ntarget_glob = \"example::*::*\"");
         assert!(
             best_command_match(
                 std::slice::from_ref(&rb),
@@ -447,11 +447,11 @@ mod tests {
     fn command_match_prefers_more_specific_glob() {
         let broad = titled_runbook(
             "broad",
-            "[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"",
+            "[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"example::*::*\"",
         );
         let narrow = titled_runbook(
             "narrow",
-            "[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::prod::web-1\"",
+            "[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"example::prod::web-1\"",
         );
         let candidates = [broad, narrow];
         let picked =
@@ -463,11 +463,11 @@ mod tests {
     fn command_match_more_keyword_hits_outrank_fewer() {
         let one = titled_runbook(
             "one-hit",
-            "[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"",
+            "[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"example::*::*\"",
         );
         let two = titled_runbook(
             "two-hits",
-            "[trigger]\nkeywords = [\"nginx\", \"restart\"]\ntarget_glob = \"remundo::*::*\"",
+            "[trigger]\nkeywords = [\"nginx\", \"restart\"]\ntarget_glob = \"example::*::*\"",
         );
         let candidates = [one, two];
         let picked =
@@ -481,7 +481,7 @@ mod tests {
         // qualified target; the glob grammar addresses the base
         // project::env::target path, same as the signal matcher.
         let rb =
-            runbook("[trigger]\nkeywords = [\"rollback\"]\ntarget_glob = \"remundo::prod::*\"");
+            runbook("[trigger]\nkeywords = [\"rollback\"]\ntarget_glob = \"example::prod::*\"");
         let mut target = prod_target();
         target.resource = Some((crate::domain::ResourceType::Argocd, "main".into()));
         assert!(

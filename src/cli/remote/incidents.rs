@@ -102,7 +102,7 @@ mod tests {
             .and(wiremock::matchers::path(format!("/api/incidents/{id}")))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": id.to_string(),
-                "target": "remundo::prod::sb-worker",
+                "target": "example::prod::sb-worker",
                 "severity": "critical",
                 "state": "active",
                 "opened_at": "2026-01-01T00:00:00Z",

@@ -15,7 +15,7 @@
 //! [trigger]
 //! alert_categories = ["dlq_backlog"]
 //! keywords = ["dlq", "poison", "reprocessor"]
-//! target_glob = "remundo::*::*"
+//! target_glob = "example::*::*"
 //!
 //! [default_vars]
 //! queue = "orders-dlq"
@@ -41,7 +41,7 @@ pub struct Trigger {
     pub alert_categories: Vec<String>,
     #[serde(default)]
     pub keywords: Vec<String>,
-    /// `project::env::target` with `*` wildcard segments, e.g. `remundo::*::*`.
+    /// `project::env::target` with `*` wildcard segments, e.g. `example::*::*`.
     /// `None` means this runbook never target-glob-matches (category/keyword
     /// only).
     #[serde(default)]
@@ -143,7 +143,7 @@ title = "DLQ backlog triage"
 [trigger]
 alert_categories = ["dlq_backlog"]
 keywords = ["dlq", "poison"]
-target_glob = "remundo::*::*"
+target_glob = "example::*::*"
 
 [default_vars]
 queue = "orders-dlq"
@@ -154,7 +154,7 @@ Body text.
         assert_eq!(fm.title, "DLQ backlog triage");
         assert_eq!(fm.trigger.alert_categories, vec!["dlq_backlog"]);
         assert_eq!(fm.trigger.keywords, vec!["dlq", "poison"]);
-        assert_eq!(fm.trigger.target_glob.as_deref(), Some("remundo::*::*"));
+        assert_eq!(fm.trigger.target_glob.as_deref(), Some("example::*::*"));
         assert_eq!(fm.default_vars.get("queue"), Some(&"orders-dlq".to_string()));
         assert_eq!(body, "Body text.\n");
     }

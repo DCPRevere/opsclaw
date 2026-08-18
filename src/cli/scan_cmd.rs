@@ -65,9 +65,9 @@ mod tests {
 
     #[test]
     fn scan_prompt_names_the_target_and_keeps_the_corroboration_rule() {
-        let fq = FqTarget::new("remundo", "sandbox", "cluster");
+        let fq = FqTarget::new("example", "sandbox", "cluster");
         let p = scan_prompt(&fq);
-        assert!(p.contains("remundo::sandbox::cluster"));
+        assert!(p.contains("example::sandbox::cluster"));
         assert!(p.contains("Corroborate"));
     }
 }

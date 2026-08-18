@@ -72,7 +72,7 @@ mod tests {
         for i in 0..5 {
             w.append(
                 &p,
-                "remundo::prod::cluster",
+                "example::prod::cluster",
                 "ssh",
                 &format!("uptime # {i}"),
                 RiskClass::Read,

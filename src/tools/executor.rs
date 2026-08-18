@@ -132,7 +132,7 @@ pub(crate) mod tests {
     }
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     fn ctx_with(policy: std::sync::Arc<dyn PolicyExecute>) -> ToolCtx {
@@ -276,7 +276,7 @@ pub(crate) mod tests {
     // ---- the code-side runbook pre-approval lookup ------------------------
 
     fn nginx_store() -> crate::runbooks::RunbookStore {
-        let src = "+++\ntitle = \"Restart flapping nginx\"\n\n[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"\n+++\n- step one\n";
+        let src = "+++\ntitle = \"Restart flapping nginx\"\n\n[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"example::*::*\"\n+++\n- step one\n";
         let rb = crate::runbooks::Runbook::parse(src).unwrap();
         crate::runbooks::RunbookStore::from_parsed("/nonexistent", vec![("nginx.md".into(), rb)])
     }
@@ -365,7 +365,7 @@ pub(crate) mod tests {
         let config: crate::config::Config = toml::from_str(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             autonomy = "act_on_known"
             [[project.env]]
             name = "prod"
@@ -383,7 +383,7 @@ pub(crate) mod tests {
             String,
             Arc<dyn crate::targets::TargetExecutor>,
         > = std::collections::HashMap::new();
-        executors.insert("remundo::prod::web-1".into(), executor.clone());
+        executors.insert("example::prod::web-1".into(), executor.clone());
         let policy = Arc::new(crate::policy::Policy::new(
             Arc::new(config),
             executors,
@@ -402,7 +402,7 @@ pub(crate) mod tests {
     async fn act_on_known_runbook_matched_command_executes_autonomously() {
         let (ctx, executor, _dir) = act_on_known_ctx();
         // `systemctl restart nginx` classifies Medium; the nginx runbook's
-        // glob covers remundo::prod::web-1 and its "nginx" keyword hits.
+        // glob covers example::prod::web-1 and its "nginx" keyword hits.
         let r = run_command(
             &ctx,
             "systemd",

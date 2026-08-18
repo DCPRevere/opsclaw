@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # sim/fixtures/log-emitter.sh — idle heartbeat logger by default (one line
 # per 10s to /var/log/opsclaw-sim/app.log, a NLog/ECS-style stand-in for
-# remundo's Filebeat-shipped logs, REMUNDO.md). log-flood cranks the rate via
+# example's Filebeat-shipped logs, REFERENCE.md). log-flood cranks the rate via
 # /run/opsclaw-sim/log-rate-hz; logfile-growth raises line SIZE via
 # /run/opsclaw-sim/log-line-bytes instead of rate, to exercise file-size
 # growth distinctly from noisy-but-small log volume (brief §9: these are two

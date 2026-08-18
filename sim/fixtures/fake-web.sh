@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sim/fixtures/fake-web.sh — a TinyHealthCheck-style listener (REMUNDO.md):
+# sim/fixtures/fake-web.sh — a TinyHealthCheck-style listener (REFERENCE.md):
 # proves only that this loop is alive, not that anything downstream works.
 # Uses netcat-less pure-bash TCP via /dev/tcp is not listen-capable, so we
 # fall back to a minimal loop with socat if present, else python3, else a

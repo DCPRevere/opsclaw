@@ -666,7 +666,7 @@ mod tests {
     }
 
     fn test_target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     #[test]

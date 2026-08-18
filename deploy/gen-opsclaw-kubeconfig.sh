@@ -7,11 +7,11 @@
 #
 #   deploy/gen-opsclaw-kubeconfig.sh [context] [output-path]
 #
-# Defaults: context aks-sandbox-spoke05-clus01,
+# Defaults: context example-sandbox,
 #           output  ~/.opsclaw/sandbox-kubeconfig.yaml
 set -euo pipefail
 
-CONTEXT="${1:-aks-sandbox-spoke05-clus01}"
+CONTEXT="${1:-example-sandbox}"
 OUT="${2:-$HOME/.opsclaw/sandbox-kubeconfig.yaml}"
 NS=opsclaw
 SECRET=opsclaw-token

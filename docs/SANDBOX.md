@@ -1,7 +1,7 @@
-# Running OpsClaw against the remundo sandbox cluster
+# Running OpsClaw against the example sandbox cluster
 
 Daemon runs LOCALLY (the sandbox AKS API is public:
-`aks-sandbox-spoke05-clus01-dns-2xvgt1h4.hcp.uksouth.azmk8s.io`); the
+`example-sandbox.invalid`); the
 cluster is a remote target. Everything below is one-time setup except
 step 4 (port-forward) and step 6 (start).
 
@@ -15,7 +15,7 @@ wipe.
 ## 1. Cluster credential (your AAD kubectl, once)
 
 ```sh
-kubectl --context aks-sandbox-spoke05-clus01 apply -f deploy/sandbox-rbac.yaml
+kubectl --context example-sandbox apply -f deploy/sandbox-rbac.yaml
 deploy/gen-opsclaw-kubeconfig.sh
 # smoke test as the scoped SA:
 kubectl --kubeconfig ~/.opsclaw/sandbox-kubeconfig.yaml get pods -A --no-headers | head
@@ -30,7 +30,7 @@ LLM context.
 ```sh
 openssl rand -base64 48 | opsclaw-cli secret set jwt-secret
 printf '%s' "$HOME/.opsclaw/sandbox-kubeconfig.yaml" | opsclaw-cli secret set sandbox-kubeconfig
-kubectl --context aks-sandbox-spoke05-clus01 -n logs get secret coresearch-es-elastic-user \
+kubectl --context example-sandbox -n logs get secret coresearch-es-elastic-user \
   -o jsonpath='{.data.elastic}' | base64 -d | opsclaw-cli secret set es-password
 ```
 
@@ -86,7 +86,7 @@ opsclaw-cli daemon           # or the deploy/opsclaw.service unit
 First-contact validation, in order:
 
 ```sh
-opsclaw-cli scan remundo::sandbox::cluster   # one diagnose cycle, report printed
+opsclaw-cli scan example::sandbox::cluster   # one diagnose cycle, report printed
 opsclaw-cli dry-run-log                      # what observe-mode refused
 opsclaw-cli audit verify                     # chain intact
 ```

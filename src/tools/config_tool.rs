@@ -120,7 +120,7 @@ mod tests {
         let cfg = parse(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             autonomy = "observe"
             [[project.env]]
             name = "prod"
@@ -128,14 +128,14 @@ mod tests {
             name = "web-1"
             kind = "ssh"
             address = "10.0.0.5"
-            credential = "store:remundo-web-1-ssh-key"
+            credential = "store:example-web-1-ssh-key"
             [[project.env.target.resource]]
             type = "postgres"
             name = "primary"
             "#,
         );
         let out = render_inventory(&cfg);
-        assert!(out.contains("project remundo (autonomy: observe)"));
+        assert!(out.contains("project example (autonomy: observe)"));
         assert!(out.contains("env prod"));
         assert!(out.contains("target web-1"));
         assert!(out.contains("address=10.0.0.5"));
@@ -155,7 +155,7 @@ mod tests {
         let cfg = parse(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             [[project.env]]
             name = "prod"
             [[project.env.target]]

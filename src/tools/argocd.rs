@@ -1,5 +1,5 @@
 //! `argocd` — app list, sync status (reads), and `rollback` (the ONE gated
-//! mutation) — DESIGN.md §4 item 2; docs/REMUNDO.md: "GitOps shop:
+//! mutation) — DESIGN.md §4 item 2; docs/REFERENCE.md: "GitOps shop:
 //! remediation is a revert, not `kubectl apply`", "sync status `Unknown`
 //! fleet-wide = repo credential problem", "`ComparisonError: repository not
 //! found` on a private repo means credential, not missing repo."
@@ -96,7 +96,7 @@ impl Tool for ListAppsTool {
 
 /// Detailed sync status for one named app: current revision, target
 /// revision, comparison state (a `ComparisonError` on a private repo means
-/// credential, not missing repo — REMUNDO.md).
+/// credential, not missing repo — REFERENCE.md).
 pub struct SyncStatusTool;
 
 #[async_trait]
@@ -150,7 +150,7 @@ impl Tool for SyncStatusTool {
 
 /// The ONE gated mutation: roll an application back to a prior deployed
 /// revision (a GitOps shop's remediation lever — a revert, not `kubectl
-/// apply`, per REMUNDO.md). Routes through `ctx.policy.execute` with a
+/// apply`, per REFERENCE.md). Routes through `ctx.policy.execute` with a
 /// synthetic command line for classification/gating; see the module doc for
 /// the real execution gap on the `Executed` path.
 pub struct RollbackTool;
@@ -235,7 +235,7 @@ mod tests {
 
     fn target() -> FqTarget {
         FqTarget {
-            project: "remundo".into(),
+            project: "example".into(),
             env: "prod".into(),
             target: "cluster".into(),
             resource: Some((ResourceType::Argocd, "gitops".into())),

@@ -127,7 +127,7 @@ mod tests {
             seq,
             ts: Utc::now(),
             principal: Principal::System,
-            fq_target: "remundo::prod::cluster".into(),
+            fq_target: "example::prod::cluster".into(),
             tool: "ssh".into(),
             command: command.into(),
             risk: RiskClass::Read,

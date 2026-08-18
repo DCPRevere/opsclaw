@@ -192,7 +192,7 @@ mod tests {
             id: Uuid::new_v4(),
             incident: None,
             requested_by: Principal::Agent { job: None },
-            target: FqTarget::parse("remundo::prod::web-1").unwrap(),
+            target: FqTarget::parse("example::prod::web-1").unwrap(),
             tool: "shell".into(),
             command: command.into(),
             risk: RiskClass::High,

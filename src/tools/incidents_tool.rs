@@ -111,7 +111,7 @@ mod tests {
             id: Uuid::new_v4(),
             fingerprint: "fp".into(),
             fault_class: String::new(),
-            target: FqTarget::new("remundo", "prod", "web-1"),
+            target: FqTarget::new("example", "prod", "web-1"),
             severity: Severity::Warning,
             state,
             signals: "cpu high".into(),

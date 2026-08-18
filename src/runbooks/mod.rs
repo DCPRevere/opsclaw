@@ -98,7 +98,7 @@ impl Runbook {
     }
 }
 
-/// The three fixture runbooks (REMUNDO.md "Runbook candidates"), embedded at
+/// The three fixture runbooks (REFERENCE.md "Runbook candidates"), embedded at
 /// compile time so tests (and, later, `runbook list`'s doc examples) don't
 /// depend on a filesystem layout at runtime.
 pub const FIXTURE_DLQ_BACKLOG: &str = include_str!("fixtures/dlq_backlog.md");
@@ -121,7 +121,7 @@ mod tests {
     fn dlq_fixture_matches_dlq_signal() {
         let rb = Runbook::parse(FIXTURE_DLQ_BACKLOG).unwrap();
         let ctx = MatchContext::new().with_category("dlq_backlog").with_target(FqTarget::new(
-            "remundo",
+            "example",
             "prod",
             "sb-worker",
         ));
@@ -144,7 +144,7 @@ mod tests {
         let rb = Runbook::parse(FIXTURE_SYNCHRONISER_LAG).unwrap();
         let ctx = MatchContext::new()
             .with_text("Synchroniser lag detected on read models")
-            .with_target(FqTarget::new("remundo", "prod", "es-cluster"));
+            .with_target(FqTarget::new("example", "prod", "es-cluster"));
         assert!(rb.matches(&ctx));
     }
 
@@ -153,10 +153,10 @@ mod tests {
         let rb = Runbook::parse(FIXTURE_SANDBOX_IS_DOWN).unwrap();
         let sandbox_ctx = MatchContext::new()
             .with_category("target_unreachable")
-            .with_target(FqTarget::new("remundo", "sandbox", "aks-sandbox"));
+            .with_target(FqTarget::new("example", "sandbox", "aks-sandbox"));
         let prod_ctx = MatchContext::new()
             .with_category("target_unreachable")
-            .with_target(FqTarget::new("remundo", "prod", "aks-prod"));
+            .with_target(FqTarget::new("example", "prod", "aks-prod"));
         assert!(rb.matches(&sandbox_ctx));
         assert!(!rb.matches(&prod_ctx), "must not fire for prod — that would be a real outage");
     }
@@ -170,7 +170,7 @@ mod tests {
         ];
         let ctx = MatchContext::new()
             .with_text("synchroniser projection is stale")
-            .with_target(FqTarget::new("remundo", "prod", "es-cluster"));
+            .with_target(FqTarget::new("example", "prod", "es-cluster"));
         let picked = best_match(&runbooks, &ctx).unwrap();
         assert_eq!(picked.title(), "Synchroniser lag");
     }
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn render_all_fills_target_and_default_vars() {
         let rb = Runbook::parse(FIXTURE_DLQ_BACKLOG).unwrap();
-        let target = FqTarget::new("remundo", "prod", "sb-worker");
+        let target = FqTarget::new("example", "prod", "sb-worker");
         let rendered = rb.render_all(Some(&target), &BTreeMap::new()).unwrap();
         let peek_step = rendered.iter().find(|(s, _)| s.text.starts_with("Peek")).unwrap();
         let cmd = peek_step.1.as_deref().unwrap();
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn render_all_cli_var_overrides_default() {
         let rb = Runbook::parse(FIXTURE_DLQ_BACKLOG).unwrap();
-        let target = FqTarget::new("remundo", "prod", "sb-worker");
+        let target = FqTarget::new("example", "prod", "sb-worker");
         let mut cli_vars = BTreeMap::new();
         cli_vars.insert("queue".to_string(), "payments-dlq".to_string());
         let rendered = rb.render_all(Some(&target), &cli_vars).unwrap();

@@ -1,9 +1,9 @@
 //! `eventstore` — stream read and subscription/projection status
-//! (DESIGN.md §4 item 2; docs/REMUNDO.md: "read-only v1" — the estate is
+//! (DESIGN.md §4 item 2; docs/REFERENCE.md: "read-only v1" — the estate is
 //! "mid 3-shard migration" and "2 of the 9 real postmortems are EventStore
 //! incidents"). KurrentDB (the EventStoreDB successor) exposes an HTTP
 //! Atom-feed API compatible with this shape; no mutation surface here —
-//! scavenge/backup are CronJobs (REMUNDO.md), not an agent action.
+//! scavenge/backup are CronJobs (REFERENCE.md), not an agent action.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -13,7 +13,7 @@ use crate::tools::endpoint::get_json;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
 /// Read events from a stream (most recent first, capped) — the
-/// synchroniser-lag diagnostic starting point (REMUNDO.md: "Synchroniser
+/// synchroniser-lag diagnostic starting point (REFERENCE.md: "Synchroniser
 /// lag: position vs head").
 pub struct ReadStreamTool;
 
@@ -88,7 +88,7 @@ impl Tool for ProjectionStatusTool {
 
     fn description(&self) -> &str {
         "Get a projection or catch-up subscription's status (position, running/stopped/ \
-         faulted state). Remundo.Synchroniser runs ~55 catch-up subscriptions at replicas=1 \
+         faulted state). projection worker runs ~55 catch-up subscriptions at replicas=1 \
          — a crash-loop here stalls every read model with no error anywhere else, so compare \
          position against the stream head before assuming the data itself is wrong."
     }
@@ -142,7 +142,7 @@ mod tests {
 
     fn target() -> FqTarget {
         FqTarget {
-            project: "remundo".into(),
+            project: "example".into(),
             env: "prod".into(),
             target: "es-cluster".into(),
             resource: Some((ResourceType::Eventstore, "primary".into())),

@@ -330,7 +330,7 @@ impl Memory {
     }
 
     /// Retain a passive scan observation: `fq_target` is the fully-qualified
-    /// target the finding came from (e.g. `remundo::prod::cluster`), `finding`
+    /// target the finding came from (e.g. `example::prod::cluster`), `finding`
     /// the raw observed content. Framed as "scan of {fq_target} observed: …" —
     /// distinct from `retain`'s "{speaker} said: …" — so a heartbeat's passive
     /// finding is never confused with something an operator or the agent
@@ -840,7 +840,7 @@ mod tests {
         let memory = memory_against(&server);
 
         memory.retain_observation_detached(
-            "remundo::prod::web-1".into(),
+            "example::prod::web-1".into(),
             "disk at 92% and climbing".into(),
         );
         assert_eq!(memory.detached_in_flight(), 1, "the observation retain is tracked");
@@ -852,7 +852,7 @@ mod tests {
         let item = &body["items"][0];
         assert_eq!(
             item["content"].as_str().unwrap(),
-            "scan of remundo::prod::web-1 observed: disk at 92% and climbing"
+            "scan of example::prod::web-1 observed: disk at 92% and climbing"
         );
         assert_eq!(item["context"].as_str().unwrap(), "scan finding");
     }
@@ -930,8 +930,8 @@ mod tests {
             "agent said: escalated to pagerduty"
         );
         assert_eq!(
-            frame_observed("remundo::prod::cluster", "pod payments-7 in CrashLoopBackOff"),
-            "scan of remundo::prod::cluster observed: pod payments-7 in CrashLoopBackOff"
+            frame_observed("example::prod::cluster", "pod payments-7 in CrashLoopBackOff"),
+            "scan of example::prod::cluster observed: pod payments-7 in CrashLoopBackOff"
         );
     }
 

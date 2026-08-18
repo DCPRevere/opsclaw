@@ -1,5 +1,5 @@
 //! `elasticsearch` — search, index stats, cluster health (DESIGN.md §4 item
-//! 2; docs/REMUNDO.md: "it's read models AND logs — remundo ships logs via
+//! 2; docs/REFERENCE.md: "it's read models AND logs — example ships logs via
 //! Filebeat into ES, so log search is an ES query and `loki` stays a
 //! stub"). All three operations are reads — no mutation surface here.
 
@@ -11,7 +11,7 @@ use crate::tools::endpoint::{get_json, query_json};
 use crate::tools::{Tool, ToolCtx, ToolError, ToolResult};
 
 /// `_search` against an index or index pattern — the vocabulary for both
-/// read-model queries and log search (REMUNDO.md: same ES instance serves
+/// read-model queries and log search (REFERENCE.md: same ES instance serves
 /// both).
 pub struct ElasticsearchSearchTool;
 
@@ -33,7 +33,7 @@ impl Tool for ElasticsearchSearchTool {
             "type": "object",
             "properties": {
                 "resource": {"type": "string", "description": "fully-qualified elasticsearch resource"},
-                "index": {"type": "string", "description": "index name or pattern, e.g. remundo-logs-*"},
+                "index": {"type": "string", "description": "index name or pattern, e.g. example-logs-*"},
                 "query": {"type": "object", "description": "Elasticsearch Query DSL body"},
                 "size": {"type": "integer", "description": "max hits to return (default 20)"}
             },
@@ -191,7 +191,7 @@ mod tests {
 
     fn target() -> FqTarget {
         FqTarget {
-            project: "remundo".into(),
+            project: "example".into(),
             env: "prod".into(),
             target: "cluster".into(),
             resource: Some((ResourceType::Elasticsearch, "logs".into())),
@@ -210,7 +210,7 @@ mod tests {
     async fn search_sends_bearer_auth_and_posts_query_body() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/remundo-logs-*/_search"))
+            .and(path("/example-logs-*/_search"))
             .and(header("authorization", "Bearer tok"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"hits": {"total": 3}})))
             .mount(&server)
@@ -222,7 +222,7 @@ mod tests {
                 &ctx,
                 json!({
                     "resource": target().to_string(),
-                    "index": "remundo-logs-*",
+                    "index": "example-logs-*",
                     "query": {"query": {"match": {"message": "timeout"}}}
                 }),
             )
@@ -235,13 +235,13 @@ mod tests {
     async fn index_stats_hits_stats_endpoint() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/remundo-read-model/_stats"))
+            .and(path("/example-read-model/_stats"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"_all": {"total": {}}})))
             .mount(&server)
             .await;
         let ctx = ctx_with(&server.uri(), None);
         let r = ElasticsearchIndexStatsTool
-            .call(&ctx, json!({"resource": target().to_string(), "index": "remundo-read-model"}))
+            .call(&ctx, json!({"resource": target().to_string(), "index": "example-read-model"}))
             .await
             .unwrap();
         assert!(r.output.contains("_all"));

@@ -1,8 +1,8 @@
 //! `SshExecutor` — shells out to the system `ssh` binary. Deliberately not a
 //! pure-Rust SSH client (`docs/plans/IMPLEMENTATION.md` §5 decision point):
 //! the system binary gets ProxyJump/bastion support, agent auth, and
-//! known_hosts handling for free, which matters for remundo's jumpbox
-//! topology (`docs/REMUNDO.md`).
+//! known_hosts handling for free, which matters for example's jumpbox
+//! topology (`docs/REFERENCE.md`).
 //!
 //! Constructed from resolved connection params, never a `SecretRef` —
 //! resolution (reading the key material, registering it with the output

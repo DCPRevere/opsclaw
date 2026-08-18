@@ -287,7 +287,7 @@ mod tests {
     }
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     fn ctx_with(incidents: Arc<dyn IncidentRepo>) -> ToolCtx {
@@ -308,7 +308,7 @@ mod tests {
     fn base_args() -> Value {
         json!({
             "severity": "critical",
-            "target": "remundo::prod::web-1",
+            "target": "example::prod::web-1",
             "fault_class": "resource_saturation",
             "resource": "",
             "evidence": "cpu at 97% for 8 minutes",
@@ -355,8 +355,8 @@ mod tests {
             "dapr-system/dapr-sentry"
         );
         assert_eq!(
-            stable_resource("prod-remundo-api-admin-fbcd9dc96-csv2x"),
-            "prod-remundo-api-admin"
+            stable_resource("prod-example-api-admin-fbcd9dc96-csv2x"),
+            "prod-example-api-admin"
         );
         // statefulset pod → workload
         assert_eq!(

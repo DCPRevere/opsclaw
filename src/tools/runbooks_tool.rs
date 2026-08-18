@@ -265,7 +265,7 @@ mod tests {
         RunbookRun {
             id: Uuid::new_v4(),
             runbook: name.into(),
-            target: FqTarget::new("remundo", "prod", "web-1"),
+            target: FqTarget::new("example", "prod", "web-1"),
             principal: None,
             started_at: Utc::now(),
             finished_at: Some(Utc::now()),

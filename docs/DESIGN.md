@@ -568,7 +568,7 @@ separate mock layer to drift.
     binary, one per team, internal-only; opsclaw.io is a separate static
     marketing/docs/downloads site. No hosted console into deployments.
 12. **Placement: adjacent by default, in-cluster supported.** The reference
-    deployment is example (`~/src/example` — k8s + Azure + Elasticsearch),
+    deployment is example (`a generic reference estate` — k8s + Azure + Elasticsearch),
     where opsclaw runs on their existing bastion; the Helm chart exists for
     teams that want in-cluster, where the external heartbeat is mandatory.
 13. **Shipped LLM default: OpenRouter only** — one provider with its

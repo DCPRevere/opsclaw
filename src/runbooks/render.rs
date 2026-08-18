@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn build_vars_precedence_cli_over_default_over_auto() {
-        let target = FqTarget::new("remundo", "prod", "web-1");
+        let target = FqTarget::new("example", "prod", "web-1");
         let defaults = vars(&[("namespace", "from-default"), ("queue", "orders-dlq")]);
         let cli = vars(&[("namespace", "from-cli")]);
         let built = build_vars(Some(&target), &defaults, &cli);

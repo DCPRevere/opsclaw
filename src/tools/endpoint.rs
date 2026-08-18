@@ -583,7 +583,7 @@ mod tests {
         let config = config_from(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             [[project.env]]
             name = "sandbox"
             [[project.env.target]]
@@ -599,7 +599,7 @@ mod tests {
         );
         let reg = registry_from_config(&config, &store).unwrap();
         let target = FqTarget {
-            project: "remundo".into(),
+            project: "example".into(),
             env: "sandbox".into(),
             target: "cluster".into(),
             resource: Some((crate::domain::ResourceType::Elasticsearch, "logs".into())),
@@ -613,7 +613,7 @@ mod tests {
     fn registry_get_and_insert_by_fq_target() {
         let mut reg = EndpointRegistry::new();
         let target = FqTarget {
-            project: "remundo".into(),
+            project: "example".into(),
             env: "prod".into(),
             target: "cluster".into(),
             resource: Some((crate::domain::ResourceType::Elasticsearch, "logs".into())),
@@ -623,7 +623,7 @@ mod tests {
         assert_eq!(reg.get(&target).unwrap().base_url, "http://es:9200");
 
         let other = FqTarget {
-            project: "remundo".into(),
+            project: "example".into(),
             env: "prod".into(),
             target: "cluster".into(),
             resource: Some((crate::domain::ResourceType::Elasticsearch, "other".into())),
@@ -668,7 +668,7 @@ mod tests {
         let config = config_from(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             [[project.env]]
             name = "prod"
             [[project.env.target]]
@@ -684,7 +684,7 @@ mod tests {
         let (_dir, store) = secret_store();
         let reg = registry_from_config(&config, &store).unwrap();
         let target = FqTarget {
-            project: "remundo".into(),
+            project: "example".into(),
             env: "prod".into(),
             target: "bastion".into(),
             resource: Some((crate::domain::ResourceType::Argocd, "main".into())),

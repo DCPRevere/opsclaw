@@ -1,5 +1,5 @@
-# OpsClaw's cluster credential for the remundo SANDBOX cluster
-# (aks-sandbox-spoke05-clus01) — a dedicated ServiceAccount with a
+# OpsClaw's cluster credential for the example SANDBOX cluster
+# (example-sandbox) — a dedicated ServiceAccount with a
 # READ-ONLY ClusterRole plus pod port-forward, and a long-lived token.
 #
 # Deliberate exclusions:
@@ -11,7 +11,7 @@
 #     reach the in-cluster Elasticsearch from the daemon's machine).
 #
 # Apply once with your own (AAD) credentials:
-#   kubectl --context aks-sandbox-spoke05-clus01 apply -f deploy/sandbox-rbac.yaml
+#   kubectl --context example-sandbox apply -f deploy/sandbox-rbac.yaml
 # Then generate the daemon's kubeconfig:
 #   deploy/gen-opsclaw-kubeconfig.sh
 apiVersion: v1
@@ -92,7 +92,7 @@ rules:
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list"]
-  # Remundo's operators: ECK, ArgoCD, Dapr, APISIX — read the CRs so the
+  # Common operators: ECK, ArgoCD, Dapr, APISIX — read the CRs so the
   # agent can reason about them (an Elasticsearch CR's health/phase, an
   # ArgoCD Application's sync state).
   - apiGroups:

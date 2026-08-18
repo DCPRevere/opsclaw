@@ -411,7 +411,7 @@ fn interpret_tool_message(msg: &Value, usage: crate::llm::TokenUsage) -> (ChatSt
 /// `tool_calls` field. The shape is:
 ///   <tool_call>
 ///   <function=start_scan>
-///   <parameter=target>remundo::prod::cluster</parameter>
+///   <parameter=target>example::prod::cluster</parameter>
 ///   </function>
 ///   </tool_call>
 /// Returns None when no `<tool_call>` block is present. Best-effort and
@@ -499,13 +499,13 @@ mod tests {
     #[test]
     fn parses_hermes_xml_tool_call_from_content() {
         let content = "<tool_call>\n<function=start_scan>\n\
-            <parameter=target>remundo::prod::cluster</parameter>\n\
+            <parameter=target>example::prod::cluster</parameter>\n\
             <parameter=when>today</parameter>\n\
             </function>\n</tool_call>";
         let calls = parse_hermes_tool_calls(content).expect("a tool call");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "start_scan");
-        assert_eq!(calls[0].args["target"], "remundo::prod::cluster");
+        assert_eq!(calls[0].args["target"], "example::prod::cluster");
         assert_eq!(calls[0].args["when"], "today");
     }
 

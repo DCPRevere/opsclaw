@@ -855,7 +855,7 @@ mod tests {
 
     #[test]
     fn assemble_system_prompt_includes_team_context_between_persona_and_clock() {
-        let system = assemble_system_prompt(false, Some("3 targets in remundo"));
+        let system = assemble_system_prompt(false, Some("3 targets in example"));
         let persona_pos = system.find("You are OpsClaw").unwrap();
         let team_pos = system.find("TEAM CONTEXT").unwrap();
         let clock_pos = system.find("CONTEXT — current UTC time").unwrap();

@@ -110,7 +110,7 @@ mod tests {
     use std::sync::Arc;
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
@@ -125,7 +125,7 @@ mod tests {
         let config: crate::config::Config = toml::from_str(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             [[project.env]]
             name = "prod"
             [[project.env.target]]
@@ -135,7 +135,7 @@ mod tests {
         )
         .unwrap();
         let mut ctx = ToolCtx::for_tests(Principal::Agent { job: None }, policy);
-        ctx.known_targets = vec![FqTarget::new("remundo", "prod", "bastion")];
+        ctx.known_targets = vec![FqTarget::new("example", "prod", "bastion")];
         ctx.config = Some(Arc::new(config));
         ctx
     }
@@ -145,7 +145,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, "93.184.216.34"));
         let ctx = ctx_with(policy.clone());
         DnsTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "name": "api.example.com"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "name": "api.example.com"}))
             .await
             .unwrap();
         let seen = policy.seen.lock().unwrap();
@@ -161,7 +161,7 @@ mod tests {
         DnsTool
             .call(
                 &ctx,
-                json!({"target": "remundo::prod::web-1", "name": "example.com", "record_type": "txt"}),
+                json!({"target": "example::prod::web-1", "name": "example.com", "record_type": "txt"}),
             )
             .await
             .unwrap();
@@ -174,7 +174,7 @@ mod tests {
         let ctx = ctx_with_local(policy.clone());
         DnsTool.call(&ctx, json!({"name": "example.com"})).await.unwrap();
         let seen = policy.seen.lock().unwrap();
-        assert_eq!(seen[0].target, FqTarget::new("remundo", "prod", "bastion"));
+        assert_eq!(seen[0].target, FqTarget::new("example", "prod", "bastion"));
     }
 
     #[tokio::test]
@@ -194,7 +194,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = DnsTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "name": "example.com; rm -rf /"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "name": "example.com; rm -rf /"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
@@ -206,7 +206,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = DnsTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "name": "-f"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "name": "-f"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
@@ -220,7 +220,7 @@ mod tests {
         let err = DnsTool
             .call(
                 &ctx,
-                json!({"target": "remundo::prod::web-1", "name": "example.com", "record_type": "AXFR"}),
+                json!({"target": "example::prod::web-1", "name": "example.com", "record_type": "AXFR"}),
             )
             .await
             .unwrap_err();

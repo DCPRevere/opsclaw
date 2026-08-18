@@ -236,7 +236,7 @@ mod tests {
     }
 
     fn cmd(line: &str) -> Command {
-        let mut target = FqTarget::new("remundo", "prod", "cluster");
+        let mut target = FqTarget::new("example", "prod", "cluster");
         target.resource = Some((ResourceType::Argocd, "main".into()));
         Command { target, line: line.into() }
     }

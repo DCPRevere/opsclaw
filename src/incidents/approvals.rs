@@ -148,7 +148,7 @@ mod tests {
     use std::sync::Mutex;
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     fn base_request() -> NewApproval {

@@ -126,7 +126,7 @@ pub(super) const HEARTBEAT_FRAMING: &str = "\n\nSCHEDULED SCAN — this turn is 
 /// an instruction — the DATA-not-instructions boundary from DESIGN.md §3,
 /// applied uniformly to webhook alert payloads, log lines, and remote
 /// command output. `source` names where it came from (e.g. "alertmanager",
-/// "ssh output from remundo::prod::web-1") so the model can attribute it;
+/// "ssh output from example::prod::web-1") so the model can attribute it;
 /// the fence text matches the persona's own wording so the two can never
 /// drift apart.
 pub fn frame_observation(source: &str, content: &str) -> String {
@@ -224,9 +224,9 @@ mod tests {
 
     #[test]
     fn team_context_section_includes_when_present() {
-        let s = team_context_section(Some("remundo has 3 targets: web-1, web-2, db"));
+        let s = team_context_section(Some("example has 3 targets: web-1, web-2, db"));
         assert!(s.contains("TEAM CONTEXT"));
-        assert!(s.contains("remundo has 3 targets"));
+        assert!(s.contains("example has 3 targets"));
     }
 
     #[test]

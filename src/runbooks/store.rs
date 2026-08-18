@@ -326,10 +326,10 @@ mod tests {
 
     #[test]
     fn match_for_command_returns_the_matching_title() {
-        let src = "+++\ntitle = \"Restart flapping nginx\"\n\n[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"\n+++\n- step one\n";
+        let src = "+++\ntitle = \"Restart flapping nginx\"\n\n[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"example::*::*\"\n+++\n- step one\n";
         let rb = crate::runbooks::Runbook::parse(src).unwrap();
         let store = RunbookStore::from_parsed("/nonexistent", vec![("nginx.md".into(), rb)]);
-        let target = crate::domain::FqTarget::new("remundo", "prod", "web-1");
+        let target = crate::domain::FqTarget::new("example", "prod", "web-1");
         assert_eq!(
             store.match_for_command("systemd", "systemctl restart nginx", &target),
             Some("Restart flapping nginx".to_string())
@@ -338,10 +338,10 @@ mod tests {
 
     #[test]
     fn match_for_command_none_when_nothing_pre_approves() {
-        let src = "+++\ntitle = \"Restart flapping nginx\"\n\n[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"remundo::*::*\"\n+++\n- step one\n";
+        let src = "+++\ntitle = \"Restart flapping nginx\"\n\n[trigger]\nkeywords = [\"nginx\"]\ntarget_glob = \"example::*::*\"\n+++\n- step one\n";
         let rb = crate::runbooks::Runbook::parse(src).unwrap();
         let store = RunbookStore::from_parsed("/nonexistent", vec![("nginx.md".into(), rb)]);
-        let target = crate::domain::FqTarget::new("remundo", "prod", "web-1");
+        let target = crate::domain::FqTarget::new("example", "prod", "web-1");
         // Keyword miss on a matching target: fail closed.
         assert_eq!(store.match_for_command("systemd", "systemctl restart postgres", &target), None);
         // Empty store: fail closed.

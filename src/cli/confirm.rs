@@ -80,9 +80,9 @@ mod tests {
             !std::io::stdin().is_terminal(),
             "this test asserts the no-TTY branch; it needs stdin to not be a terminal"
         );
-        let err = destructive("would delete remundo", false).unwrap_err().to_string();
+        let err = destructive("would delete example", false).unwrap_err().to_string();
         assert!(err.contains("--yes"), "must name the way through: {err}");
-        assert!(err.contains("would delete remundo"), "the preview must survive: {err}");
+        assert!(err.contains("would delete example"), "the preview must survive: {err}");
         assert!(err.contains("-T"), "name the trap the operator is actually in: {err}");
     }
 }

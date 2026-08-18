@@ -366,7 +366,7 @@ mod tests {
     const LIVE_ENOUGH: &str = r#"
 # a comment that must survive an apply
 [[project]]
-name = "remundo"
+name = "example"
 
 [[project.env]]
 name = "dev"
@@ -475,16 +475,16 @@ expected_state = "running"
         let dir = tempfile::tempdir().unwrap();
         let path = write(&dir, LIVE_ENOUGH);
 
-        assert_eq!(remove(&path, "remundo::dev::jumpbox").unwrap(), "target remundo::dev::jumpbox");
+        assert_eq!(remove(&path, "example::dev::jumpbox").unwrap(), "target example::dev::jumpbox");
         let cfg = Config::load(Some(&path)).unwrap();
         assert!(cfg.projects[0].envs[0].targets.is_empty());
         assert_eq!(cfg.projects[0].envs.len(), 1, "removing a target must not remove its env");
 
-        assert_eq!(remove(&path, "remundo::dev").unwrap(), "environment remundo::dev");
+        assert_eq!(remove(&path, "example::dev").unwrap(), "environment example::dev");
         let cfg = Config::load(Some(&path)).unwrap();
         assert!(cfg.projects[0].envs.is_empty());
 
-        assert_eq!(remove(&path, "remundo").unwrap(), "project \"remundo\"");
+        assert_eq!(remove(&path, "example").unwrap(), "project \"example\"");
         let cfg = Config::load(Some(&path)).unwrap();
         assert!(cfg.projects.is_empty());
     }
@@ -496,12 +496,12 @@ expected_state = "running"
         let dir = tempfile::tempdir().unwrap();
         let path = write(&dir, LIVE_ENOUGH);
 
-        let err = remove(&path, "remundo::dev::typo").unwrap_err().to_string();
+        let err = remove(&path, "example::dev::typo").unwrap_err().to_string();
         assert!(err.contains("nothing at"), "{err}");
-        assert!(err.contains("remundo::dev::jumpbox"), "must list the real path: {err}");
+        assert!(err.contains("example::dev::jumpbox"), "must list the real path: {err}");
 
-        let err = remove(&path, "remundo::nosuchenv::x").unwrap_err().to_string();
-        assert!(err.contains("no environment named remundo::nosuchenv"), "{err}");
+        let err = remove(&path, "example::nosuchenv::x").unwrap_err().to_string();
+        assert!(err.contains("no environment named example::nosuchenv"), "{err}");
 
         let err = remove(&path, "a::b::c::d").unwrap_err().to_string();
         assert!(err.contains("is not a project"), "{err}");

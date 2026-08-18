@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(tags[0], "shared");
 
         let obs = retain_body(
-            "scan of remundo::prod::cluster observed: pod payments-7 in CrashLoopBackOff",
+            "scan of example::prod::cluster observed: pod payments-7 in CrashLoopBackOff",
             &RetainOpts::default(),
         );
         assert!(obs["items"][0]["content"].as_str().unwrap().starts_with("scan of"));
@@ -625,7 +625,7 @@ mod tests {
             timestamp: Some("2026-01-10T09:00:00Z".into()),
             context: Some("scan finding".into()),
         };
-        let body = retain_body("scan of remundo::prod observed: disk at 92%", &opts);
+        let body = retain_body("scan of example::prod observed: disk at 92%", &opts);
         let item = &body["items"][0];
         assert_eq!(item["document_id"], "scan-42");
         assert_eq!(item["timestamp"], "2026-01-10T09:00:00Z");
@@ -652,14 +652,14 @@ mod tests {
     fn memory_item_parses_fact_text() {
         let r = serde_json::json!({
             "id": "mem-1",
-            "text": "remundo::prod::cluster's payments pod OOMs above 400 req/s.",
+            "text": "example::prod::cluster's payments pod OOMs above 400 req/s.",
             "type": "observation",
-            "entities": ["remundo::prod::cluster"],
+            "entities": ["example::prod::cluster"],
             "mentioned_at": "2026-06-18T17:57:17Z"
         });
         let it = MemoryItem::from_json(&r);
         assert_eq!(it.id, "mem-1", "the id is the handle curation addresses a fact by");
-        assert_eq!(it.fact, "remundo::prod::cluster's payments pod OOMs above 400 req/s.");
+        assert_eq!(it.fact, "example::prod::cluster's payments pod OOMs above 400 req/s.");
         // The per-item annotations the export renders ride along when present.
         assert_eq!(it.kind.as_deref(), Some("observation"));
         assert_eq!(it.mentioned_at.as_deref(), Some("2026-06-18T17:57:17Z"));

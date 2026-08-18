@@ -990,7 +990,7 @@ mod tests {
         // The transcript failure: a CLUSTER name is rejected against the
         // context list instead of landing in config for doctor to trip on.
         let two = vec!["ctx-a".to_string(), "ctx-b".to_string()];
-        let mut p = ScriptedPrompter::new(["aks-sandbox-spoke05-clus01", "ctx-b"]);
+        let mut p = ScriptedPrompter::new(["example-sandbox", "ctx-b"]);
         assert_eq!(ask_kube_context(&mut p, Some(&two)).unwrap().as_deref(), Some("ctx-b"));
         assert!(p.said.iter().any(|l| l.contains("is not one of")), "{:?}", p.said);
     }

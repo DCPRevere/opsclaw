@@ -1,5 +1,5 @@
 //! `prometheus` — instant and range PromQL queries (DESIGN.md §4 item 2;
-//! docs/REMUNDO.md: "Metrics: kube-prometheus-stack"). Standard Prometheus
+//! docs/REFERENCE.md: "Metrics: kube-prometheus-stack"). Standard Prometheus
 //! HTTP API shape (`/api/v1/query`, `/api/v1/query_range`) — read-only, no
 //! mutation surface.
 
@@ -180,7 +180,7 @@ mod tests {
 
     fn target() -> FqTarget {
         FqTarget {
-            project: "remundo".into(),
+            project: "example".into(),
             env: "prod".into(),
             target: "cluster".into(),
             resource: Some((ResourceType::Prometheus, "metrics".into())),

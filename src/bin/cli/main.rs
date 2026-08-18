@@ -479,7 +479,7 @@ enum ConfigCommand {
     List {
         /// Limit to these subtrees: `project`, `project::env`, or
         /// `project::env::target`. Repeatable, and they union — e.g.
-        /// `config list remundo::dev remundo::prod`. Omit for everything.
+        /// `config list example::dev example::prod`. Omit for everything.
         #[arg(add = ArgValueCandidates::new(config_path_candidates))]
         paths: Vec<String>,
         #[arg(long)]
@@ -2151,8 +2151,8 @@ mod tests {
             &["opsclaw-cli", "secret", "rm", "es-password"],
             &["opsclaw-cli", "secrets", "add", "es-password"],
             &["opsclaw-cli", "secrets", "remove", "es-password", "--yes"],
-            &["opsclaw-cli", "scan", "remundo::sandbox::cluster"],
-            &["opsclaw-cli", "scan", "remundo::sandbox::cluster", "--json"],
+            &["opsclaw-cli", "scan", "example::sandbox::cluster"],
+            &["opsclaw-cli", "scan", "example::sandbox::cluster", "--json"],
             &["opsclaw-cli", "dry-run-log"],
             &["opsclaw-cli", "dry-run-log", "--limit", "10", "--json"],
             &["opsclaw-cli", "blocked-actions"],

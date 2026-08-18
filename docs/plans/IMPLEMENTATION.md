@@ -3,7 +3,7 @@
 **Status: draft, awaiting sign-off. Nothing here is built.**
 
 Inputs: `OPSCLAW_BRIEF.md` (intent), `docs/DESIGN.md` (architecture),
-`docs/REMUNDO.md` (reference deployment), `~/src/dcprevere/gianna.chat`
+`docs/REFERENCE.md` (reference deployment), `~/src/dcprevere/gianna.chat`
 (parts donor). This plan adds the *how*: ground rules, frozen contracts,
 the port inventory, build order, and the test matrix.
 

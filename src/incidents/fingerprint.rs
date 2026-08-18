@@ -66,7 +66,7 @@ mod tests {
     use super::*;
 
     fn target(name: &str) -> FqTarget {
-        FqTarget::new("remundo", "prod", name)
+        FqTarget::new("example", "prod", name)
     }
 
     #[test]

@@ -112,7 +112,7 @@ mod tests {
     use std::sync::Arc;
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
@@ -126,7 +126,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, "notAfter=..."));
         let ctx = ctx_with(policy.clone());
         CertTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "host": "api.example.com"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "host": "api.example.com"}))
             .await
             .unwrap();
         let seen = policy.seen.lock().unwrap();
@@ -145,7 +145,7 @@ mod tests {
         CertTool
             .call(
                 &ctx,
-                json!({"target": "remundo::prod::web-1", "host": "db.internal", "port": 8443}),
+                json!({"target": "example::prod::web-1", "host": "db.internal", "port": 8443}),
             )
             .await
             .unwrap();
@@ -157,7 +157,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = CertTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "host": "example.com;id"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "host": "example.com;id"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
@@ -172,7 +172,7 @@ mod tests {
             let err = CertTool
                 .call(
                     &ctx,
-                    json!({"target": "remundo::prod::web-1", "host": "example.com", "port": bad}),
+                    json!({"target": "example::prod::web-1", "host": "example.com", "port": bad}),
                 )
                 .await
                 .unwrap_err();

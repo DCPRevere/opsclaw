@@ -148,7 +148,7 @@ mod tests {
             id: Uuid::nil(),
             fingerprint: "abc123fingerprint".into(),
             fault_class: String::new(),
-            target: FqTarget::new("remundo", "prod", "web-1"),
+            target: FqTarget::new("example", "prod", "web-1"),
             severity: Severity::Critical,
             state: IncidentState::Resolved,
             signals: "CPU at 97% for 8m\nload average 12.4".into(),
@@ -172,7 +172,7 @@ mod tests {
             seq: 1,
             ts: DateTime::parse_from_rfc3339("2026-07-20T10:05:00Z").unwrap().into(),
             principal: Principal::Agent { job: None },
-            fq_target: "remundo::prod::web-1".into(),
+            fq_target: "example::prod::web-1".into(),
             tool: "systemd".into(),
             command: command.into(),
             risk: RiskClass::Medium,
@@ -281,7 +281,7 @@ mod tests {
 # Postmortem: abc123fingerprint
 
 - **Incident ID:** 00000000-0000-0000-0000-000000000000
-- **Target:** remundo::prod::web-1
+- **Target:** example::prod::web-1
 - **Severity:** Critical
 - **Final state:** Resolved
 - **Opened:** 2026-07-20T10:00:00+00:00

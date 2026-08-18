@@ -114,7 +114,7 @@ async fn daemon_boots_serves_drains_on_the_shutdown_token_and_persists_across_re
         id: incident_id,
         fingerprint: "lifecycle-e2e-fingerprint".into(),
         fault_class: String::new(),
-        target: FqTarget::new("remundo", "prod", "web-1"),
+        target: FqTarget::try_new("example", "prod", "web-1").unwrap(),
         severity: Severity::Critical,
         state: IncidentState::Active,
         signals: "disk 98% full on /data".into(),

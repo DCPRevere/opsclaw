@@ -229,7 +229,7 @@ fn discover_kube_contexts(
 /// no list (kubectl unavailable) the answer is accepted unverified with a
 /// warning, not hard-failed — see [`discover_kube_contexts`].
 fn ask_kube_context(p: &mut dyn Prompter, contexts: Option<&[String]>) -> Result<Option<String>> {
-    p.say("  the address of a kubernetes target is the kubectl CONTEXT name inside the");
+    p.say("  a kubernetes target's context is the kubectl CONTEXT name inside the");
     p.say("  kubeconfig (what `kubectl config get-contexts -o name` prints), NOT a cluster name.");
     match contexts {
         Some(list) => {
@@ -301,7 +301,7 @@ fn wizard_target(p: &mut dyn Prompter, store: &SecretStore) -> Result<TargetCfg>
     // validate() or doctor finding it later. Kubernetes asks for the
     // credential FIRST so the kubeconfig can drive context discovery for
     // the address question; other kinds keep the address-first order.
-    let (credential, address, jump_host) = if kind == TargetKindName::Kubernetes {
+    let (credential, address, jump_host, kubernetes) = if kind == TargetKindName::Kubernetes {
         p.say("  a kubernetes target authenticates via a kubeconfig file; the credential is a");
         p.say("  reference to its PATH — answer with the path itself to store it in one step.");
         let credential = ask_credential(
@@ -312,14 +312,33 @@ fn wizard_target(p: &mut dyn Prompter, store: &SecretStore) -> Result<TargetCfg>
             true,
         )?;
         let contexts = discover_kube_contexts(store, credential.as_ref());
-        let address = ask_kube_context(p, contexts.as_deref())?;
-        (credential, address, None)
+        let context = ask_kube_context(p, contexts.as_deref())?.ok_or_else(|| {
+            crate::Error::Config("a kubernetes target requires a context name".into())
+        })?;
+        let scope = ask_choice(p, "kubernetes scope", &["namespace", "cluster"], "namespace")?;
+        let (namespace, cluster_scoped) = if scope == "namespace" {
+            let namespace = p.ask("namespace", None)?;
+            if namespace.trim().is_empty() {
+                return Err(crate::Error::Config(
+                    "a namespace-scoped kubernetes target requires a namespace".into(),
+                ));
+            }
+            (Some(namespace), false)
+        } else {
+            (None, true)
+        };
+        (
+            credential,
+            None,
+            None,
+            Some(crate::config::KubernetesTargetCfg { context, namespace, cluster_scoped }),
+        )
     } else {
         let address = {
             let a = p.ask("address (host for ssh; blank if n/a)", None)?;
             if a.is_empty() { None } else { Some(a) }
         };
-        // Jump host only makes sense for ssh (DESIGN §4: remundo's estate
+        // Jump host only makes sense for ssh (DESIGN §4: example's estate
         // sits behind an Azure Bastion jumpbox) — don't clutter other
         // kinds' wizard.
         let jump_host = if kind == TargetKindName::Ssh {
@@ -343,7 +362,7 @@ fn wizard_target(p: &mut dyn Prompter, store: &SecretStore) -> Result<TargetCfg>
                 true,
             )?
         };
-        (credential, address, jump_host)
+        (credential, address, jump_host, None)
     };
 
     let autonomy = ask_autonomy(p, "target autonomy override (blank = inherit)")?;
@@ -365,6 +384,7 @@ fn wizard_target(p: &mut dyn Prompter, store: &SecretStore) -> Result<TargetCfg>
         expected_state,
         credential,
         address,
+        kubernetes,
         jump_host,
         ssh_port: None,
         ssh_user: None,
@@ -720,7 +740,7 @@ mod tests {
         // has always accepted an empty env; the prompt was the only obstacle.
         let (_dir, store) = test_store();
         let mut p = ScriptedPrompter::new([
-            "remundo", // project name
+            "example", // project name
             "",        // project autonomy: inherit
             "dev",     // env name
             "",        // env autonomy: inherit
@@ -747,7 +767,7 @@ mod tests {
     fn wizard_project_single_env_single_target() {
         let (_dir, store) = test_store();
         let mut p = ScriptedPrompter::new([
-            "remundo",                 // project name
+            "example",                 // project name
             "",                        // project autonomy: inherit
             "prod",                    // env name
             "",                        // env autonomy: inherit
@@ -755,16 +775,16 @@ mod tests {
             "y",                       // add a target now? yes
             "bastion",                 // target name
             "ssh",                     // target kind
-            "bastion.remundo.example", // address
+            "bastion.example.example", // address
             "",                        // jump host: direct (ssh-only prompt)
-            "env:REMUNDO_SSH_KEY",     // credential
+            "env:REFERENCE_SSH_KEY",   // credential
             "",                        // target autonomy: inherit
             "running",                 // target expected_state
             "n",                       // add another target? no
             "n",                       // add another env? no
         ]);
         let project = wizard_project(&mut p, &store).unwrap();
-        assert_eq!(project.name, "remundo");
+        assert_eq!(project.name, "example");
         assert_eq!(project.envs.len(), 1);
         assert_eq!(project.envs[0].name, "prod");
         assert_eq!(project.envs[0].targets.len(), 1);
@@ -772,7 +792,7 @@ mod tests {
         assert_eq!(project.envs[0].targets[0].kind, TargetKindName::Ssh);
         assert_eq!(
             project.envs[0].targets[0].credential.as_ref().map(|c| c.to_string()),
-            Some("env:REMUNDO_SSH_KEY".to_string())
+            Some("env:REFERENCE_SSH_KEY".to_string())
         );
     }
 
@@ -939,12 +959,17 @@ mod tests {
             "kubernetes",
             "store:kc",        // credential comes FIRST for kubernetes
             "opsclaw-sandbox", // context name, accepted unverified
-            "",
-            "running",
+            "",                // namespace scope (default)
+            "sandbox",         // namespace
+            "",                // autonomy inherits
+            "running",         // expected state
         ]);
         let t = wizard_target(&mut p, &store).unwrap();
         assert_eq!(t.kind, TargetKindName::Kubernetes);
-        assert_eq!(t.address.as_deref(), Some("opsclaw-sandbox"));
+        assert!(t.address.is_none());
+        let kube = t.kubernetes.as_ref().unwrap();
+        assert_eq!(kube.context, "opsclaw-sandbox");
+        assert_eq!(kube.namespace.as_deref(), Some("sandbox"));
         assert!(
             p.said.iter().any(|l| l.contains("NOT a cluster name")),
             "the prompt must spell out that the address is a kubectl context: {:?}",
@@ -976,13 +1001,16 @@ mod tests {
             &config_path,
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             [[project.env]]
             name = "sandbox"
             [[project.env.target]]
             name = "cluster"
             kind = "kubernetes"
             credential = "store:sandbox-kubeconfig"
+            [project.env.target.kubernetes]
+            context = "opsclaw-sandbox"
+            namespace = "sandbox"
             "#,
         )
         .unwrap();
@@ -999,7 +1027,7 @@ mod tests {
         store.set("es-password", "pw").unwrap();
 
         let mut p = ScriptedPrompter::new([
-            "remundo::sandbox::cluster", // attach to target
+            "example::sandbox::cluster", // attach to target
             "elasticsearch",             // type
             "logs",                      // name
             "https://localhost:9201",    // url
@@ -1009,7 +1037,7 @@ mod tests {
             "y",                         // disable cert verification (port-forward hop)
         ]);
         let (target, resource) = add_resource(&mut p, &config_path, &store).unwrap();
-        assert_eq!(target, "remundo::sandbox::cluster");
+        assert_eq!(target, "example::sandbox::cluster");
         let ResourceCfg::Elasticsearch(es) = &resource else {
             panic!("expected an Elasticsearch variant, got {resource:?}");
         };
@@ -1036,7 +1064,7 @@ mod tests {
 
         // http url → no TLS questions; prometheus → no username question.
         let mut p = ScriptedPrompter::new([
-            "remundo::sandbox::cluster",
+            "example::sandbox::cluster",
             "prometheus",
             "metrics",
             "http://localhost:9090",
@@ -1058,7 +1086,7 @@ mod tests {
         let config_path = seeded_config(dir.path());
         let store = SecretStore::open(dir.path()).unwrap();
         let answers =
-            ["remundo::sandbox::cluster", "prometheus", "metrics", "http://localhost:9090", ""];
+            ["example::sandbox::cluster", "prometheus", "metrics", "http://localhost:9090", ""];
         let mut p1 = ScriptedPrompter::new(answers);
         add_resource(&mut p1, &config_path, &store).unwrap();
         let mut p2 = ScriptedPrompter::new(answers);
@@ -1085,7 +1113,7 @@ mod tests {
         let store = SecretStore::open(dir.path()).unwrap();
 
         let mut p = ScriptedPrompter::new([
-            "remundo",
+            "example",
             "",
             "prod",
             "",
@@ -1100,12 +1128,12 @@ mod tests {
             "n",
         ]);
         let project = add_project(&mut p, &config_path, &store).unwrap();
-        assert_eq!(project.name, "remundo");
+        assert_eq!(project.name, "example");
 
         assert!(config_path.exists());
         let reloaded = Config::load(Some(&config_path)).unwrap();
         assert_eq!(reloaded.projects.len(), 1);
-        assert_eq!(reloaded.projects[0].name, "remundo");
+        assert_eq!(reloaded.projects[0].name, "example");
         reloaded.validate().unwrap();
     }
 
@@ -1116,7 +1144,7 @@ mod tests {
         let store = SecretStore::open(dir.path()).unwrap();
 
         let mut p1 = ScriptedPrompter::new([
-            "remundo",
+            "example",
             "",
             "prod",
             "",
@@ -1133,7 +1161,7 @@ mod tests {
         add_project(&mut p1, &config_path, &store).unwrap();
 
         let mut p2 = ScriptedPrompter::new([
-            "remundo",
+            "example",
             "",
             "staging",
             "",

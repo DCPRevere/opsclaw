@@ -2,7 +2,7 @@
 //! job table (DESIGN §3 Scheduler: "a persistent task list … user-editable").
 //!
 //! `edit` is where gianna's prompt-from-const contract completes: a SEEDED
-//! scan job stores `Payload::ScanRoutine { routine }` and resolves its
+//! scan job stores `Payload::ScanRoutine { routine, target }` and resolves its
 //! prompt from a code constant at fire time (so improving the const
 //! upgrades every unedited job). The moment an operator edits the prompt,
 //! the job CONVERTS to `Payload::Prompt { body }` — free text, kept forever,
@@ -141,7 +141,7 @@ mod tests {
             Schedule::Interval { every_minutes: 30 },
             Payload::ScanRoutine {
                 routine: "record_scan".into(),
-                target: Some(crate::domain::FqTarget::new("remundo", "prod", "cluster")),
+                target: Some(crate::domain::FqTarget::new("example", "prod", "cluster")),
             },
         )
         .system()
@@ -150,7 +150,7 @@ mod tests {
     #[tokio::test]
     async fn list_renders_scan_routine_jobs_with_the_conversion_hint() {
         let db = Arc::new(InMemoryDb::new());
-        JobRepo::insert(db.as_ref(), &seeded_scan_job("remundo::prod::cluster-scan"))
+        JobRepo::insert(db.as_ref(), &seeded_scan_job("example::prod::cluster-scan"))
             .await
             .unwrap();
         let rows = list(db.as_ref()).await.unwrap();
@@ -163,13 +163,13 @@ mod tests {
     #[tokio::test]
     async fn prompt_edit_converts_a_seeded_job_to_free_text_and_reseeding_skips_it() {
         let db = Arc::new(InMemoryDb::new());
-        JobRepo::insert(db.as_ref(), &seeded_scan_job("remundo::prod::cluster-scan"))
+        JobRepo::insert(db.as_ref(), &seeded_scan_job("example::prod::cluster-scan"))
             .await
             .unwrap();
 
         let edited = edit(
             db.as_ref(),
-            "remundo::prod::cluster-scan",
+            "example::prod::cluster-scan",
             Some("scan only the prod-backend namespace".into()),
             None,
             None,

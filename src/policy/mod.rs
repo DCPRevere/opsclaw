@@ -31,7 +31,7 @@ pub use scrub::{Scrubber, ScrubbingMakeWriter};
 
 use crate::Result;
 use crate::audit::{AuditOutcome, AuditWriter};
-use crate::config::Config;
+use crate::config::{Config, TargetKindName};
 use crate::db::ApprovalRepo;
 use crate::domain::{ApprovalRequest, ApprovalState, Autonomy, FqTarget, Principal, RiskClass};
 use crate::targets::{Command, ExecOutput, TargetExecutor};
@@ -190,6 +190,57 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// Validate that the composing tool and target transport agree, then
+    /// return the exact line the target executor will perform. This happens
+    /// before classification so policy never judges an SSH-looking line and
+    /// later executes it as kubectl.
+    fn canonical_command(&self, req: &CommandRequest) -> Result<String> {
+        if req.target.resource.is_some() {
+            let compatible = req.command.starts_with("endpoint-get ")
+                || req.command.starts_with("endpoint-query ")
+                || req.command.starts_with("argocd app rollback ");
+            return compatible.then(|| req.command.clone()).ok_or_else(|| {
+                crate::Error::Policy(format!(
+                    "tool {:?} produced an incompatible command for resource target {}",
+                    req.tool, req.target
+                ))
+            });
+        }
+        let configured = self.config.target_config(&req.target).ok_or_else(|| {
+            crate::Error::Policy(format!("target {} is not configured", req.target))
+        })?;
+        let host_tool = matches!(
+            req.tool.as_str(),
+            "monitor" | "systemd" | "docker" | "dns" | "cert" | "firewall"
+        );
+        let compatible = match req.tool.as_str() {
+            "ssh" => configured.kind == TargetKindName::Ssh,
+            "shell" => configured.kind == TargetKindName::Local,
+            "kubernetes" => configured.kind == TargetKindName::Kubernetes,
+            "runbook" => true,
+            _ if host_tool => {
+                matches!(configured.kind, TargetKindName::Ssh | TargetKindName::Local)
+            }
+            _ => false,
+        };
+        if !compatible {
+            return Err(crate::Error::Policy(format!(
+                "tool {:?} is incompatible with target {} ({:?})",
+                req.tool, req.target, configured.kind
+            )));
+        }
+
+        let trimmed = req.command.trim_start();
+        if req.target.resource.is_none()
+            && configured.kind == TargetKindName::Kubernetes
+            && !trimmed.starts_with("kubectl")
+        {
+            Ok(format!("kubectl {trimmed}"))
+        } else {
+            Ok(req.command.clone())
+        }
+    }
+
     pub fn new(
         config: Arc<Config>,
         executors: HashMap<String, Arc<dyn TargetExecutor>>,
@@ -281,9 +332,9 @@ impl Policy {
         true
     }
 
-    pub async fn execute(&self, req: CommandRequest) -> Result<PolicyOutcome> {
-        let classification =
-            classify::classify_command(&classify::line_for_classification(&req.tool, &req.command));
+    pub async fn execute(&self, mut req: CommandRequest) -> Result<PolicyOutcome> {
+        req.command = self.canonical_command(&req)?;
+        let classification = classify::classify_command(&req.command);
         // The classifier may raise, never lower, the tool's declared class.
         let risk = classification.risk.max(req.declared_risk);
         let fq = req.target.to_string();
@@ -600,14 +651,21 @@ impl ExecuteApproved for Policy {
         approval: &ApprovalRequest,
         _operator: Uuid,
     ) -> Result<PolicyOutcome> {
+        let mut approved_req = CommandRequest {
+            principal: approval.requested_by.clone(),
+            tool: approval.tool.clone(),
+            target: approval.target.clone(),
+            command: approval.command.clone(),
+            declared_risk: approval.risk,
+            hypothesis: Some(approval.hypothesis.clone()),
+            runbook: None,
+        };
+        approved_req.command = self.canonical_command(&approved_req)?;
         // Re-derive risk defensively; the human approved THIS command, but
         // the always-on protections still apply.
-        let classification = classify::classify_command(&classify::line_for_classification(
-            &approval.tool,
-            &approval.command,
-        ));
+        let classification = classify::classify_command(&approved_req.command);
         let risk = classification.risk.max(approval.risk);
-        let scrubbed = self.scrubber.scrub(&approval.command);
+        let scrubbed = self.scrubber.scrub(&approved_req.command);
         // Audit records carry the ORIGINAL requester (who composed the
         // command); the approving operator is on the approval row's
         // `decided_by` — both identities are durably on record (DESIGN §4).
@@ -653,7 +711,7 @@ impl ExecuteApproved for Policy {
             .policy
             .forbidden_paths
             .iter()
-            .find(|p| approval.command.contains(p.as_str()))
+            .find(|p| approved_req.command.contains(p.as_str()))
         {
             self.audit_one(
                 principal,
@@ -670,17 +728,6 @@ impl ExecuteApproved for Policy {
                 dry_run_logged: false,
             });
         }
-        let approved_req = CommandRequest {
-            principal: approval.requested_by.clone(),
-            tool: approval.tool.clone(),
-            target: approval.target.clone(),
-            command: approval.command.clone(),
-            declared_risk: approval.risk,
-            hypothesis: Some(approval.hypothesis.clone()),
-            // Approval rows predate/stay independent of runbook matching; a
-            // runbook-only allowlist therefore fails closed after restart.
-            runbook: None,
-        };
         if risk != RiskClass::Read
             && !self.config.policy.command_allowlist.is_empty()
             && !bounds_match(&self.config.policy.command_allowlist, &approved_req)
@@ -704,7 +751,7 @@ impl ExecuteApproved for Policy {
             principal,
             &approval.tool,
             &approval.target,
-            &approval.command,
+            &approved_req.command,
             &scrubbed,
             risk,
         )
@@ -772,7 +819,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let estop = Arc::new(EStop::new(dir.path().join("ESTOP"), db.clone()));
         let mut executors: HashMap<String, Arc<dyn TargetExecutor>> = HashMap::new();
-        executors.insert("remundo::prod::bastion".into(), executor.clone());
+        executors.insert("example::prod::bastion".into(), executor.clone());
         let policy = Policy::new(
             Arc::new(config),
             executors,
@@ -789,7 +836,7 @@ mod tests {
         let toml = format!(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             autonomy = "{autonomy}"
             [[project.env]]
             name = "prod"
@@ -805,7 +852,7 @@ mod tests {
         CommandRequest {
             principal: Principal::System,
             tool: "shell".into(),
-            target: FqTarget::new("remundo", "prod", "bastion"),
+            target: FqTarget::new("example", "prod", "bastion"),
             command: command.into(),
             declared_risk: declared,
             hypothesis: Some("test hypothesis".into()),
@@ -876,11 +923,14 @@ mod tests {
         // the executor supplies the binary). The classifier must see the
         // line as it will run, or every k8s read fail-closes to Medium and
         // observe mode blocks the whole tool (happened live).
-        let rig = rig_with(config_at(Autonomy::Observe), FakeExecutor::ok(""));
+        let mut config = config_at(Autonomy::Observe);
+        config.projects[0].envs[0].targets[0].kind = TargetKindName::Kubernetes;
+        let rig = rig_with(config, FakeExecutor::ok(""));
         let mut req = request("get pods -n monitoring", RiskClass::Read);
         req.tool = "kubernetes".into();
         let out = rig.policy.execute(req).await.unwrap();
         assert!(matches!(out, PolicyOutcome::Executed(_)), "got {out:?}");
+        assert_eq!(rig.executor.ran.lock().unwrap().as_slice(), ["kubectl get pods -n monitoring"]);
     }
 
     #[tokio::test]
@@ -888,7 +938,9 @@ mod tests {
         // The same normalization must work in the DANGEROUS direction: a
         // bare `delete namespaces --all` line previously dodged the
         // kubectl hard-block patterns entirely.
-        let rig = rig_with(config_at(Autonomy::Auto), FakeExecutor::ok(""));
+        let mut config = config_at(Autonomy::Auto);
+        config.projects[0].envs[0].targets[0].kind = TargetKindName::Kubernetes;
+        let rig = rig_with(config, FakeExecutor::ok(""));
         let mut req = request("delete namespaces --all", RiskClass::Destructive);
         req.tool = "kubernetes".into();
         let out = rig.policy.execute(req).await.unwrap();
@@ -898,6 +950,20 @@ mod tests {
             }
             other => panic!("expected hard block, got {other:?}"),
         }
+        assert!(rig.executor.ran.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ssh_tool_cannot_smuggle_a_kubectl_command_into_a_kubernetes_target() {
+        let mut config = config_at(Autonomy::Auto);
+        config.projects[0].envs[0].targets[0].kind = TargetKindName::Kubernetes;
+        let rig = rig_with(config, FakeExecutor::ok(""));
+        let mut req = request("delete namespaces --all", RiskClass::Medium);
+        req.tool = "ssh".into();
+
+        let err = rig.policy.execute(req).await.unwrap_err().to_string();
+
+        assert!(err.contains("incompatible"), "{err}");
         assert!(rig.executor.ran.lock().unwrap().is_empty());
     }
 
@@ -1074,7 +1140,7 @@ mod tests {
         for needle in [
             "APPROVAL NEEDED",
             "systemctl restart nginx",
-            "remundo::prod::bastion",
+            "example::prod::bastion",
             "test hypothesis",
             &id.to_string(),
         ] {
@@ -1188,7 +1254,7 @@ mod tests {
         scrubber.register("DB_PASSWORD", "hunter22");
         let executor = FakeExecutor::ok("PGPASSWORD=hunter22\nHOME=/root");
         let mut executors: HashMap<String, Arc<dyn TargetExecutor>> = HashMap::new();
-        executors.insert("remundo::prod::bastion".into(), executor.clone());
+        executors.insert("example::prod::bastion".into(), executor.clone());
         let policy = Policy::new(
             Arc::new(config_at(Autonomy::Auto)),
             executors,
@@ -1276,7 +1342,7 @@ mod tests {
             id: Uuid::new_v4(),
             incident: None,
             requested_by: Principal::System,
-            target: FqTarget::new("remundo", "prod", "bastion"),
+            target: FqTarget::new("example", "prod", "bastion"),
             tool: "shell".into(),
             command: "rm -rf /".into(),
             risk: RiskClass::Read,
@@ -1297,7 +1363,7 @@ mod tests {
             id: Uuid::new_v4(),
             incident: None,
             requested_by: Principal::System,
-            target: FqTarget::new("remundo", "prod", "bastion"),
+            target: FqTarget::new("example", "prod", "bastion"),
             tool: "shell".into(),
             command: command.into(),
             risk: RiskClass::High,
@@ -1355,8 +1421,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let estop = Arc::new(EStop::new(dir.path().join("ESTOP"), db.clone()));
         let mut executors: HashMap<String, Arc<dyn TargetExecutor>> = HashMap::new();
-        executors.insert("remundo::prod::bastion".into(), rig.executor.clone());
-        let mut resource_target = FqTarget::new("remundo", "prod", "bastion");
+        executors.insert("example::prod::bastion".into(), rig.executor.clone());
+        let mut resource_target = FqTarget::new("example", "prod", "bastion");
         resource_target.resource = Some((crate::domain::ResourceType::Argocd, "main".into()));
         executors.insert(resource_target.to_string(), endpoint_exec.clone());
         let policy = Policy::new(
@@ -1390,7 +1456,7 @@ mod tests {
     async fn missing_executor_is_an_error_not_a_silent_skip() {
         let rig = rig_with(config_at(Autonomy::Auto), FakeExecutor::ok(""));
         let mut req = request("uptime", RiskClass::Read);
-        req.target = FqTarget::new("remundo", "prod", "unknown-target");
+        req.target = FqTarget::new("example", "prod", "unknown-target");
         assert!(rig.policy.execute(req).await.is_err());
     }
 }

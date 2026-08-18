@@ -294,12 +294,17 @@ EOF
 # before calling this.
 harness_kubernetes_target_toml() {
     local fq_name="$1"
+    local kube_context
+    kube_context="$(kubectl --kubeconfig "$OPSCLAW_HARNESS_KUBECONFIG" config current-context)"
     cat <<EOF
 [[project.env.target]]
 name = "${fq_name}"
 kind = "kubernetes"
 credential = "env:OPSCLAW_HARNESS_KUBECONFIG"
 expected_state = "running"
+[project.env.target.kubernetes]
+context = "${kube_context}"
+cluster_scoped = true
 EOF
 }
 

@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use tokio::process::Command as TokioCommand;
 
 use crate::Result;
+use crate::domain::KubernetesScope;
 use crate::error::Error;
 use crate::targets::{Command, ExecOutput, ProbeReport, TargetExecutor};
 
@@ -23,10 +24,11 @@ pub struct KubernetesParams {
     /// Resolved kubeconfig file path (already written to disk from the
     /// resolved credential at wiring time).
     pub kubeconfig: PathBuf,
-    /// Optional context name within the kubeconfig (remundo: staging/prod
+    /// Optional context name within the kubeconfig (example: staging/prod
     /// are namespace-scoped ServiceAccount kubeconfigs on one physical
-    /// cluster — see `docs/REMUNDO.md`).
-    pub context: Option<String>,
+    /// cluster — see `docs/REFERENCE.md`).
+    pub context: String,
+    pub scope: KubernetesScope,
 }
 
 pub struct KubernetesExecutor {
@@ -46,11 +48,50 @@ impl KubernetesExecutor {
     fn base_args(&self) -> Vec<String> {
         let mut args =
             vec!["--kubeconfig".to_string(), self.params.kubeconfig.display().to_string()];
-        if let Some(ctx) = &self.params.context {
-            args.push("--context".to_string());
-            args.push(ctx.clone());
-        }
+        args.push("--context".to_string());
+        args.push(self.params.context.clone());
         args
+    }
+
+    fn scoped_args(&self, line: &str) -> Result<Vec<String>> {
+        let mut args = Self::split_line(line);
+        let KubernetesScope::Namespace(expected) = &self.params.scope else { return Ok(args) };
+        let option_end = args.iter().position(|arg| arg == "--").unwrap_or(args.len());
+        let mut stated_namespace = None;
+        let mut i = 0;
+        while i < option_end {
+            match args[i].as_str() {
+                "-A" | "--all-namespaces" => {
+                    return Err(Error::Policy(format!(
+                        "namespace-scoped kubernetes target cannot use {}",
+                        args[i]
+                    )));
+                }
+                "-n" | "--namespace" => {
+                    let value = args.get(i + 1).ok_or_else(|| {
+                        Error::Policy(format!("{} requires a namespace", args[i]))
+                    })?;
+                    stated_namespace = Some(value.clone());
+                    i += 1;
+                }
+                arg if arg.starts_with("--namespace=") || arg.starts_with("-n=") => {
+                    stated_namespace = arg.split_once('=').map(|(_, value)| value.to_string());
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if let Some(actual) = stated_namespace {
+            if actual != *expected {
+                return Err(Error::Policy(format!(
+                    "kubernetes target is scoped to namespace {expected:?}, not {actual:?}"
+                )));
+            }
+        } else {
+            args.insert(0, expected.clone());
+            args.insert(0, "--namespace".to_string());
+        }
+        Ok(args)
     }
 
     /// Split `line` on whitespace for argv (kubectl subcommands from the
@@ -96,7 +137,8 @@ impl TargetExecutor for KubernetesExecutor {
         // matches on the full `kubectl ...` line (policy/classify.rs), but
         // the executor supplies the binary itself.
         let line = cmd.line.strip_prefix("kubectl").map(str::trim).unwrap_or(&cmd.line);
-        self.run_kubectl(&Self::split_line(line), timeout).await
+        let args = self.scoped_args(line)?;
+        self.run_kubectl(&args, timeout).await
     }
 
     async fn probe(&self) -> Result<ProbeReport> {
@@ -123,8 +165,9 @@ mod tests {
 
     fn params() -> KubernetesParams {
         KubernetesParams {
-            kubeconfig: PathBuf::from("/etc/opsclaw/kubeconfigs/remundo-prod.yaml"),
-            context: Some("prod-remundo".to_string()),
+            kubeconfig: PathBuf::from("/etc/opsclaw/kubeconfigs/example-prod.yaml"),
+            context: "prod-example".to_string(),
+            scope: KubernetesScope::Namespace("prod".to_string()),
         }
     }
 
@@ -133,17 +176,9 @@ mod tests {
         let exec = KubernetesExecutor::new(params());
         let args = exec.base_args();
         assert_eq!(args[0], "--kubeconfig");
-        assert!(args[1].contains("remundo-prod.yaml"));
+        assert!(args[1].contains("example-prod.yaml"));
         assert!(args.contains(&"--context".to_string()));
-        assert!(args.contains(&"prod-remundo".to_string()));
-    }
-
-    #[test]
-    fn no_context_omits_flag() {
-        let mut p = params();
-        p.context = None;
-        let exec = KubernetesExecutor::new(p);
-        assert!(!exec.base_args().contains(&"--context".to_string()));
+        assert!(args.contains(&"prod-example".to_string()));
     }
 
     #[test]
@@ -152,6 +187,19 @@ mod tests {
             KubernetesExecutor::split_line("get pods -n prod"),
             vec!["get", "pods", "-n", "prod"]
         );
+    }
+
+    #[test]
+    fn namespace_scope_is_injected_and_cannot_be_overridden() {
+        let exec = KubernetesExecutor::new(params());
+        assert_eq!(
+            exec.scoped_args("get pods").unwrap(),
+            vec!["--namespace", "prod", "get", "pods"]
+        );
+        assert!(exec.scoped_args("get pods -A").is_err());
+        assert!(exec.scoped_args("get pods -n dev").is_err());
+        assert!(exec.scoped_args("get pods --namespace=dev").is_err());
+        assert!(exec.scoped_args("get pods -n prod").is_ok());
     }
 
     #[tokio::test]

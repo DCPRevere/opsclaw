@@ -1,4 +1,4 @@
-# OpsClaw against the remundo SANDBOX cluster, daemon running locally.
+# OpsClaw against the example SANDBOX cluster, daemon running locally.
 # Copy to ~/.opsclaw/config.toml and fill the store-backed secrets first:
 #
 #   openssl rand -base64 48 | opsclaw-cli secret set jwt-secret
@@ -95,7 +95,7 @@ ack_timeout_minutes = 60   # unacked this long -> next step (or expire)
 repeat_interval_minutes = 20
 
 [[project]]
-name = "remundo"
+name = "example"
 autonomy = "suggest"
 
 # Per-project escalation override: a project that declares its own
@@ -105,7 +105,7 @@ autonomy = "suggest"
 # channel). Declaring [project.escalation] with no steps is refused at
 # boot — remove the table entirely to inherit.
 #   [[project.escalation.step]]
-#   contact = "telegram"       # page the remundo on-call bot first
+#   contact = "telegram"       # page the example on-call bot first
 #   ack_timeout_minutes = 30
 #   repeat_interval_minutes = 10
 #   [[project.escalation.step]]
@@ -126,8 +126,9 @@ name = "cluster"
 kind = "kubernetes"
 # Value = PATH to the generated SA kubeconfig (deploy/gen-opsclaw-kubeconfig.sh).
 credential = "store:sandbox-kubeconfig"
-# Context name inside that kubeconfig.
-address = "opsclaw-sandbox"
+[project.env.target.kubernetes]
+context = "opsclaw-sandbox"
+cluster_scoped = true
 
 [[project.env.target.resource]]
 type = "elasticsearch"

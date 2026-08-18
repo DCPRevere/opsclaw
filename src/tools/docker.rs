@@ -97,7 +97,11 @@ impl Tool for DockerTool {
         let container = args["container"].as_str();
         let hypothesis = args["hypothesis"].as_str().map(str::to_string);
         let command = compose(action, container)?;
-        let target = ctx.resolve_target(target_str)?;
+        let target = ctx.resolve_target_for(
+            target_str,
+            self.name(),
+            &[crate::config::TargetKindName::Ssh, crate::config::TargetKindName::Local],
+        )?;
         run_command(ctx, self.name(), target, command, risk_for(action), hypothesis).await
     }
 }
@@ -111,7 +115,7 @@ mod tests {
     use std::sync::Arc;
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
@@ -134,7 +138,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         DockerTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "ps"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "action": "ps"}))
             .await
             .unwrap();
         let seen = policy.seen.lock().unwrap();
@@ -149,7 +153,7 @@ mod tests {
         DockerTool
             .call(
                 &ctx,
-                json!({"target": "remundo::prod::web-1", "action": "logs", "container": "api"}),
+                json!({"target": "example::prod::web-1", "action": "logs", "container": "api"}),
             )
             .await
             .unwrap();
@@ -161,7 +165,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy);
         let err = DockerTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "restart"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "action": "restart"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
@@ -172,7 +176,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = DockerTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "restart", "container": "api; rm -rf /"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "action": "restart", "container": "api; rm -rf /"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));

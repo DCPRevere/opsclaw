@@ -70,7 +70,18 @@ pub fn executor_for_target(
             };
             Ok(Arc::new(KubernetesExecutor::new(KubernetesParams {
                 kubeconfig,
-                context: target.address.clone(),
+                context: target
+                    .kubernetes
+                    .as_ref()
+                    .ok_or_else(|| {
+                        crate::Error::Config(format!(
+                            "kubernetes target {:?} has no kubernetes connection block",
+                            target.name
+                        ))
+                    })?
+                    .context
+                    .clone(),
+                scope: target.kubernetes.as_ref().expect("checked above").scope(),
             })))
         }
         // Honest stub: probes report "not built", commands error — never a
@@ -170,7 +181,7 @@ mod tests {
         let config = config_from(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             [[project.env]]
             name = "prod"
             [[project.env.target]]
@@ -186,8 +197,8 @@ mod tests {
         let (_dir, store) = store();
         let scrubber = Scrubber::new();
         let (map, warnings) = build_executors(&config, &store, &scrubber).unwrap();
-        assert!(map.contains_key("remundo::prod::bastion"));
-        assert!(map.contains_key("remundo::prod::bastion::argocd::main"));
+        assert!(map.contains_key("example::prod::bastion"));
+        assert!(map.contains_key("example::prod::bastion::argocd::main"));
         assert!(warnings.is_empty(), "{warnings:?}");
         // The resolved token was registered before anything could leak it.
         assert_eq!(scrubber.scrub("token=argo-secret-token"), "token=<redacted:argocd_main_TOKEN>");

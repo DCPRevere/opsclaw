@@ -153,7 +153,7 @@ impl TargetExecutor for FakeExecutor {
     }
 }
 
-const FQ: &str = "remundo::prod::web-1";
+const FQ: &str = "example::prod::web-1";
 const REMEDIATION: &str = "systemctl restart nginx";
 
 /// One project/env/target at `suggest` autonomy — the DoD's stated level:
@@ -161,7 +161,7 @@ const REMEDIATION: &str = "systemctl restart nginx";
 fn suggest_config(home: &std::path::Path) -> Config {
     let toml = r#"
         [[project]]
-        name = "remundo"
+        name = "example"
         autonomy = "suggest"
         [[project.env]]
         name = "prod"
@@ -375,7 +375,7 @@ async fn deny_over_http_records_the_decision_and_never_executes() {
         .execute(CommandRequest {
             principal: Principal::Agent { job: None },
             tool: "shell".into(),
-            target: FqTarget::new("remundo", "prod", "web-1"),
+            target: FqTarget::try_new("example", "prod", "web-1").unwrap(),
             command: REMEDIATION.into(),
             declared_risk: RiskClass::Medium,
             hypothesis: Some("heartbeat scan thinks nginx is wedged".into()),

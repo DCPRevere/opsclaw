@@ -180,6 +180,27 @@ impl ToolCtx {
         })
     }
 
+    /// Resolve a target and require a compatible connection kind. The policy
+    /// layer repeats this check as the final authority; doing it here gives
+    /// the model a useful correction instead of a generic policy failure.
+    pub fn resolve_target_for(
+        &self,
+        s: &str,
+        tool: &str,
+        allowed: &[crate::config::TargetKindName],
+    ) -> std::result::Result<FqTarget, ToolError> {
+        let target = self.resolve_target(s)?;
+        if let Some(config) = &self.config {
+            let actual = config.target_config(&target).map(|configured| configured.kind);
+            if !actual.is_some_and(|kind| allowed.contains(&kind)) {
+                return Err(ToolError::UserFacing(format!(
+                    "{tool} cannot run against target {target} ({actual:?}); choose a compatible target"
+                )));
+            }
+        }
+        Ok(target)
+    }
+
     /// Resolve the optional VANTAGE argument shared by `dns` and `cert`
     /// (DESIGN.md §4: they "accept an optional target (resolve/check from a
     /// target's vantage or the daemon's)"): an explicit target string goes
@@ -190,7 +211,11 @@ impl ToolCtx {
     /// discipline as `resolve_target`.
     pub fn resolve_vantage(&self, s: Option<&str>) -> std::result::Result<FqTarget, ToolError> {
         if let Some(s) = s {
-            return self.resolve_target(s);
+            return self.resolve_target_for(
+                s,
+                "vantage tool",
+                &[crate::config::TargetKindName::Ssh, crate::config::TargetKindName::Local],
+            );
         }
         let locals: Vec<&FqTarget> = self
             .known_targets
@@ -417,10 +442,7 @@ fn target_kind_of(config: &Config, target: &FqTarget) -> Option<RegistryTargetCl
 /// because [`ToolCtx::resolve_vantage`] needs specifically `Local` (the
 /// daemon's own host), which the coarse `SshOrLocal` class erases.
 fn configured_kind(config: &Config, target: &FqTarget) -> Option<crate::config::TargetKindName> {
-    let project = config.projects.iter().find(|p| p.name == target.project)?;
-    let env = project.envs.iter().find(|e| e.name == target.env)?;
-    let t = env.targets.iter().find(|t| t.name == target.target)?;
-    Some(t.kind)
+    config.target_config(target).map(|configured| configured.kind)
 }
 
 /// Find a registered tool by name — the dispatch loop's lookup (kept here,

@@ -21,15 +21,24 @@ use uuid::Uuid;
 /// always records the fully qualified form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FqTarget {
-    pub project: String,
-    pub env: String,
-    pub target: String,
+    pub(crate) project: String,
+    pub(crate) env: String,
+    pub(crate) target: String,
     /// Present when addressing a target-owned resource (postgres, rabbitmq…).
-    pub resource: Option<(ResourceType, String)>,
+    pub(crate) resource: Option<(ResourceType, String)>,
 }
 
 impl FqTarget {
-    pub fn new(
+    pub fn try_new(
+        project: impl Into<String>,
+        env: impl Into<String>,
+        target: impl Into<String>,
+    ) -> crate::Result<Self> {
+        let candidate = FqTarget::new(project, env, target);
+        FqTarget::parse(&candidate.to_string())
+    }
+
+    pub(crate) fn new(
         project: impl Into<String>,
         env: impl Into<String>,
         target: impl Into<String>,
@@ -37,9 +46,30 @@ impl FqTarget {
         FqTarget { project: project.into(), env: env.into(), target: target.into(), resource: None }
     }
 
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+
+    pub fn environment(&self) -> &str {
+        &self.env
+    }
+
+    pub fn target_name(&self) -> &str {
+        &self.target
+    }
+
+    pub fn resource(&self) -> Option<(ResourceType, &str)> {
+        self.resource.as_ref().map(|(kind, name)| (*kind, name.as_str()))
+    }
+
     /// Parse `project::env::target` or `project::env::target::rtype::name`.
     pub fn parse(s: &str) -> crate::Result<Self> {
         let parts: Vec<&str> = s.split("::").collect();
+        if parts.iter().any(|part| part.trim().is_empty() || part.contains('/')) {
+            return Err(crate::Error::Config(format!(
+                "target path segments must be non-empty and contain no '/': {s}"
+            )));
+        }
         match parts.as_slice() {
             [p, e, t] => Ok(FqTarget::new(*p, *e, *t)),
             [p, e, t, rt, name] => {
@@ -75,11 +105,21 @@ pub enum TargetKind {
     Cloud { provider: CloudProvider, region: Option<String> },
 }
 
+/// Kubernetes authorization boundary represented by a target. Credentials
+/// must enforce the same boundary; this value lets tools and executors fail
+/// closed before asking the API server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "name")]
+pub enum KubernetesScope {
+    Namespace(String),
+    Cluster,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CloudProvider {
     Azure,
-    // Provider-pluggable by design (remundo has a Scaleway plan on file).
+    // Provider-pluggable by design (example has a Scaleway plan on file).
     Scaleway,
 }
 
@@ -183,7 +223,7 @@ impl fmt::Display for RiskClass {
 }
 
 /// Expected state of a target/environment — intentional states must not page
-/// (remundo's sandbox cluster is normally stopped and wiped monthly).
+/// (example's sandbox cluster is normally stopped and wiped monthly).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExpectedState {
@@ -318,11 +358,11 @@ mod tests {
 
     #[test]
     fn fq_target_roundtrip() {
-        let t = FqTarget::parse("remundo::prod::cluster").unwrap();
-        assert_eq!(t.to_string(), "remundo::prod::cluster");
-        let r = FqTarget::parse("remundo::prod::cluster::elasticsearch::logs").unwrap();
+        let t = FqTarget::parse("example::prod::cluster").unwrap();
+        assert_eq!(t.to_string(), "example::prod::cluster");
+        let r = FqTarget::parse("example::prod::cluster::elasticsearch::logs").unwrap();
         assert_eq!(r.resource, Some((ResourceType::Elasticsearch, "logs".into())));
-        assert_eq!(r.to_string(), "remundo::prod::cluster::elasticsearch::logs");
+        assert_eq!(r.to_string(), "example::prod::cluster::elasticsearch::logs");
         assert!(FqTarget::parse("just-a-name").is_err());
         assert!(FqTarget::parse("a::b::c::not_a_resource::x").is_err());
     }

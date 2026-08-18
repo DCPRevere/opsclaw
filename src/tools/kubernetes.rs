@@ -144,6 +144,29 @@ fn risk_for(action: &str) -> RiskClass {
     }
 }
 
+fn constrain_scope<'a>(
+    namespace: Option<&'a str>,
+    all_namespaces: bool,
+    scope: Option<&'a crate::domain::KubernetesScope>,
+) -> Result<(Option<&'a str>, bool), ToolError> {
+    let Some(crate::domain::KubernetesScope::Namespace(expected)) = scope else {
+        return Ok((namespace, all_namespaces));
+    };
+    if all_namespaces {
+        return Err(ToolError::UserFacing(format!(
+            "target is scoped to namespace {expected:?}; all_namespaces would cross that boundary"
+        )));
+    }
+    if let Some(actual) = namespace
+        && actual != expected
+    {
+        return Err(ToolError::UserFacing(format!(
+            "target is scoped to namespace {expected:?}, not {actual:?}"
+        )));
+    }
+    Ok((Some(expected.as_str()), false))
+}
+
 #[async_trait]
 impl Tool for KubernetesTool {
     fn name(&self) -> &'static str {
@@ -198,11 +221,23 @@ impl Tool for KubernetesTool {
         })?;
         let resource = args["resource"].as_str();
         let name = args["name"].as_str();
-        let namespace = args["namespace"].as_str();
-        let all_namespaces = args["all_namespaces"].as_bool().unwrap_or(false);
+        let requested_namespace = args["namespace"].as_str();
+        let requested_all_namespaces = args["all_namespaces"].as_bool().unwrap_or(false);
         let hypothesis = args["hypothesis"].as_str().map(str::to_string);
+        let target = ctx.resolve_target_for(
+            target_str,
+            self.name(),
+            &[crate::config::TargetKindName::Kubernetes],
+        )?;
+        let scope = ctx
+            .config
+            .as_ref()
+            .and_then(|config| config.target_config(&target))
+            .and_then(|configured| configured.kubernetes.as_ref())
+            .map(|kubernetes| kubernetes.scope());
+        let (namespace, all_namespaces) =
+            constrain_scope(requested_namespace, requested_all_namespaces, scope.as_ref())?;
         let command = compose(action, resource, name, namespace, all_namespaces)?;
-        let target = ctx.resolve_target(target_str)?;
         run_command(ctx, self.name(), target, command, risk_for(action), hypothesis).await
     }
 }
@@ -216,7 +251,7 @@ mod tests {
     use std::sync::Arc;
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "cluster")
+        FqTarget::new("example", "prod", "cluster")
     }
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
@@ -239,7 +274,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         KubernetesTool
-            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "get", "resource": "pods", "namespace": "prod"}))
+            .call(&ctx, json!({"target": "example::prod::cluster", "action": "get", "resource": "pods", "namespace": "prod"}))
             .await
             .unwrap();
         let seen = policy.seen.lock().unwrap();
@@ -253,7 +288,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         KubernetesTool
-            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "logs", "name": "api-7d8f", "namespace": "prod"}))
+            .call(&ctx, json!({"target": "example::prod::cluster", "action": "logs", "name": "api-7d8f", "namespace": "prod"}))
             .await
             .unwrap();
         assert_eq!(policy.seen.lock().unwrap()[0].command, "logs api-7d8f --tail=200 -n prod");
@@ -264,7 +299,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         KubernetesTool
-            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "rollout_restart", "resource": "deploy/api"}))
+            .call(&ctx, json!({"target": "example::prod::cluster", "action": "rollout_restart", "resource": "deploy/api"}))
             .await
             .unwrap();
         let seen = policy.seen.lock().unwrap();
@@ -277,7 +312,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = KubernetesTool
-            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "rollout_restart", "resource": "api"}))
+            .call(&ctx, json!({"target": "example::prod::cluster", "action": "rollout_restart", "resource": "api"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
@@ -289,7 +324,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         KubernetesTool
-            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "delete_pod", "name": "api-7d8f"}))
+            .call(&ctx, json!({"target": "example::prod::cluster", "action": "delete_pod", "name": "api-7d8f"}))
             .await
             .unwrap();
         assert_eq!(policy.seen.lock().unwrap()[0].declared_risk, RiskClass::High);
@@ -300,7 +335,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         KubernetesTool
-            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "get", "resource": "pods", "all_namespaces": true}))
+            .call(&ctx, json!({"target": "example::prod::cluster", "action": "get", "resource": "pods", "all_namespaces": true}))
             .await
             .unwrap();
         let seen = policy.seen.lock().unwrap();
@@ -314,13 +349,13 @@ mod tests {
         let ctx = ctx_with(policy.clone());
         // logs -A is not a kubectl thing; the pod's namespace is required.
         let err = KubernetesTool
-            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "logs", "name": "api-7d8f", "all_namespaces": true}))
+            .call(&ctx, json!({"target": "example::prod::cluster", "action": "logs", "name": "api-7d8f", "all_namespaces": true}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
         // Both a namespace and -A is a contradiction, not a preference.
         let err = KubernetesTool
-            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "get", "resource": "pods", "namespace": "prod", "all_namespaces": true}))
+            .call(&ctx, json!({"target": "example::prod::cluster", "action": "get", "resource": "pods", "namespace": "prod", "all_namespaces": true}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
@@ -335,7 +370,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = KubernetesTool
-            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "get", "resource": "pods", "namespace": "all-namespaces"}))
+            .call(&ctx, json!({"target": "example::prod::cluster", "action": "get", "resource": "pods", "namespace": "all-namespaces"}))
             .await
             .unwrap_err();
         match err {
@@ -345,12 +380,20 @@ mod tests {
         assert!(policy.seen.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn namespace_scope_rejects_dev_to_prod_and_cluster_sweeps() {
+        let scope = crate::domain::KubernetesScope::Namespace("dev".into());
+        assert!(constrain_scope(Some("prod"), false, Some(&scope)).is_err());
+        assert!(constrain_scope(None, true, Some(&scope)).is_err());
+        assert_eq!(constrain_scope(None, false, Some(&scope)).unwrap(), (Some("dev"), false));
+    }
+
     #[tokio::test]
     async fn resource_with_injection_attempt_is_rejected() {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = KubernetesTool
-            .call(&ctx, json!({"target": "remundo::prod::cluster", "action": "get", "resource": "pods; rm -rf /"}))
+            .call(&ctx, json!({"target": "example::prod::cluster", "action": "get", "resource": "pods; rm -rf /"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));

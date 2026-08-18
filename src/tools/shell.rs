@@ -31,7 +31,7 @@ impl Tool for ShellTool {
         json!({
             "type": "object",
             "properties": {
-                "target": {"type": "string", "description": "fully-qualified local target, e.g. remundo::prod::bastion"},
+                "target": {"type": "string", "description": "fully-qualified local target, e.g. example::prod::bastion"},
                 "command": {"type": "string", "description": "the exact shell command to run"},
                 "hypothesis": {"type": "string", "description": "why you're running this command"}
             },
@@ -59,7 +59,11 @@ impl Tool for ShellTool {
             ToolError::UserFacing("shell requires a \"command\" argument".to_string())
         })?;
         let hypothesis = args["hypothesis"].as_str().map(str::to_string);
-        let target = ctx.resolve_target(target_str)?;
+        let target = ctx.resolve_target_for(
+            target_str,
+            self.name(),
+            &[crate::config::TargetKindName::Local],
+        )?;
         run_command(ctx, self.name(), target, command.to_string(), self.risk(), hypothesis).await
     }
 }
@@ -73,7 +77,7 @@ mod tests {
     use std::sync::Arc;
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "bastion")
+        FqTarget::new("example", "prod", "bastion")
     }
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
@@ -96,7 +100,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, "ok"));
         let ctx = ctx_with(policy.clone());
         ShellTool
-            .call(&ctx, json!({"target": "remundo::prod::bastion", "command": "df -h"}))
+            .call(&ctx, json!({"target": "example::prod::bastion", "command": "df -h"}))
             .await
             .unwrap();
         let seen = policy.seen.lock().unwrap();

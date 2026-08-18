@@ -77,7 +77,11 @@ impl Tool for MonitorTool {
             ToolError::UserFacing("monitor requires a \"view\" argument".to_string())
         })?;
         let command = command_for(view)?;
-        let target = ctx.resolve_target(target_str)?;
+        let target = ctx.resolve_target_for(
+            target_str,
+            self.name(),
+            &[crate::config::TargetKindName::Ssh, crate::config::TargetKindName::Local],
+        )?;
         run_command(ctx, self.name(), target, command.to_string(), self.risk(), None).await
     }
 }
@@ -91,7 +95,7 @@ mod tests {
     use std::sync::Arc;
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
@@ -114,7 +118,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         MonitorTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "view": "disk"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "view": "disk"}))
             .await
             .unwrap();
         assert_eq!(policy.seen.lock().unwrap()[0].command, "df -P");
@@ -125,7 +129,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         MonitorTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "view": "mem"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "view": "mem"}))
             .await
             .unwrap();
         assert_eq!(policy.seen.lock().unwrap()[0].command, "free -m");
@@ -136,12 +140,12 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         MonitorTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "view": "cpu"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "view": "cpu"}))
             .await
             .unwrap();
         assert!(policy.seen.lock().unwrap()[0].command.starts_with("top"));
         MonitorTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "view": "proc"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "view": "proc"}))
             .await
             .unwrap();
         assert!(policy.seen.lock().unwrap()[1].command.starts_with("ps"));
@@ -152,7 +156,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = MonitorTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "view": "network"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "view": "network"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));

@@ -79,7 +79,11 @@ impl Tool for FirewallTool {
             ToolError::UserFacing("firewall requires an \"action\" argument".to_string())
         })?;
         let command = compose(action)?;
-        let target = ctx.resolve_target(target_str)?;
+        let target = ctx.resolve_target_for(
+            target_str,
+            self.name(),
+            &[crate::config::TargetKindName::Ssh, crate::config::TargetKindName::Local],
+        )?;
         run_command(ctx, self.name(), target, command.to_string(), self.risk(), None).await
     }
 }
@@ -93,7 +97,7 @@ mod tests {
     use std::sync::Arc;
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
@@ -107,7 +111,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, "Chain INPUT"));
         let ctx = ctx_with(policy.clone());
         FirewallTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "status"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "action": "status"}))
             .await
             .unwrap();
         let seen = policy.seen.lock().unwrap();
@@ -121,7 +125,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = FirewallTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "flush"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "action": "flush"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));

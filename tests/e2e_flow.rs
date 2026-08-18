@@ -929,9 +929,12 @@ async fn status_reports_last_tick_and_per_target_scan_state() {
 
     // One seeded-style per-target scan job plus one operator-authored job.
     let scan = Job::new(
-        "remundo::prod::web-1-scan",
+        "example::prod::web-1-scan",
         Schedule::Interval { every_minutes: 5 },
-        Payload::ScanRoutine { routine: "record_scan".into() },
+        Payload::ScanRoutine {
+            routine: "record_scan".into(),
+            target: Some(opsclaw::domain::FqTarget::try_new("example", "prod", "web-1").unwrap()),
+        },
     )
     .system();
     JobRepo::insert(&*state.repos, &scan).await.unwrap();
@@ -964,7 +967,7 @@ async fn status_reports_last_tick_and_per_target_scan_state() {
     assert_eq!(jobs.len(), 2);
     assert_eq!(jobs[0]["name"], "disk-report");
     assert_eq!(jobs[0]["kind"], "prompt");
-    assert_eq!(jobs[1]["name"], "remundo::prod::web-1-scan");
+    assert_eq!(jobs[1]["name"], "example::prod::web-1-scan");
     assert_eq!(jobs[1]["kind"], "scan_routine");
     assert_eq!(jobs[1]["enabled"], true);
     assert_eq!(jobs[1]["system"], true);
@@ -1023,7 +1026,7 @@ async fn audit_verify_spans_multiple_pages_of_an_intact_chain() {
         writer
             .append(
                 &opsclaw::domain::Principal::System,
-                "remundo::prod::web-1",
+                "example::prod::web-1",
                 "ssh",
                 &format!("uptime # {i}"),
                 opsclaw::domain::RiskClass::Read,
@@ -1124,7 +1127,7 @@ fn pagerduty_fixture(event_type: &str) -> String {
                 "title": "High error rate on web-1",
                 "status": "triggered",
                 "urgency": "high",
-                "service": { "id": "PSVC01", "summary": "remundo prod" }
+                "service": { "id": "PSVC01", "summary": "example prod" }
             }
         }
     })
@@ -1519,7 +1522,7 @@ async fn config_read_never_contains_secret_values() {
 /// so the whole thing passes `validate()`).
 const EDITABLE_SEED: &str = r#"
 [[project]]
-name = "remundo"
+name = "example"
 [[project.env]]
 name = "prod"
 [[project.env.target]]
@@ -1561,7 +1564,7 @@ async fn config_edit_rejects_invalid_and_leaves_the_file_untouched() {
         .put(format!("{base}/api/config/escalation"))
         .header("Cookie", &cookie)
         .json(&serde_json::json!({
-            "project": "remundo",
+            "project": "example",
             "steps": [{ "contact": "web", "ack_timeout_minutes": 10, "repeat_interval_minutes": 10 }]
         }))
         .send()
@@ -1586,7 +1589,7 @@ async fn config_edit_autonomy_requires_confirm_auto() {
         .client
         .put(format!("{base}/api/config/autonomy"))
         .header("Cookie", &cookie)
-        .json(&serde_json::json!({ "project": "remundo", "env": "prod", "autonomy": "auto" }))
+        .json(&serde_json::json!({ "project": "example", "env": "prod", "autonomy": "auto" }))
         .send()
         .await
         .unwrap();
@@ -1601,7 +1604,7 @@ async fn config_edit_autonomy_requires_confirm_auto() {
         .put(format!("{base}/api/config/autonomy"))
         .header("Cookie", &cookie)
         .json(&serde_json::json!({
-            "project": "remundo", "env": "prod", "autonomy": "auto", "confirm_auto": true
+            "project": "example", "env": "prod", "autonomy": "auto", "confirm_auto": true
         }))
         .send()
         .await
@@ -1609,14 +1612,14 @@ async fn config_edit_autonomy_requires_confirm_auto() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let written: opsclaw::config::Config =
         toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(written.autonomy_for("remundo", "prod", "web-1"), opsclaw::domain::Autonomy::Auto);
+    assert_eq!(written.autonomy_for("example", "prod", "web-1"), opsclaw::domain::Autonomy::Auto);
 
     // A NON-auto edit needs no confirmation; an unknown node is a 400.
     let resp = client
         .client
         .put(format!("{base}/api/config/autonomy"))
         .header("Cookie", &cookie)
-        .json(&serde_json::json!({ "project": "remundo", "autonomy": "observe" }))
+        .json(&serde_json::json!({ "project": "example", "autonomy": "observe" }))
         .send()
         .await
         .unwrap();
@@ -1654,13 +1657,13 @@ async fn config_edit_escalation_chain_round_trips() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
-    // …then a per-project override for "remundo".
+    // …then a per-project override for "example".
     let resp = client
         .client
         .put(format!("{base}/api/config/escalation"))
         .header("Cookie", &cookie)
         .json(&serde_json::json!({
-            "project": "remundo",
+            "project": "example",
             "steps": [{ "contact": "web", "ack_timeout_minutes": 15, "repeat_interval_minutes": 5 }]
         }))
         .send()
@@ -1669,11 +1672,11 @@ async fn config_edit_escalation_chain_round_trips() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
     // The file round-trips both, and the resolver honours the inheritance:
-    // remundo pages its own chain, an undeclared project the global one.
+    // example pages its own chain, an undeclared project the global one.
     let written: opsclaw::config::Config =
         toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     written.validate().unwrap();
-    assert_eq!(written.escalation_chain_for("remundo").steps[0].contact, "web");
+    assert_eq!(written.escalation_chain_for("example").steps[0].contact, "web");
     assert_eq!(written.escalation_chain_for("other").steps[0].contact, "telegram");
 
     // An empty steps list for a project REMOVES the override (back to
@@ -1683,7 +1686,7 @@ async fn config_edit_escalation_chain_round_trips() {
         .client
         .put(format!("{base}/api/config/escalation"))
         .header("Cookie", &cookie)
-        .json(&serde_json::json!({ "project": "remundo", "steps": [] }))
+        .json(&serde_json::json!({ "project": "example", "steps": [] }))
         .send()
         .await
         .unwrap();
@@ -1691,7 +1694,7 @@ async fn config_edit_escalation_chain_round_trips() {
     let written: opsclaw::config::Config =
         toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(written.projects[0].escalation.is_none());
-    assert_eq!(written.escalation_chain_for("remundo").steps[0].contact, "telegram");
+    assert_eq!(written.escalation_chain_for("example").steps[0].contact, "telegram");
 
     // Editing an unknown project's chain is a 400, not a silent create —
     // project intake stays wizard-only.

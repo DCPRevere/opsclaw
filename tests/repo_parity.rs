@@ -112,7 +112,7 @@ macro_rules! parity_tests {
 // ---- fixtures ----
 
 fn target(name: &str) -> FqTarget {
-    FqTarget::new("remundo", "prod", name)
+    FqTarget::try_new("example", "prod", name).unwrap()
 }
 
 fn incident(id: Uuid, fingerprint: &str) -> Incident {
@@ -163,7 +163,7 @@ fn audit_record(seq: i64, prev_hash: &str) -> AuditRecord {
         seq,
         ts: Utc::now(),
         principal: Principal::System,
-        fq_target: "remundo::prod::web-1".into(),
+        fq_target: "example::prod::web-1".into(),
         tool: "ssh".into(),
         command: "uptime".into(),
         risk: RiskClass::Read,
@@ -214,7 +214,7 @@ fn runbook_run(id: Uuid, runbook_name: &str, success: bool) -> RunbookRun {
     RunbookRun {
         id,
         runbook: runbook_name.into(),
-        target: opsclaw::domain::FqTarget::new("remundo", "prod", "web-1"),
+        target: opsclaw::domain::FqTarget::try_new("example", "prod", "web-1").unwrap(),
         principal: Some(Principal::System),
         started_at: Utc::now(),
         finished_at: Some(Utc::now()),
@@ -657,22 +657,22 @@ control_estop_toggles => |db| {
 control_claim_is_exactly_once_under_sequential_reclaim => |db| {
     let now = Utc::now();
     // First claim of this (kind, key) wins.
-    assert!(db.claim("scan", "remundo::prod::cluster:2026-07-21T10:00", now).await.unwrap());
+    assert!(db.claim("scan", "example::prod::cluster:2026-07-21T10:00", now).await.unwrap());
     // Every subsequent claim of the SAME (kind, key) — even much later —
     // must lose: exactly-once is per-occurrence, not per-instant.
-    assert!(!db.claim("scan", "remundo::prod::cluster:2026-07-21T10:00", now).await.unwrap());
+    assert!(!db.claim("scan", "example::prod::cluster:2026-07-21T10:00", now).await.unwrap());
     assert!(
         !db.claim(
             "scan",
-            "remundo::prod::cluster:2026-07-21T10:00",
+            "example::prod::cluster:2026-07-21T10:00",
             now + chrono::Duration::hours(1)
         )
         .await
         .unwrap()
     );
     // A DIFFERENT key (different occurrence, or different kind) is unaffected.
-    assert!(db.claim("scan", "remundo::prod::cluster:2026-07-21T10:05", now).await.unwrap());
-    assert!(db.claim("digest", "remundo::prod::cluster:2026-07-21T10:00", now).await.unwrap());
+    assert!(db.claim("scan", "example::prod::cluster:2026-07-21T10:05", now).await.unwrap());
+    assert!(db.claim("digest", "example::prod::cluster:2026-07-21T10:00", now).await.unwrap());
 }
 
 approval_past_its_deadline_is_undecidable => |db| {
@@ -716,11 +716,11 @@ control_prune_housekeeping_is_ok => |db| {
 // ---- Jobs ----
 
 job_insert_get_list => |db| {
-    let j = job("remundo-scan");
+    let j = job("example-scan");
     JobRepo::insert(db, &j).await.unwrap();
 
     let got = JobRepo::get(db, j.id).await.unwrap().unwrap();
-    assert_eq!(got.name, "remundo-scan");
+    assert_eq!(got.name, "example-scan");
     assert_eq!(got.version, 0);
 
     assert!(JobRepo::get(db, Uuid::new_v4()).await.unwrap().is_none());

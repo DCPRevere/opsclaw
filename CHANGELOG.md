@@ -6,6 +6,37 @@ release out.
 
 ## v0.3.0
 
+### Target boundaries are enforced end to end
+
+Seeded scans now persist their exact target and receive only that target and
+its resources in tool context. Existing seeded rows are bound automatically
+at startup. Tool/target compatibility is checked both at tool resolution and
+again before policy classification, and policy classifies the canonical line
+the selected executor will actually run.
+
+Kubernetes targets now declare a required context and an explicit namespace
+or cluster scope. Namespace targets reject other namespaces and cluster-wide
+flags in both the structured tool and executor. The standard image includes a
+checksum-verified kubectl client.
+
+**Deploying** — replace a Kubernetes target's old `address = "<context>"`
+with an explicit block. Use one of:
+
+```toml
+[project.env.target.kubernetes]
+context = "my-context"
+namespace = "dev"
+```
+
+```toml
+[project.env.target.kubernetes]
+context = "my-context"
+cluster_scoped = true
+```
+
+This release changes the embedded scan prompt, so running daemons need the new
+binary/image before the target isolation behavior is active.
+
 ### Spend, scheduler retirement, and the CLI are operable
 
 `opsclaw-cli usage` and daemon status now show today's OpsClaw spend,

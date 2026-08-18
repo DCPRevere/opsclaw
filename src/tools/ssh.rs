@@ -32,7 +32,7 @@ impl Tool for SshTool {
         json!({
             "type": "object",
             "properties": {
-                "target": {"type": "string", "description": "fully-qualified target, e.g. remundo::prod::web-1"},
+                "target": {"type": "string", "description": "fully-qualified target, e.g. example::prod::web-1"},
                 "command": {"type": "string", "description": "the exact shell command to run"},
                 "hypothesis": {"type": "string", "description": "why you're running this command"}
             },
@@ -67,7 +67,8 @@ impl Tool for SshTool {
             ToolError::UserFacing("ssh requires a \"command\" argument".to_string())
         })?;
         let hypothesis = args["hypothesis"].as_str().map(str::to_string);
-        let target = ctx.resolve_target(target_str)?;
+        let target =
+            ctx.resolve_target_for(target_str, self.name(), &[crate::config::TargetKindName::Ssh])?;
         run_command(ctx, self.name(), target, command.to_string(), self.risk(), hypothesis).await
     }
 }
@@ -81,7 +82,7 @@ mod tests {
     use std::sync::Arc;
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
@@ -104,7 +105,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, "up 5 days"));
         let ctx = ctx_with(policy.clone());
         SshTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "command": "uptime", "hypothesis": "check load"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "command": "uptime", "hypothesis": "check load"}))
             .await
             .unwrap();
 
@@ -126,7 +127,7 @@ mod tests {
         match err {
             ToolError::UserFacing(msg) => {
                 assert!(msg.contains("unknown target"));
-                assert!(msg.contains("remundo::prod::web-1"));
+                assert!(msg.contains("example::prod::web-1"));
             }
             _ => panic!("expected UserFacing"),
         }
@@ -136,7 +137,7 @@ mod tests {
     async fn missing_command_argument_is_user_facing() {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy);
-        let err = SshTool.call(&ctx, json!({"target": "remundo::prod::web-1"})).await.unwrap_err();
+        let err = SshTool.call(&ctx, json!({"target": "example::prod::web-1"})).await.unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
     }
 

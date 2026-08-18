@@ -109,7 +109,7 @@ cli/         clap; wizards; every read command takes --json
   policy wouldn't allow it anyway.
 - **Environment scepticism** is a standing prompt + eval requirement:
   corroborate, never trust a single signal — an app health endpoint may
-  prove only that the process loop is alive (remundo's TinyHealthCheck
+  prove only that the process loop is alive (example's TinyHealthCheck
   checks no downstream connectivity), `df` lies under gVisor bind mounts
   (brief §9), and a green namespace is not an isolated environment when
   staging and prod share a cluster.
@@ -268,7 +268,7 @@ This is the heartbeat, and gianna's scheduler is almost exactly the brief's
   daemon's origin; and the cert must be trusted by the *phone*, ruling out
   internal-CA certs in practice.
 - Reaching the UI: VPN/tailnet or SSH tunnel (`opsclaw ui` opens tunnel +
-  browser), like any internal ops UI (remundo reaches ArgoCD/Grafana behind
+  browser), like any internal ops UI (example reaches ArgoCD/Grafana behind
   the jumpbox). Because push needs a secure context with a
   publicly-trusted cert, the install guide treats **TLS as the norm**, with
   Tailscale on operators' phones as the golden path (trusted `ts.net`
@@ -291,7 +291,7 @@ This is the heartbeat, and gianna's scheduler is almost exactly the brief's
   `max_actions_per_hour`, an autonomy level that doesn't parse (must not
   default to anything but `observe`), a target with no credential ref.
 - Targets and environments can declare `expected_state` (`running` /
-  `stopped` / `ephemeral`): remundo's sandbox cluster is normally stopped
+  `stopped` / `ephemeral`): example's sandbox cluster is normally stopped
   (its API FQDN goes NXDOMAIN — a state, not an outage) and is wiped
   monthly. Intentional states must not page.
 - Secrets are referenced by name in config (`env:VAR` or a key in the
@@ -391,14 +391,17 @@ Tools compose on executors; the fq target path is resolved and authorized by
 the dispatcher, never trusted from model output (gianna's DATA boundary:
 tenancy ids are positional trusted arguments, never model-supplied).
 
-The ssh executor supports jump hosts (remundo's estate sits behind an Azure
-Bastion jumpbox). One physical system may back two environments — remundo's
+The ssh executor supports jump hosts (example's estate sits behind an Azure
+Bastion jumpbox). One physical system may back two environments — example's
 staging and prod are namespaces on one AKS cluster — modelled as **two
 Targets with distinct namespace-scoped credentials** (separate
 ServiceAccount kubeconfigs): invariant #1 (one target = one credential set =
 one audit identity) is preserved by credential scoping, and environment
-isolation is exactly as real as that scoping makes it. Keep the `cloud`
-target type provider-pluggable — remundo has a Scaleway migration plan on
+isolation is exactly as real as that scoping makes it. Each Kubernetes target
+also declares its context and either one namespace or explicit cluster scope;
+the tool and executor enforce that boundary before the API server's RBAC gets
+a second chance to refuse it. Keep the `cloud`
+target type provider-pluggable — example has a Scaleway migration plan on
 file; Azure must be a provider, not the architecture.
 
 ### Tool surface (`tools/`)
@@ -446,11 +449,11 @@ renamed `elasticsearch` for what it actually talks to.
 
 v1 ships the executor-backed set + `kubernetes` +
 notify/config/memory/generic, plus the endpoint-backed tools the reference
-deployment (remundo — see `docs/REMUNDO.md`) actually needs:
-`elasticsearch` (read models *and* logs — remundo ships logs via Filebeat
+deployment (example — see `docs/REFERENCE.md`) actually needs:
+`elasticsearch` (read models *and* logs — example ships logs via Filebeat
 into ES, so log search is an ES query and `loki` stays a stub),
 `azure_service_bus` (DLQ depth/peek is daily on-call work), `eventstore`
-(KurrentDB — remundo's system of record; two of its nine real postmortems),
+(KurrentDB — example's system of record; two of its nine real postmortems),
 `prometheus`, and `argocd` (sync status read-only; rollback as a gated
 mutation — in a GitOps shop remediation is a revert/rollback, not `kubectl
 apply`). The remaining provider tools stay stubs behind the trait until
@@ -551,7 +554,7 @@ separate mock layer to drift.
    tools in v1: `elasticsearch`, `azure_service_bus`, `eventstore`
    (KurrentDB), `prometheus`, `argocd`; other provider tools (postgres,
    cloudflare, github, loki, ...) remain trait stubs. Rationale:
-   `docs/REMUNDO.md`.
+   `docs/REFERENCE.md`.
 8. **Web-UI auth: gianna-style accounts** (argon2 + JWT + invites) — now the
    `local` provider (decision 16); the operator roster lives in the DB and is
    the principal for approvals/audit under every provider.
@@ -565,7 +568,7 @@ separate mock layer to drift.
     binary, one per team, internal-only; opsclaw.io is a separate static
     marketing/docs/downloads site. No hosted console into deployments.
 12. **Placement: adjacent by default, in-cluster supported.** The reference
-    deployment is remundo (`~/src/remundo` — k8s + Azure + Elasticsearch),
+    deployment is example (`~/src/example` — k8s + Azure + Elasticsearch),
     where opsclaw runs on their existing bastion; the Helm chart exists for
     teams that want in-cluster, where the external heartbeat is mandatory.
 13. **Shipped LLM default: OpenRouter only** — one provider with its

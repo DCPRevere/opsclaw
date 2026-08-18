@@ -42,6 +42,8 @@ pub struct TargetView {
     pub name: String,
     pub kind: String,
     pub address: Option<String>,
+    pub kubernetes_context: Option<String>,
+    pub kubernetes_scope: Option<String>,
     pub jump_host: Option<String>,
     pub provider: Option<String>,
     pub region: Option<String>,
@@ -108,6 +110,16 @@ pub fn inventory(cfg: &Config) -> Vec<ProjectView> {
                                 name: t.name.clone(),
                                 kind: format!("{:?}", t.kind).to_lowercase(),
                                 address: t.address.clone(),
+                                kubernetes_context: t
+                                    .kubernetes
+                                    .as_ref()
+                                    .map(|kubernetes| kubernetes.context.clone()),
+                                kubernetes_scope: t.kubernetes.as_ref().map(|kubernetes| {
+                                    match &kubernetes.namespace {
+                                        Some(namespace) => format!("namespace:{namespace}"),
+                                        None => "cluster".to_string(),
+                                    }
+                                }),
                                 jump_host: t.jump_host.clone(),
                                 provider: t.provider.map(|pr| format!("{pr:?}").to_lowercase()),
                                 region: t.region.clone(),
@@ -200,6 +212,12 @@ pub fn render(projects: &[ProjectView]) -> String {
                 };
                 if let Some(a) = &t.address {
                     field("address", a);
+                }
+                if let Some(context) = &t.kubernetes_context {
+                    field("context", context);
+                }
+                if let Some(scope) = &t.kubernetes_scope {
+                    field("k8s scope", scope);
                 }
                 if let Some(j) = &t.jump_host {
                     field("jump host", j);
@@ -387,7 +405,7 @@ mod tests {
         let cfg = parse(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             autonomy = "observe"
             [[project.env]]
             name = "prod"
@@ -480,7 +498,7 @@ mod tests {
         let cfg = parse(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             [[project.env]]
             name = "dev"
             "#,
@@ -500,7 +518,7 @@ mod tests {
         let cfg = parse(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             [[project.env]]
             name = "prod"
             expected_state = "stopped"
@@ -530,7 +548,7 @@ mod tests {
 
     const TWO_PROJECTS: &str = r#"
         [[project]]
-        name = "remundo"
+        name = "example"
         autonomy = "observe"
         [[project.env]]
         name = "dev"
@@ -570,16 +588,16 @@ mod tests {
         let cfg = parse(TWO_PROJECTS);
 
         assert_eq!(
-            paths_in(&filter(inventory(&cfg), &[sel("remundo")])),
-            ["remundo::dev::web-1", "remundo::dev::web-2", "remundo::prod::db-1"]
+            paths_in(&filter(inventory(&cfg), &[sel("example")])),
+            ["example::dev::web-1", "example::dev::web-2", "example::prod::db-1"]
         );
         assert_eq!(
-            paths_in(&filter(inventory(&cfg), &[sel("remundo::dev")])),
-            ["remundo::dev::web-1", "remundo::dev::web-2"]
+            paths_in(&filter(inventory(&cfg), &[sel("example::dev")])),
+            ["example::dev::web-1", "example::dev::web-2"]
         );
         assert_eq!(
-            paths_in(&filter(inventory(&cfg), &[sel("remundo::dev::web-2")])),
-            ["remundo::dev::web-2"]
+            paths_in(&filter(inventory(&cfg), &[sel("example::dev::web-2")])),
+            ["example::dev::web-2"]
         );
         assert_eq!(paths_in(&filter(inventory(&cfg), &[])), paths_in(&inventory(&cfg)));
     }
@@ -590,8 +608,8 @@ mod tests {
         // selectors have to combine rather than the last one winning.
         let cfg = parse(TWO_PROJECTS);
         assert_eq!(
-            paths_in(&filter(inventory(&cfg), &[sel("remundo::prod"), sel("other::dev")])),
-            ["remundo::prod::db-1", "other::dev::thing"]
+            paths_in(&filter(inventory(&cfg), &[sel("example::prod"), sel("other::dev")])),
+            ["example::prod::db-1", "other::dev::thing"]
         );
     }
 
@@ -616,7 +634,7 @@ mod tests {
         assert_eq!(whole.autonomy, "observe");
         assert_eq!(whole.autonomy_from, "project");
 
-        let narrowed = filter(inventory(&cfg), &[sel("remundo::dev::web-1")]);
+        let narrowed = filter(inventory(&cfg), &[sel("example::dev::web-1")]);
         let one = &narrowed[0].envs[0].targets[0];
         assert_eq!(one.autonomy, whole.autonomy);
         assert_eq!(one.autonomy_from, whole.autonomy_from);
@@ -630,11 +648,11 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, TWO_PROJECTS).unwrap();
 
-        let err = list(&path, &["remundo::nope".to_string()]).unwrap_err().to_string();
+        let err = list(&path, &["example::nope".to_string()]).unwrap_err().to_string();
         assert!(err.contains("nothing matched"), "{err}");
-        assert!(err.contains("remundo::dev::web-1"), "must list real paths: {err}");
+        assert!(err.contains("example::dev::web-1"), "must list real paths: {err}");
 
-        assert!(list(&path, &["remundo::dev".to_string()]).is_ok());
+        assert!(list(&path, &["example::dev".to_string()]).is_ok());
     }
 
     #[test]
@@ -643,8 +661,8 @@ mod tests {
         assert!(Selector::parse("").is_err());
         assert!(Selector::parse("a::").is_err());
         assert_eq!(
-            sel(" remundo :: dev "),
-            Selector { project: "remundo".into(), env: Some("dev".into()), target: None },
+            sel(" example :: dev "),
+            Selector { project: "example".into(), env: Some("dev".into()), target: None },
             "whitespace around the separator is an operator typing, not a different name"
         );
     }

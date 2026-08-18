@@ -179,24 +179,36 @@ fn team_context_line(targets: &[FqTarget], config: &Config) -> Option<String> {
         return None;
     }
     // Base targets, annotated with any non-Running expected_state (DESIGN §3
-    // Config: an intentionally-stopped target must not page — remundo's
+    // Config: an intentionally-stopped target must not page — example's
     // sandbox goes NXDOMAIN when stopped, a state, not an outage; the model
     // needs to KNOW that to reason correctly, and to flag the inverse
     // anomaly: an expected-stopped target that is actually up).
     let names: Vec<String> = targets
         .iter()
         .filter(|t| t.resource.is_none())
-        .map(|t| match config.expected_state_for(&t.project, &t.env, &t.target) {
-            ExpectedState::Running => t.to_string(),
-            ExpectedState::Stopped => format!(
-                "{t} [EXPECTED STOPPED — unreachable/NXDOMAIN is its normal state, not an \
-                     outage; do not open an incident for it being down, DO flag it if found \
-                     running]"
-            ),
-            ExpectedState::Ephemeral => format!(
-                "{t} [EPHEMERAL — created and wiped routinely; absence or reset is normal, \
-                     not an incident]"
-            ),
+        .map(|t| {
+            let mut label = match config.expected_state_for(&t.project, &t.env, &t.target) {
+                ExpectedState::Running => t.to_string(),
+                ExpectedState::Stopped => format!(
+                    "{t} [EXPECTED STOPPED — unreachable/NXDOMAIN is its normal state, not an \
+                         outage; do not open an incident for it being down, DO flag it if found \
+                         running]"
+                ),
+                ExpectedState::Ephemeral => format!(
+                    "{t} [EPHEMERAL — created and wiped routinely; absence or reset is normal, \
+                         not an incident]"
+                ),
+            };
+            if let Some(kubernetes) =
+                config.target_config(t).and_then(|target| target.kubernetes.as_ref())
+            {
+                let scope = match &kubernetes.namespace {
+                    Some(namespace) => format!("namespace {namespace}"),
+                    None => "cluster-wide".to_string(),
+                };
+                label.push_str(&format!(" [KUBERNETES SCOPE: {scope}]"));
+            }
+            label
         })
         .collect();
     if names.is_empty() {
@@ -759,7 +771,7 @@ mod tests {
         Config {
             daemon: DaemonCfg { runbooks_dir: "/does/not/exist".into(), ..Default::default() },
             projects: vec![ProjectCfg {
-                name: "remundo".into(),
+                name: "example".into(),
                 autonomy: None,
                 escalation: None,
                 envs: vec![EnvCfg {
@@ -775,6 +787,7 @@ mod tests {
                         expected_state: None,
                         credential: None,
                         address: None,
+                        kubernetes: None,
                         jump_host: None,
                         ssh_port: None,
                         ssh_user: None,
@@ -870,12 +883,12 @@ mod tests {
     async fn scan_job_notify_opens_exactly_one_incident_with_a_fingerprint() {
         let mut scripted = ScriptedLlm::new();
         scripted
-            .push_tool_call("monitor", json!({"target": "remundo::prod::web-1", "view": "disk"}))
+            .push_tool_call("monitor", json!({"target": "example::prod::web-1", "view": "disk"}))
             .push_tool_call(
                 "opsclaw_notify",
                 json!({
                     "severity": "critical",
-                    "target": "remundo::prod::web-1",
+                    "target": "example::prod::web-1",
                     "fault_class": "resource_saturation",
                     "resource": "",
                     "evidence": "disk at 98%",
@@ -891,17 +904,17 @@ mod tests {
 
         let composer = AgentJobComposer::new(deps);
         let job = Job::new(
-            "remundo::prod::web-1-scan",
+            "example::prod::web-1-scan",
             crate::domain::Schedule::Interval { every_minutes: 5 },
             Payload::ScanRoutine {
                 routine: "record_scan".into(),
-                target: Some(FqTarget::new("remundo", "prod", "web-1")),
+                target: Some(FqTarget::new("example", "prod", "web-1")),
             },
         )
         .system();
 
         let body = composer
-            .compose(&job, "Scan remundo::prod::web-1 for anomalies.", Utc::now())
+            .compose(&job, "Scan example::prod::web-1 for anomalies.", Utc::now())
             .await
             .unwrap();
         assert!(body.is_some(), "a real reply must be composed");
@@ -938,7 +951,7 @@ mod tests {
         let channel = Arc::new(RecordingChannel::new());
         let ingest = WebhookIngest::new(deps, channel.clone());
 
-        let payload = json!({"alertname": "HighCPU", "instance": "remundo::prod::web-1"});
+        let payload = json!({"alertname": "HighCPU", "instance": "example::prod::web-1"});
         ingest.ingest("alertmanager", &payload).await.unwrap();
 
         let sent = channel.sent();
@@ -1036,11 +1049,11 @@ mod tests {
         let deps = test_deps(llm, policy);
         let composer = AgentJobComposer::new(deps);
         let job = Job::new(
-            "remundo::prod::web-1-scan",
+            "example::prod::web-1-scan",
             crate::domain::Schedule::Interval { every_minutes: 5 },
             Payload::ScanRoutine {
                 routine: "record_scan".into(),
-                target: Some(FqTarget::new("remundo", "prod", "web-1")),
+                target: Some(FqTarget::new("example", "prod", "web-1")),
             },
         )
         .system();
@@ -1067,7 +1080,7 @@ mod tests {
     fn known_targets_from_config_includes_base_and_resource_qualified() {
         let config = test_config();
         let targets = known_targets_from_config(&config);
-        assert!(targets.iter().any(|t| t.to_string() == "remundo::prod::web-1"));
+        assert!(targets.iter().any(|t| t.to_string() == "example::prod::web-1"));
         assert!(targets.iter().any(|t| t.resource.is_some()));
     }
 
@@ -1081,12 +1094,12 @@ mod tests {
         let mut ctx = ToolCtx::for_tests(Principal::Agent { job: None }, policy);
         ctx.known_targets = known_targets_from_config(&config);
 
-        restrict_to_scan_target(&mut ctx, &FqTarget::new("remundo", "prod", "web-1")).unwrap();
+        restrict_to_scan_target(&mut ctx, &FqTarget::new("example", "prod", "web-1")).unwrap();
 
         assert!(ctx.known_targets.iter().all(|target| target.env == "prod"));
         assert!(ctx.known_targets.iter().any(|target| target.resource.is_none()));
         assert!(ctx.known_targets.iter().any(|target| target.resource.is_some()));
-        assert!(ctx.resolve_target("remundo::dev::web-1").is_err());
+        assert!(ctx.resolve_target("example::dev::web-1").is_err());
     }
 
     #[test]
@@ -1094,10 +1107,10 @@ mod tests {
         let config = test_config();
         let targets = known_targets_from_config(&config);
         let line = team_context_line(&targets, &config).unwrap();
-        assert!(line.contains("remundo::prod::web-1"));
+        assert!(line.contains("example::prod::web-1"));
         // Resource-qualified addresses ARE listed — the endpoint tools take
         // the full form and the model can't guess it from the base path.
-        assert!(line.contains("remundo::prod::web-1::prometheus::metrics"), "{line}");
+        assert!(line.contains("example::prod::web-1::prometheus::metrics"), "{line}");
         // Default expected_state (Running) gets no annotation noise.
         assert!(!line.contains("EXPECTED STOPPED"), "{line}");
     }
@@ -1207,7 +1220,7 @@ mod tests {
         let composer = AgentJobComposer::new(deps.clone());
         let ingest = WebhookIngest::new(deps, Arc::new(RecordingChannel::new()));
         let job = Job::new(
-            "remundo::prod::web-1-scan",
+            "example::prod::web-1-scan",
             crate::domain::Schedule::Interval { every_minutes: 5 },
             Payload::Prompt { body: "scan".into() },
         )
@@ -1276,7 +1289,7 @@ mod tests {
                 "opsclaw_notify",
                 json!({
                     "severity": "critical",
-                    "target": "remundo::prod::web-1",
+                    "target": "example::prod::web-1",
                     "fault_class": "resource_saturation",
                     "resource": "",
                     "evidence": "disk at 98%",
@@ -1288,17 +1301,17 @@ mod tests {
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let composer = AgentJobComposer::new(test_deps_with_memory(llm, policy, memory.clone()));
         let job = Job::new(
-            "remundo::prod::web-1-scan",
+            "example::prod::web-1-scan",
             crate::domain::Schedule::Interval { every_minutes: 5 },
             Payload::ScanRoutine {
                 routine: "record_scan".into(),
-                target: Some(FqTarget::new("remundo", "prod", "web-1")),
+                target: Some(FqTarget::new("example", "prod", "web-1")),
             },
         )
         .system();
 
         composer
-            .compose(&job, "Scan remundo::prod::web-1 for anomalies.", Utc::now())
+            .compose(&job, "Scan example::prod::web-1 for anomalies.", Utc::now())
             .await
             .unwrap();
 
@@ -1310,7 +1323,7 @@ mod tests {
         assert_eq!(
             contents,
             vec![
-                "scan of remundo::prod::web-1 observed: disk on web-1 at 98%; opened a critical \
+                "scan of example::prod::web-1 observed: disk on web-1 at 98%; opened a critical \
                  incident."
                     .to_string()
             ]
@@ -1329,11 +1342,11 @@ mod tests {
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let composer = AgentJobComposer::new(test_deps_with_memory(llm, policy, memory.clone()));
         let job = Job::new(
-            "remundo::prod::web-1-scan",
+            "example::prod::web-1-scan",
             crate::domain::Schedule::Interval { every_minutes: 5 },
             Payload::ScanRoutine {
                 routine: "record_scan".into(),
-                target: Some(FqTarget::new("remundo", "prod", "web-1")),
+                target: Some(FqTarget::new("example", "prod", "web-1")),
             },
         )
         .system();
@@ -1356,7 +1369,7 @@ mod tests {
             Arc::new(RecordingChannel::new()),
         );
 
-        let payload = json!({"alertname": "HighMem", "instance": "remundo::prod::web-1"});
+        let payload = json!({"alertname": "HighMem", "instance": "example::prod::web-1"});
         ingest.ingest("alertmanager", &payload).await.unwrap();
 
         // The DIAGNOSIS is retained as something the agent said; the alert
@@ -1409,7 +1422,7 @@ mod tests {
         // Finished outcomes are pinned end-to-end.
         scripted.push_tool_call(
             "monitor",
-            serde_json::json!({"target": "remundo::prod::web-1", "view": "disk"}),
+            serde_json::json!({"target": "example::prod::web-1", "view": "disk"}),
         );
         scripted.push_tool_call("probe_pods", serde_json::json!({"ns": "monitoring"}));
         scripted.push_text("all quiet");

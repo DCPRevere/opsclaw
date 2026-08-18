@@ -99,7 +99,11 @@ impl Tool for SystemdTool {
         })?;
         let hypothesis = args["hypothesis"].as_str().map(str::to_string);
         let command = compose(action, unit)?;
-        let target = ctx.resolve_target(target_str)?;
+        let target = ctx.resolve_target_for(
+            target_str,
+            self.name(),
+            &[crate::config::TargetKindName::Ssh, crate::config::TargetKindName::Local],
+        )?;
         run_command(ctx, self.name(), target, command, risk_for(action), hypothesis).await
     }
 }
@@ -113,7 +117,7 @@ mod tests {
     use std::sync::Arc;
 
     fn target() -> FqTarget {
-        FqTarget::new("remundo", "prod", "web-1")
+        FqTarget::new("example", "prod", "web-1")
     }
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
@@ -136,7 +140,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         SystemdTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "restart", "unit": "nginx.service"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "action": "restart", "unit": "nginx.service"}))
             .await
             .unwrap();
         let seen = policy.seen.lock().unwrap();
@@ -151,7 +155,7 @@ mod tests {
         SystemdTool
             .call(
                 &ctx,
-                json!({"target": "remundo::prod::web-1", "action": "status", "unit": "nginx"}),
+                json!({"target": "example::prod::web-1", "action": "status", "unit": "nginx"}),
             )
             .await
             .unwrap();
@@ -163,7 +167,7 @@ mod tests {
         let policy = Arc::new(RecordingPolicy::always_executes(0, ""));
         let ctx = ctx_with(policy.clone());
         let err = SystemdTool
-            .call(&ctx, json!({"target": "remundo::prod::web-1", "action": "restart", "unit": "nginx; rm -rf /"}))
+            .call(&ctx, json!({"target": "example::prod::web-1", "action": "restart", "unit": "nginx; rm -rf /"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UserFacing(_)));
@@ -177,7 +181,7 @@ mod tests {
         let err = SystemdTool
             .call(
                 &ctx,
-                json!({"target": "remundo::prod::web-1", "action": "reload", "unit": "nginx"}),
+                json!({"target": "example::prod::web-1", "action": "reload", "unit": "nginx"}),
             )
             .await
             .unwrap_err();

@@ -53,7 +53,15 @@ RUN cargo build --release --bin opsclaw --bin opsclaw-cli
 FROM debian:trixie-slim AS runtime
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+ARG KUBECTL_VERSION=v1.34.0
+ARG KUBECTL_AMD64_SHA256=cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -fsSLo /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+    && echo "${KUBECTL_AMD64_SHA256}  /usr/local/bin/kubectl" | sha256sum --check \
+    && chmod 0755 /usr/local/bin/kubectl \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/opsclaw /usr/local/bin/opsclaw
 COPY --from=builder /app/target/release/opsclaw-cli /usr/local/bin/opsclaw-cli

@@ -2,7 +2,7 @@
 //!
 //! A `Job` is a system-defined recurring action: a schedule plus a payload.
 //! The payload is usually a natural-language PROMPT that the agent
-//! re-interprets fresh each run (so "scan remundo prod every 5 minutes" is a
+//! re-interprets fresh each run (so "scan example prod every 5 minutes" is a
 //! row, not code). The built-in per-project scan jobs are just seeded jobs
 //! of this same machinery.
 //!
@@ -151,7 +151,7 @@ pub enum Payload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub id: Uuid,
-    /// Human name, used for "pause the remundo scan" (never an id to the operator).
+    /// Human name, used for "pause the example scan" (never an id to the operator).
     pub name: String,
     pub schedule: Schedule,
     pub payload: Payload,
@@ -270,9 +270,9 @@ mod tests {
         // A daily 8am-London job that hasn't run for days: advancing from "now"
         // should land on the NEXT future 8am, not replay the backlog.
         let mut job = Job::new(
-            "remundo-prod-morning-scan",
+            "example-prod-morning-scan",
             Schedule::Cron { expr: "0 8 * * *".into(), timezone: chrono_tz::Europe::London },
-            Payload::Prompt { body: "scan remundo prod".into() },
+            Payload::Prompt { body: "scan example prod".into() },
         );
         let now = t(10, 0); // mid-morning, today's 8am already passed
         let next = job.advance(now).unwrap();
@@ -351,18 +351,36 @@ mod tests {
 
     #[test]
     fn scan_routine_payload_does_not_snapshot_prompt() {
-        // ScanRoutine carries only the routine key, never prompt text — the
-        // resolve-from-code-constant-at-fire-time invariant (AGENTS.md).
+        // ScanRoutine carries the routine key and target identity, never
+        // prompt text — the resolve-at-fire-time invariant (AGENTS.md).
         let p = Payload::ScanRoutine {
-            routine: "remundo_default_scan".into(),
-            target: Some(crate::domain::FqTarget::new("remundo", "prod", "cluster")),
+            routine: "example_default_scan".into(),
+            target: Some(crate::domain::FqTarget::new("example", "prod", "cluster")),
         };
         let json = serde_json::to_value(&p).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "kind": "scan_routine", "body": { "routine": "remundo_default_scan" } })
+            serde_json::json!({
+                "kind": "scan_routine",
+                "body": {
+                    "routine": "example_default_scan",
+                    "target": {
+                        "project": "example",
+                        "env": "prod",
+                        "target": "cluster",
+                        "resource": null
+                    }
+                }
+            })
         );
         assert_eq!(p.kind_label(), "scan_routine");
+
+        let legacy: Payload = serde_json::from_value(serde_json::json!({
+            "kind": "scan_routine",
+            "body": { "routine": "record_scan" }
+        }))
+        .unwrap();
+        assert!(matches!(legacy, Payload::ScanRoutine { target: None, .. }));
     }
 
     #[test]

@@ -481,7 +481,7 @@ async fn compose_concurrency_is_bounded_across_a_batch_of_due_jobs() {
 async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
     let mut cfg = Config::default();
     cfg.projects.push(crate::config::ProjectCfg {
-        name: "remundo".into(),
+        name: "example".into(),
         autonomy: None,
         escalation: None,
         envs: vec![crate::config::EnvCfg {
@@ -497,6 +497,11 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
                 expected_state: None,
                 credential: Some(crate::config::SecretRef::env("X")),
                 address: None,
+                kubernetes: Some(crate::config::KubernetesTargetCfg {
+                    context: "prod-example".into(),
+                    namespace: Some("prod".into()),
+                    cluster_scoped: false,
+                }),
                 jump_host: None,
                 ssh_port: None,
                 ssh_user: None,
@@ -525,12 +530,12 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
     assert_eq!(seeded.len(), 1);
     let job = &seeded[0];
     assert!(job.system);
-    assert_eq!(job.name, "remundo::prod::cluster-scan");
+    assert_eq!(job.name, "example::prod::cluster-scan");
     let Payload::ScanRoutine { routine, target } = &job.payload else {
         panic!("seeded job must carry a ScanRoutine payload, not a snapshotted prompt");
     };
     assert_eq!(routine, jobs::RECORD_SCAN_PROMPT);
-    assert_eq!(target.as_ref().unwrap().to_string(), "remundo::prod::cluster");
+    assert_eq!(target.as_ref().unwrap().to_string(), "example::prod::cluster");
 
     // The prompt text resolves from the CODE CONST at fire/preview time —
     // never stored in the row — so editing the const (simulated here by
@@ -538,13 +543,19 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
     let resolved = resolved_prompt(&job.payload).unwrap();
     assert_eq!(resolved, jobs::system_routine_prompt(jobs::RECORD_SCAN_PROMPT).unwrap());
 
-    // Re-seeding is idempotent: no duplicate job for the same target.
+    // A row from before target binding is upgraded in place at startup.
+    let mut legacy = job.clone();
+    let Payload::ScanRoutine { target, .. } = &mut legacy.payload else { unreachable!() };
+    *target = None;
+    db.update(&legacy).await.unwrap();
     seed_default_scan_jobs(&deps, 5).await.unwrap();
-    assert_eq!(
-        db.list().await.unwrap().len(),
-        1,
-        "re-seeding must not duplicate an existing system job"
-    );
+    let rebound = db.list().await.unwrap();
+    assert_eq!(rebound.len(), 1, "re-seeding must not duplicate an existing system job");
+    assert!(matches!(
+        &rebound[0].payload,
+        Payload::ScanRoutine { target: Some(target), .. }
+            if target.to_string() == "example::prod::cluster"
+    ));
 
     // Moving the target changes its fully-qualified job identity. Reconcile
     // must seed the new path and retire the old row so it cannot keep firing.
@@ -555,18 +566,18 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
 
     let jobs = db.list().await.unwrap();
     assert_eq!(jobs.len(), 1, "the stale row must be removed, not accumulated disabled");
-    assert!(jobs.iter().all(|job| job.name != "remundo::prod::cluster-scan"));
-    let moved = jobs.iter().find(|job| job.name == "remundo::staging::cluster-scan").unwrap();
+    assert!(jobs.iter().all(|job| job.name != "example::prod::cluster-scan"));
+    let moved = jobs.iter().find(|job| job.name == "example::staging::cluster-scan").unwrap();
     assert!(moved.enabled, "the target's new path must be seeded");
 
     // Moving it back deletes staging and creates one fresh prod row.
     seed_default_scan_jobs(&deps, 5).await.unwrap();
     let jobs = db.list().await.unwrap();
     assert_eq!(jobs.len(), 1);
-    let restored = jobs.iter().find(|job| job.name == "remundo::prod::cluster-scan").unwrap();
+    let restored = jobs.iter().find(|job| job.name == "example::prod::cluster-scan").unwrap();
     assert!(restored.enabled);
     assert!(restored.next_run_at.is_some());
-    assert!(jobs.iter().all(|job| job.name != "remundo::staging::cluster-scan"));
+    assert!(jobs.iter().all(|job| job.name != "example::staging::cluster-scan"));
 }
 
 // ---- adaptive tick interval ----
@@ -858,7 +869,7 @@ fn active_incident(fingerprint: &str, opened_at: DateTime<Utc>) -> crate::domain
         id: uuid::Uuid::new_v4(),
         fingerprint: fingerprint.into(),
         fault_class: String::new(),
-        target: FqTarget::new("remundo", "prod", "cluster"),
+        target: FqTarget::new("example", "prod", "cluster"),
         severity: Severity::Critical,
         state: IncidentState::Active,
         signals: "pod restarts: 6800; CA expired 2026-03-06".into(),
@@ -898,7 +909,7 @@ async fn escalation_first_notify_pages_once_with_the_structured_payload() {
     let body = &sent[0].body;
     for needle in [
         "Critical",
-        "remundo::prod::cluster",
+        "example::prod::cluster",
         "dapr sentry CA expired",
         "pod restarts: 6800",
         "rotate the sentry CA",
@@ -1233,7 +1244,7 @@ async fn expired_approvals_are_announced_exactly_once() {
         crate::incidents::NewApproval {
             requested_by: crate::domain::Principal::Agent { job: None },
             incident: None,
-            target: crate::domain::FqTarget::new("remundo", "prod", "cluster"),
+            target: crate::domain::FqTarget::new("example", "prod", "cluster"),
             tool: "kubernetes".into(),
             command: "delete pod stuck-pod -n prod-backend # expiry-secret".into(),
             risk: crate::domain::RiskClass::High,

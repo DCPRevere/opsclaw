@@ -499,10 +499,14 @@ pub struct TargetCfg {
     /// reference. Required for every kind except `local`. Never inherited.
     pub credential: Option<SecretRef>,
     /// Connection address: host for ssh (`[user@]host` — ssh accepts the
-    /// user inline), context hint for kubernetes, etc.
+    /// user inline). Kubernetes uses the typed `kubernetes` block below.
     pub address: Option<String>,
+    /// Kubernetes-only connection identity and authorization boundary.
+    /// Kept separate from the generic SSH `address` so a context cannot be
+    /// mistaken for a host and namespace scope cannot remain implicit.
+    pub kubernetes: Option<KubernetesTargetCfg>,
     /// Optional bastion/jump host for ssh targets, `[user@]host[:port]`
-    /// form (ssh `-J`). DESIGN §4 targets: remundo's estate sits behind an
+    /// form (ssh `-J`). DESIGN §4 targets: example's estate sits behind an
     /// Azure Bastion jumpbox — this is how a target declares it.
     pub jump_host: Option<String>,
     /// `kind = "ssh"` only: non-standard port. `None` lets the system `ssh`
@@ -536,6 +540,25 @@ pub struct TargetCfg {
     pub ssh_strict_host_key_checking: Option<String>,
     #[serde(rename = "resource", default)]
     pub resources: Vec<ResourceCfg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesTargetCfg {
+    pub context: String,
+    /// Exactly one of `namespace` and `cluster_scoped = true` is required.
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub cluster_scoped: bool,
+}
+
+impl KubernetesTargetCfg {
+    pub fn scope(&self) -> crate::domain::KubernetesScope {
+        match &self.namespace {
+            Some(namespace) => crate::domain::KubernetesScope::Namespace(namespace.clone()),
+            None => crate::domain::KubernetesScope::Cluster,
+        }
+    }
 }
 
 impl TargetCfg {
@@ -583,7 +606,7 @@ pub enum ResourceCfg {
     Stub(StubResourceCfg),
 }
 
-/// Elasticsearch (brief: remundo ships logs via Filebeat into ES). Auth is
+/// Elasticsearch (brief: example ships logs via Filebeat into ES). Auth is
 /// either basic (`username` + `credential` as the password — ECK's
 /// operator-generated `elastic` user) or bearer/API key (`username` unset).
 #[derive(Debug, Clone)]
@@ -1188,7 +1211,7 @@ impl Config {
 
     /// Effective expected state for a target (target > env; default
     /// `Running`). DESIGN §3 Config: an intentionally-stopped or ephemeral
-    /// target (remundo's sandbox goes NXDOMAIN when stopped, and is wiped
+    /// target (example's sandbox goes NXDOMAIN when stopped, and is wiped
     /// monthly) must be reasoned about as a STATE, not an outage — the
     /// dispatch layer threads this into the agent's team context so an
     /// unreachable expected-stopped target doesn't page.
@@ -1199,6 +1222,21 @@ impl Config {
         t.and_then(|t| t.expected_state)
             .or(e.and_then(|e| e.expected_state))
             .unwrap_or(ExpectedState::Running)
+    }
+
+    /// Return the exact configured target behind an already-qualified
+    /// identity. Callers use this to preserve connection kind through tool
+    /// and policy dispatch instead of treating every target as interchangeable.
+    pub fn target_config(&self, target: &crate::domain::FqTarget) -> Option<&TargetCfg> {
+        self.projects
+            .iter()
+            .find(|project| project.name == target.project)?
+            .envs
+            .iter()
+            .find(|env| env.name == target.env)?
+            .targets
+            .iter()
+            .find(|configured| configured.name == target.target)
     }
 
     /// Resolve an operator-typed target string with unambiguous-prefix
@@ -1449,9 +1487,45 @@ impl Config {
             }
             _ => {}
         }
+        let valid_name =
+            |value: &str| !value.trim().is_empty() && !value.contains("::") && !value.contains('/');
+        let mut project_names = std::collections::HashSet::new();
         for p in &self.projects {
+            if !valid_name(&p.name) {
+                errs.push(format!(
+                    "project name {:?} must be non-empty and contain neither '::' nor '/'",
+                    p.name
+                ));
+            }
+            if !project_names.insert(&p.name) {
+                errs.push(format!("duplicate project name {:?}", p.name));
+            }
+            let mut env_names = std::collections::HashSet::new();
             for e in &p.envs {
+                if !valid_name(&e.name) {
+                    errs.push(format!(
+                        "environment name {:?} in project {:?} must be non-empty and contain neither '::' nor '/'",
+                        e.name, p.name
+                    ));
+                }
+                if !env_names.insert(&e.name) {
+                    errs.push(format!(
+                        "duplicate environment name {:?} in project {:?}",
+                        e.name, p.name
+                    ));
+                }
+                let mut target_names = std::collections::HashSet::new();
                 for t in &e.targets {
+                    let fq = format!("{}::{}::{}", p.name, e.name, t.name);
+                    if !valid_name(&t.name) {
+                        errs.push(format!(
+                            "target name {:?} under {}::{} must be non-empty and contain neither '::' nor '/'",
+                            t.name, p.name, e.name
+                        ));
+                    }
+                    if !target_names.insert(&t.name) {
+                        errs.push(format!("duplicate target name {fq:?}"));
+                    }
                     if let Err(err) = t.target_kind() {
                         errs.push(err.to_string());
                     }
@@ -1463,6 +1537,32 @@ impl Config {
                             p.name, e.name, t.name, t.kind
                         ));
                     }
+                    match (t.kind, &t.kubernetes) {
+                        (TargetKindName::Kubernetes, Some(kube)) => {
+                            if kube.context.trim().is_empty() {
+                                errs.push(format!("kubernetes target {fq} has an empty context"));
+                            }
+                            match (&kube.namespace, kube.cluster_scoped) {
+                                (Some(namespace), false) if !namespace.trim().is_empty() => {}
+                                (None, true) => {}
+                                _ => errs.push(format!(
+                                    "kubernetes target {fq} must set exactly one scope: a non-empty kubernetes.namespace or kubernetes.cluster_scoped = true"
+                                )),
+                            }
+                            if t.address.is_some() {
+                                errs.push(format!(
+                                    "kubernetes target {fq} must use [project.env.target.kubernetes], not address"
+                                ));
+                            }
+                        }
+                        (TargetKindName::Kubernetes, None) => errs.push(format!(
+                            "kubernetes target {fq} requires [project.env.target.kubernetes] with context and explicit scope"
+                        )),
+                        (_, Some(_)) => errs.push(format!(
+                            "non-kubernetes target {fq} cannot declare a kubernetes connection block"
+                        )),
+                        (_, None) => {}
+                    }
                     if t.kind == TargetKindName::Local && containerized {
                         errs.push(format!(
                             "target {}::{}::{} is local, but OpsClaw is running in a container \
@@ -1470,6 +1570,22 @@ impl Config {
                              target for the host instead",
                             p.name, e.name, t.name
                         ));
+                    }
+                    let mut resources = std::collections::HashSet::new();
+                    for resource in &t.resources {
+                        if !valid_name(resource.name()) {
+                            errs.push(format!(
+                                "resource name {:?} under {fq} must be non-empty and contain neither '::' nor '/'",
+                                resource.name()
+                            ));
+                        }
+                        if !resources.insert((resource.rtype(), resource.name())) {
+                            errs.push(format!(
+                                "duplicate resource {}::{:?} under {fq}",
+                                resource.rtype(),
+                                resource.name()
+                            ));
+                        }
                     }
                 }
             }
@@ -1528,6 +1644,67 @@ mod tests {
         let err = cfg.validate_for_runtime(true).unwrap_err().to_string();
         assert!(err.contains("payments::prod::host"), "{err}");
         assert!(err.contains("container, not its host"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_and_malformed_target_paths_are_rejected() {
+        let cfg = parse(
+            r#"
+            [[project]]
+            name = "example"
+            [[project.env]]
+            name = "dev"
+            [[project.env.target]]
+            name = "api"
+            kind = "local"
+            [[project.env.target]]
+            name = "api"
+            kind = "local"
+            [[project.env]]
+            name = "dev"
+            [[project.env.target]]
+            name = "bad::target"
+            kind = "local"
+            "#,
+        );
+        let err = cfg.validate_for_runtime(false).unwrap_err().to_string();
+        assert!(err.contains("duplicate environment"), "{err}");
+        assert!(err.contains("duplicate target"), "{err}");
+        assert!(err.contains("bad::target"), "{err}");
+    }
+
+    #[test]
+    fn kubernetes_requires_context_and_exactly_one_explicit_scope() {
+        let missing = parse(
+            r#"
+            [[project]]
+            name = "example"
+            [[project.env]]
+            name = "dev"
+            [[project.env.target]]
+            name = "cluster"
+            kind = "kubernetes"
+            credential = "env:KUBECONFIG"
+            "#,
+        );
+        assert!(missing.validate_for_runtime(false).unwrap_err().to_string().contains("requires"));
+
+        let valid = parse(
+            r#"
+            [[project]]
+            name = "example"
+            [[project.env]]
+            name = "dev"
+            [[project.env.target]]
+            name = "cluster"
+            kind = "kubernetes"
+            credential = "env:KUBECONFIG"
+            [project.env.target.kubernetes]
+            context = "dev-context"
+            namespace = "dev"
+            "#,
+        );
+        valid.validate_for_runtime(false).unwrap();
     }
 
     #[test]
@@ -1840,27 +2017,33 @@ mod tests {
         let cfg = parse(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             autonomy = "observe"
             [[project.env]]
             name = "prod"
             [[project.env.target]]
             name = "cluster"
             kind = "kubernetes"
-            credential = "store:remundo-prod-kubeconfig"
+            credential = "store:example-prod-kubeconfig"
+            [project.env.target.kubernetes]
+            context = "prod"
+            namespace = "prod"
             [[project.env]]
             name = "dev"
             autonomy = "auto"
             [[project.env.target]]
             name = "cluster"
             kind = "kubernetes"
-            credential = "store:remundo-dev-kubeconfig"
+            credential = "store:example-dev-kubeconfig"
             autonomy = "act_on_known"
+            [project.env.target.kubernetes]
+            context = "dev"
+            namespace = "dev"
             "#,
         );
         cfg.validate().unwrap();
-        assert_eq!(cfg.autonomy_for("remundo", "prod", "cluster"), Autonomy::Observe);
-        assert_eq!(cfg.autonomy_for("remundo", "dev", "cluster"), Autonomy::ActOnKnown);
+        assert_eq!(cfg.autonomy_for("example", "prod", "cluster"), Autonomy::Observe);
+        assert_eq!(cfg.autonomy_for("example", "dev", "cluster"), Autonomy::ActOnKnown);
         assert_eq!(cfg.autonomy_for("unknown", "x", "y"), Autonomy::Suggest);
     }
 
@@ -2135,7 +2318,7 @@ mod tests {
         let cfg = parse(
             r#"
             [[project]]
-            name = "remundo"
+            name = "example"
             [[project.env]]
             name = "prod"
             [[project.env.target]]
@@ -2152,32 +2335,32 @@ mod tests {
             "#,
         );
         // Bare name, unique across the whole tree.
-        assert_eq!(cfg.resolve_target_str("db").unwrap().to_string(), "remundo::prod::db");
+        assert_eq!(cfg.resolve_target_str("db").unwrap().to_string(), "example::prod::db");
         // env/target and env::target disambiguate a duplicated name.
         assert_eq!(
             cfg.resolve_target_str("prod/web-1").unwrap().to_string(),
-            "remundo::prod::web-1"
+            "example::prod::web-1"
         );
         assert_eq!(
             cfg.resolve_target_str("staging::web-1").unwrap().to_string(),
-            "remundo::staging::web-1"
+            "example::staging::web-1"
         );
         // Full path always works.
         assert_eq!(
-            cfg.resolve_target_str("remundo::prod::web-1").unwrap().to_string(),
-            "remundo::prod::web-1"
+            cfg.resolve_target_str("example::prod::web-1").unwrap().to_string(),
+            "example::prod::web-1"
         );
 
         // Ambiguous bare name: refused, candidates listed.
         let err = cfg.resolve_target_str("web-1").unwrap_err().to_string();
         assert!(err.contains("ambiguous"), "{err}");
-        assert!(err.contains("remundo::prod::web-1"), "{err}");
-        assert!(err.contains("remundo::staging::web-1"), "{err}");
+        assert!(err.contains("example::prod::web-1"), "{err}");
+        assert!(err.contains("example::staging::web-1"), "{err}");
 
         // Unknown: refused, valid paths listed.
         let err = cfg.resolve_target_str("nope").unwrap_err().to_string();
         assert!(err.contains("no configured target"), "{err}");
-        assert!(err.contains("remundo::prod::db"), "{err}");
+        assert!(err.contains("example::prod::db"), "{err}");
     }
 
     // --- ResourceCfg union type: per-kind shapes enforced at parse time ---

@@ -74,6 +74,8 @@ pub struct Config {
     pub limits: LimitsCfg,
     pub policy: PolicyCfg,
     pub escalation: EscalationCfg,
+    /// Who may see and do what (`crate::access`). Absent: preset `solo`.
+    pub access: crate::access::AccessCfg,
     #[serde(rename = "project")]
     pub projects: Vec<ProjectCfg>,
 }
@@ -254,12 +256,72 @@ pub struct AuthCfg {
     /// stated: without it, a token minted by ANY Hanko project the daemon
     /// can reach would be accepted. Required when `provider = "hanko"`.
     pub audience: Vec<String>,
+    /// `provider = "oidc"`: any OpenID Connect identity provider (Entra ID,
+    /// Okta, Google, Keycloak, Auth0, …). Required for oidc, refused
+    /// otherwise.
+    pub oidc: Option<OidcCfg>,
 }
 
 impl Default for AuthCfg {
     fn default() -> Self {
-        AuthCfg { provider: AuthProvider::Local, api_url: None, audience: Vec::new() }
+        AuthCfg { provider: AuthProvider::Local, api_url: None, audience: Vec::new(), oidc: None }
     }
+}
+
+/// `[auth.oidc]`. Discovery comes from `<issuer>/.well-known/openid-configuration`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OidcCfg {
+    /// The issuer, exactly as the IdP's tokens carry it in `iss`, e.g.
+    /// `https://login.microsoftonline.com/<tenant>/v2.0`.
+    pub issuer: String,
+    pub client_id: String,
+    /// The client secret, by reference. Optional for IdPs that allow a
+    /// public client with PKCE.
+    pub client_secret: Option<SecretRef>,
+    /// The callback URL registered at the IdP:
+    /// `https://<opsclaw host>/api/auth/oidc/callback`.
+    pub redirect_url: String,
+    #[serde(default = "default_oidc_scopes")]
+    pub scopes: Vec<String>,
+    /// The ID-token claim holding groups or app roles (`groups` for Okta
+    /// and Keycloak, `roles` for Entra app roles). Absent claim: no groups.
+    #[serde(default = "default_groups_claim")]
+    pub groups_claim: String,
+    /// The claim holding the email (`email`; Entra work accounts may need
+    /// `preferred_username`).
+    #[serde(default = "default_email_claim")]
+    pub email_claim: String,
+    /// Create an account on first sign-in. Off: accounts must be made with
+    /// `opsclaw-cli account create <email> --oidc-subject <sub>`.
+    #[serde(default)]
+    pub auto_create: bool,
+    /// With `auto_create`: only these email domains (empty: any).
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// Web session length. Short, so a change at the IdP (group removed,
+    /// person disabled) takes effect at the next sign-in.
+    #[serde(default = "default_session_hours")]
+    pub session_hours: u32,
+    /// CLI tokens expire after this many hours (0: never).
+    #[serde(default = "default_cli_token_hours")]
+    pub cli_token_hours: u32,
+}
+
+fn default_oidc_scopes() -> Vec<String> {
+    vec!["openid".into(), "email".into(), "profile".into()]
+}
+fn default_groups_claim() -> String {
+    "groups".into()
+}
+fn default_email_claim() -> String {
+    "email".into()
+}
+fn default_session_hours() -> u32 {
+    8
+}
+fn default_cli_token_hours() -> u32 {
+    24
 }
 
 /// The identity providers opsclaw can put in front of login. Spelled in
@@ -276,6 +338,9 @@ pub enum AuthProvider {
     /// (passkeys, email OTP, …) and the daemon verifies the resulting
     /// session token server-side before minting its own cookie.
     Hanko,
+    /// Any OpenID Connect provider (`[auth.oidc]`): authorization code with
+    /// PKCE, ID token checked against the IdP's published keys.
+    Oidc,
 }
 
 impl AuthCfg {
@@ -540,6 +605,28 @@ pub struct TargetCfg {
     pub ssh_strict_host_key_checking: Option<String>,
     #[serde(rename = "resource", default)]
     pub resources: Vec<ResourceCfg>,
+    /// `kind = "kubernetes"` only: in-cluster services OpsClaw keeps a
+    /// `kubectl port-forward` open to, with this target's own kubeconfig, so
+    /// resources such as Elasticsearch or Prometheus can be reached on
+    /// 127.0.0.1 without a separate script.
+    #[serde(rename = "port_forward", default, skip_serializing_if = "Vec::is_empty")]
+    pub port_forwards: Vec<PortForwardCfg>,
+    /// Scheduled scans for this target. `false` keeps it reachable from
+    /// chat and tools but never scans it on a schedule (and retires its
+    /// seeded scan job). Default: on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<bool>,
+}
+
+/// One supervised `kubectl port-forward svc/<service> <local_port>:<port>`
+/// in `namespace`, bound to 127.0.0.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortForwardCfg {
+    pub namespace: String,
+    pub service: String,
+    pub port: u16,
+    pub local_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -595,6 +682,8 @@ impl TargetCfg {
 pub enum ResourceCfg {
     Elasticsearch(EsResourceCfg),
     Prometheus(PromResourceCfg),
+    /// Grafana Tempo traces. Same connection shape as Prometheus.
+    Tempo(PromResourceCfg),
     Argocd(ArgocdResourceCfg),
     Eventstore(EventstoreResourceCfg),
     AzureServiceBus(AsbResourceCfg),
@@ -706,6 +795,7 @@ impl ResourceCfg {
         match self {
             Self::Elasticsearch(_) => ResourceType::Elasticsearch,
             Self::Prometheus(_) => ResourceType::Prometheus,
+            Self::Tempo(_) => ResourceType::Tempo,
             Self::Argocd(_) => ResourceType::Argocd,
             Self::Eventstore(_) => ResourceType::Eventstore,
             Self::AzureServiceBus(_) => ResourceType::AzureServiceBus,
@@ -716,7 +806,7 @@ impl ResourceCfg {
     pub fn name(&self) -> &str {
         match self {
             Self::Elasticsearch(r) => &r.name,
-            Self::Prometheus(r) => &r.name,
+            Self::Prometheus(r) | Self::Tempo(r) => &r.name,
             Self::Argocd(r) => &r.name,
             Self::Eventstore(r) => &r.name,
             Self::AzureServiceBus(r) => &r.name,
@@ -728,7 +818,7 @@ impl ResourceCfg {
     pub fn credential(&self) -> Option<&SecretRef> {
         match self {
             Self::Elasticsearch(r) => r.credential.as_ref(),
-            Self::Prometheus(r) => r.credential.as_ref(),
+            Self::Prometheus(r) | Self::Tempo(r) => r.credential.as_ref(),
             Self::Argocd(r) => Some(&r.credential),
             Self::Eventstore(r) => r.credential.as_ref(),
             Self::AzureServiceBus(r) => Some(&r.credential),
@@ -746,7 +836,7 @@ impl ResourceCfg {
                 ca_cert_path: r.ca_cert_path.as_deref(),
                 insecure_tls: r.insecure_tls,
             }),
-            Self::Prometheus(r) => Some(EndpointCfg {
+            Self::Prometheus(r) | Self::Tempo(r) => Some(EndpointCfg {
                 url: &r.url,
                 credential: r.credential.as_ref(),
                 username: r.username.as_deref(),
@@ -796,6 +886,14 @@ impl ResourceCfg {
                 insecure_tls,
             })
             | Self::Prometheus(PromResourceCfg {
+                name,
+                url,
+                username,
+                credential,
+                ca_cert_path,
+                insecure_tls,
+            })
+            | Self::Tempo(PromResourceCfg {
                 name,
                 url,
                 username,
@@ -903,6 +1001,19 @@ impl TryFrom<RawResourceCfg> for ResourceCfg {
                     "the base url (e.g. http://localhost:9090) is how the tool reaches it",
                 )?;
                 Ok(Self::Prometheus(PromResourceCfg {
+                    name,
+                    url,
+                    username,
+                    credential,
+                    ca_cert_path,
+                    insecure_tls,
+                }))
+            }
+            ResourceType::Tempo => {
+                let url = need_url(
+                    "the HTTP API url (e.g. http://localhost:3200) is how the tool reaches it",
+                )?;
+                Ok(Self::Tempo(PromResourceCfg {
                     name,
                     url,
                     username,
@@ -1351,11 +1462,72 @@ impl Config {
                 Some(SecretRef::Store(_)) => {} // resolved + checked at connect time
             }
         }
+        if let Err(e) = crate::access::check(&self.access) {
+            errs.push(e.to_string());
+        }
+        if self.access.preset != crate::access::Preset::Solo
+            && self.auth.provider != AuthProvider::Oidc
+            && self.access.roles.iter().any(|r| !r.idp_groups.is_empty())
+        {
+            errs.push(
+                "access roles name idp_groups, but only SSO sign-in carries groups — use \
+                 members, or auth.provider = \"oidc\""
+                    .into(),
+            );
+        }
         // Auth provider coherence. Every failure here is one that would
         // otherwise surface as "nobody can sign in", discovered at 3am by
         // the operator who needed the daemon most.
         match self.auth.provider {
+            AuthProvider::Oidc => {
+                match &self.auth.oidc {
+                    None => errs.push(
+                        "auth.provider = \"oidc\" requires an [auth.oidc] block (issuer, \
+                         client_id, redirect_url)"
+                            .into(),
+                    ),
+                    Some(o) => {
+                        for (name, value) in
+                            [("issuer", &o.issuer), ("redirect_url", &o.redirect_url)]
+                        {
+                            match url::Url::parse(value) {
+                                Err(e) => errs
+                                    .push(format!("auth.oidc.{name} is not a URL ({e}): {value}")),
+                                Ok(u) => {
+                                    let host = u.host_str().unwrap_or_default();
+                                    if u.scheme() != "https" && !is_loopback_host(host) {
+                                        errs.push(format!(
+                                            "auth.oidc.{name} must be https (http only on loopback): {value}"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        if o.client_id.trim().is_empty() {
+                            errs.push("auth.oidc.client_id is empty".into());
+                        }
+                        if !o.scopes.iter().any(|s| s == "openid") {
+                            errs.push("auth.oidc.scopes must include \"openid\"".into());
+                        }
+                        if o.session_hours == 0 {
+                            errs.push("auth.oidc.session_hours must be at least 1".into());
+                        }
+                    }
+                }
+                if self.auth.api_url.is_some() || !self.auth.audience.is_empty() {
+                    errs.push(
+                        "auth.api_url/auth.audience are hanko settings; remove them for oidc"
+                            .into(),
+                    );
+                }
+            }
             AuthProvider::Local => {
+                if self.auth.oidc.is_some() {
+                    errs.push(
+                        "[auth.oidc] is set but auth.provider is \"local\" — set provider = \"oidc\""
+                            .into(),
+                    );
+                }
                 // A half-written [auth] block reads as active. Refuse it
                 // rather than let an operator believe passkeys are on.
                 if self.auth.api_url.is_some() || !self.auth.audience.is_empty() {
@@ -1584,6 +1756,43 @@ impl Config {
                                 "duplicate resource {}::{:?} under {fq}",
                                 resource.rtype(),
                                 resource.name()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Port-forwards: Kubernetes targets only, plain names, one owner per
+        // local port.
+        let k8s_name = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+        };
+        let mut local_ports = std::collections::HashMap::new();
+        for project in &self.projects {
+            for env in &project.envs {
+                for target in &env.targets {
+                    let fq = format!("{}::{}::{}", project.name, env.name, target.name);
+                    if !target.port_forwards.is_empty() && target.kind != TargetKindName::Kubernetes
+                    {
+                        errs.push(format!("{fq}: port_forward is only for kubernetes targets"));
+                    }
+                    for pf in &target.port_forwards {
+                        if !k8s_name(&pf.namespace) || !k8s_name(&pf.service) {
+                            errs.push(format!(
+                                "{fq}: port_forward {}/{} is not a valid namespace/service name",
+                                pf.namespace, pf.service
+                            ));
+                        }
+                        if pf.port == 0 || pf.local_port == 0 {
+                            errs.push(format!("{fq}: port_forward ports must be non-zero"));
+                        }
+                        if let Some(other) = local_ports.insert(pf.local_port, fq.clone()) {
+                            errs.push(format!(
+                                "port_forward local_port {} is used twice ({other} and {fq})",
+                                pf.local_port
                             ));
                         }
                     }

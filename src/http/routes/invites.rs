@@ -237,6 +237,11 @@ async fn join(
     //    timeout, audience mismatch, an already-linked subject), which is
     //    what makes consuming first untenable rather than merely unlucky.
     let (password_hash, auth_provider, external_subject) = match state.config.auth.provider {
+        crate::config::AuthProvider::Oidc => {
+            return Err(Error::validation(
+                "this daemon uses SSO — sign in with your company account instead of an invite",
+            ));
+        }
         crate::config::AuthProvider::Local => {
             if req.session_token.is_some() {
                 return Err(Error::validation(

@@ -414,6 +414,8 @@ async fn run_one_step(
         declared_risk: crate::domain::RiskClass::Read,
         hypothesis: Some(format!("runbook {runbook_title:?} step")),
         runbook: Some(runbook_title.to_string()),
+        via: crate::access::Via::Cli,
+        labels: None,
     };
     match policy.execute(req).await {
         Ok(PolicyOutcome::Executed(out)) => {

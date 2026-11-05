@@ -2,12 +2,13 @@
 //! standard OpenRouter-backed Hindsight install, the provider's daily key
 //! usage. Values are cents throughout.
 
+use crate::llm::hindsight_metrics_url;
 use std::sync::Arc;
 
 use crate::Result;
 use crate::config::{Config, SecretStore};
 use crate::db::AllRepos;
-use crate::llm::{CostGuard, FakeLlm, SpendSnapshot};
+use crate::llm::{CostGuard, FakeLlm, SpendMeter, SpendSnapshot};
 
 pub async fn load(
     config: &Config,
@@ -18,8 +19,12 @@ pub async fn load(
         Some(reference) => Some(reference.resolve(store)?),
         None => None,
     };
-    let mut guard =
-        CostGuard::new(Arc::new(FakeLlm::new()), repos, config.limits.max_cost_per_day_cents);
+    let mut guard = CostGuard::new(
+        Arc::new(FakeLlm::new()),
+        Arc::new(SpendMeter::new()),
+        repos,
+        config.limits.max_cost_per_day_cents,
+    );
     if config.memory.hindsight_url.is_some() {
         let key =
             std::env::var("HINDSIGHT_LLM_API_KEY").ok().filter(|value| !value.trim().is_empty());
@@ -29,7 +34,9 @@ pub async fn load(
                 let shared = opsclaw_key.as_deref() == Some(key.as_str());
                 guard.with_hindsight_openrouter_meter(key, shared)
             }
-            _ => guard.with_unmetered_hindsight(),
+            // Any other Hindsight LLM (OpenAI direct, say): meter it from
+            // Hindsight's own token counters.
+            _ => guard.with_hindsight_metrics_meter(hindsight_metrics_url(&config.memory)),
         };
     }
     guard.spend_snapshot().await

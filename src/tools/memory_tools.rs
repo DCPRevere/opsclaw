@@ -230,6 +230,7 @@ mod tests {
             }
         }
         ToolCtx {
+            call: Default::default(),
             principal: Principal::Agent { job: None },
             policy: Arc::new(NoopPolicy),
             known_targets: vec![],

@@ -10,7 +10,7 @@
 //! `schema_version`, expected one of..."), which is technically correct but
 //! gives an operator no idea their file is from a different, unrelated
 //! product generation rather than just malformed. This module sniffs the raw
-//! TOML (parsed as a generic `toml::Value`, never through the strict
+//! TOML (parsed as a generic `toml::Table`, never through the strict
 //! `Config` type) for the one marker field the old schema always had, so
 //! callers can print an actionable message instead of forwarding the raw
 //! parse error.
@@ -20,10 +20,8 @@
 /// validity: a config with no `schema_version` still goes through the normal
 /// `Config::load`/`validate()` path and gets whatever error that produces.
 pub fn looks_like_legacy_config(raw: &str) -> bool {
-    match raw.parse::<toml::Value>() {
-        Ok(toml::Value::Table(t)) => t.contains_key("schema_version"),
-        _ => false,
-    }
+    // A whole document parses as a `Table`; `toml::Value` parses one value.
+    raw.parse::<toml::Table>().is_ok_and(|t| t.contains_key("schema_version"))
 }
 
 pub const LEGACY_CONFIG_MESSAGE: &str = "\

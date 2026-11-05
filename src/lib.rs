@@ -10,6 +10,7 @@
 //! classifies risk, checks the e-stop, applies autonomy gates, and writes the
 //! audit chain around every remote command.
 
+pub mod access;
 pub mod agent;
 pub mod audit;
 pub mod boot;

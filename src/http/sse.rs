@@ -59,7 +59,7 @@ pub async fn stream(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Sse<impl Stream<Item = std::result::Result<Event, std::convert::Infallible>>>> {
     let token = q.get("token").ok_or_else(|| Error::unauthorized("missing token"))?;
-    let (_account, _bind) = auth::verify_scoped_claims(&state.jwt_secret, token, TICKET_PURPOSE)?;
+    let (account, _bind) = auth::verify_scoped_claims(&state.jwt_secret, token, TICKET_PURPOSE)?;
 
     // SINGLE-USE: a leaked ticket (URL in a log, referrer header) is
     // worthless after the first connect.
@@ -72,7 +72,8 @@ pub async fn stream(
         }
     }
 
-    Ok(Sse::new(event_stream(&state)).keep_alive(KeepAlive::default()))
+    let viewer = crate::domain::Principal::Operator { account };
+    Ok(Sse::new(event_stream(&state, Some(viewer))).keep_alive(KeepAlive::default()))
 }
 
 /// The event stream itself, separated from the auth handler so termination
@@ -83,16 +84,28 @@ pub async fn stream(
 /// Ctrl+C hostage forever until the shutdown select was added.
 fn event_stream(
     state: &AppState,
+    viewer: Option<crate::domain::Principal>,
 ) -> impl Stream<Item = std::result::Result<Event, std::convert::Infallible>> + use<> {
     let mut rx = state.web.subscribe();
     let shutdown = state.shutdown.clone();
+    let access = state.access.clone();
     async_stream::stream! {
         yield Ok(Event::default().event("ready").data("connected"));
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 recv = rx.recv() => match recv {
-                    Ok(ev) => {
+                    Ok(mut ev) => {
+                        // Each subscriber sees a labelled answer as they
+                        // may (hidden or redacted), like the history read.
+                        if !ev.labels.is_empty() {
+                            let text = ev.body["text"].as_str().unwrap_or_default().to_string();
+                            let shown = match &viewer {
+                                Some(v) => crate::agent::dispatch::shown_to(&access, v, &text, &ev.labels).await,
+                                None => "[hidden]".to_string(),
+                            };
+                            ev.body["text"] = serde_json::Value::String(shown);
+                        }
                         let data = serde_json::to_string(&ev).unwrap_or_else(|_| "{}".into());
                         yield Ok(Event::default().event(ev.kind).data(data));
                     }
@@ -164,7 +177,7 @@ mod tests {
     async fn stream_terminates_when_the_shutdown_token_fires() {
         use futures::StreamExt;
         let state = AppState::fake();
-        let mut s = Box::pin(event_stream(&state));
+        let mut s = Box::pin(event_stream(&state, None));
 
         // The greeting arrives; the stream is then parked on the hub.
         let first = s.next().await.expect("ready event");

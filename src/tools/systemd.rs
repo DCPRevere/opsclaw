@@ -79,6 +79,10 @@ impl Tool for SystemdTool {
         true
     }
 
+    fn reads_only(&self, args: &Value) -> bool {
+        risk_for(args["action"].as_str().unwrap_or_default()) == RiskClass::Read
+    }
+
     fn allowed_in_heartbeat(&self) -> bool {
         // status is fine unattended; restart/stop/start still route through
         // the SAME autonomy gate as any other mutation — this only controls
@@ -122,6 +126,7 @@ mod tests {
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
         ToolCtx {
+            call: Default::default(),
             principal: Principal::Agent { job: None },
             policy,
             known_targets: vec![target()],

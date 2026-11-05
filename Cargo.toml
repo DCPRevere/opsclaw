@@ -2,7 +2,7 @@
 name = "opsclaw"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 description = "OpsClaw — an autonomous SRE agent"
 authors = ["D C P Revere <dcprevere@gmail.com>"]
 publish = false
@@ -40,34 +40,40 @@ sqlx = { version = "0.9", default-features = false, features = [
     "migrate",
 ] }
 
-# HTTP client (LLM providers, Hindsight, Telegram, endpoint tools)
+# LLM client and tool loop (dcpr-ai-rs). Published versions are the
+# dependency; the [patch.crates-io] block below points them at the v0.3.0
+# git tag until 0.3.0 is on crates.io — delete that block once it is.
+dcpr-llm = "0.3.0"
+dcpr-agent = { version = "0.3.0", features = ["mcp"] }
+
+# HTTP client (Hindsight, Telegram, endpoint tools)
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "form", "query", "cookies"] }
 url = "2"
 html2text = "0.17"
 
 # Cron scheduling (timezone-aware next-run)
-croner = "3"
+croner = "4"
 chrono-tz = { version = "0.10", features = ["serde"] }
 
 # Serialisation, config & time
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Auth & crypto (operator accounts, tokens, secret store, audit hash chain)
-argon2 = "0.5"
+argon2 = "0.6"
 rpassword = "7"
 sha2 = "0.11"
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 aes-gcm = "0.11"
 rand = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 fs2 = "0.4"
 
 # Web push (PWA notifications)
-web-push-native = "0.4.0"
+web-push-native = "0.5"
 
 # Errors, logging, async traits
 regex = "1"
@@ -80,6 +86,8 @@ async-trait = "0.1"
 # CLI
 clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
+cedar-policy = { version = "4", default-features = false }
+rmcp = { version = "3.8", default-features = false, features = ["server", "transport-streamable-http-server"] }
 
 [dev-dependencies]
 # Local mock HTTP server for provider/Hindsight/endpoint-tool tests (no real network).
@@ -87,3 +95,12 @@ wiremock = "0.6"
 tempfile = "3"
 # test-util: paused-clock scheduler tests (start_paused, time::advance).
 tokio = { version = "1", features = ["full", "test-util"] }
+# Throwaway RSA keys for the OIDC sign-in test (a mock IdP signs ID tokens).
+rsa = { version = "0.9", features = ["getrandom"] }
+
+# Unpublished dcpr-ai-rs crates, from the v0.3.0 tag on GitHub (Cargo.lock
+# pins the commit). Remove this block when dcpr-llm and dcpr-agent 0.3.0 are
+# on crates.io.
+[patch.crates-io]
+dcpr-llm = { git = "https://github.com/DCPRevere/dcpr-ai-rs", tag = "v0.3.0" }
+dcpr-agent = { git = "https://github.com/DCPRevere/dcpr-ai-rs", tag = "v0.3.0" }

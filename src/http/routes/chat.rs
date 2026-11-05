@@ -71,6 +71,7 @@ pub(crate) async fn run_chat_turn(
     conversation: &ChatConversation,
     idempotency_key: Option<&str>,
 ) -> Result<(String, bool, String)> {
+    ensure_room(state, &Principal::Operator { account }, conversation).await?;
     let key = idempotency_key.map(str::trim).filter(|key| !key.is_empty());
     if key.is_some_and(|key| key.len() > 128) {
         return Err(crate::Error::validation("idempotency_key must be at most 128 bytes"));
@@ -215,29 +216,112 @@ pub struct HistoryQuery {
 /// not a failure.
 async fn history(
     State(state): State<AppState>,
-    Authed(_ctx): Authed,
+    Authed(ctx): Authed,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<Value>> {
     const PAGE: i64 = 100;
     let limit = q.limit.unwrap_or(PAGE).clamp(1, 500);
-    let conversation = resolve_conversation(&state, q.conversation.as_deref())?.id();
+    let resolved = resolve_conversation(&state, q.conversation.as_deref())?;
+    ensure_room(&state, &ctx.principal(), &resolved).await?;
+    let conversation = resolved.id();
     let rows = match q.before {
         Some(before) => state.repos.before_chat(&conversation, before, limit).await?,
         None => state.repos.recent_chat(&conversation, limit).await?,
     };
     let has_more = rows.len() as i64 == limit;
-    Ok(Json(json!({
-        "history": rows.into_iter().map(|m| json!({
+    // Each answer is shown as this reader may see it (`crate::access`).
+    let viewer = ctx.principal();
+    let mut history = Vec::with_capacity(rows.len());
+    for m in rows {
+        let content = match (m.role.as_str(), &m.turn_id) {
+            ("assistant", Some(turn)) => {
+                let labels = crate::db::AccessRepo::labels(&*state.repos, "chat", turn).await?;
+                if labels.is_empty() {
+                    m.content
+                } else {
+                    crate::agent::dispatch::shown_to(&state.access, &viewer, &m.content, &labels)
+                        .await
+                }
+            }
+            _ => m.content,
+        };
+        history.push(json!({
             "seq": m.seq,
             "conversation": m.conversation,
             "turn_id": m.turn_id,
             "role": m.role,
             "speaker": m.speaker,
-            "content": m.content,
+            "content": content,
             "at": m.at.to_rfc3339(),
-        })).collect::<Vec<_>>(),
+        }));
+    }
+    Ok(Json(json!({
+        "history": history,
         "has_more": has_more,
     })))
+}
+
+/// An environment room is open to people who can see that environment at
+/// all (its state, or its findings). Operations is open to everyone.
+pub(crate) async fn room_allowed(
+    state: &AppState,
+    principal: &Principal,
+    conversation: &ChatConversation,
+) -> bool {
+    if let ChatConversation::Incident { incident, .. } = conversation {
+        return visible_incident(state, principal, *incident).await.is_some();
+    }
+    let Some((project, environment)) = conversation.environment_of() else {
+        return true;
+    };
+    let scope = format!("{project}::{environment}");
+    let via = crate::access::Via::Web;
+    state.access.read(principal, via, &scope, crate::access::classes::STATE).await.is_ok()
+        || state.access.findings(principal, via, &scope).await != crate::access::FindingsLevel::None
+}
+
+/// The incident behind a thread, if this person may see it.
+async fn visible_incident(
+    state: &AppState,
+    principal: &Principal,
+    id: uuid::Uuid,
+) -> Option<(crate::domain::Incident, crate::access::findings::IncidentView)> {
+    let incident = crate::db::IncidentRepo::get(&*state.repos, id).await.ok()??;
+    let view = crate::access::findings::incident_view(
+        &state.access,
+        &*state.repos,
+        principal,
+        crate::access::Via::Web,
+        &incident,
+    )
+    .await?;
+    Some((incident, view))
+}
+
+/// How long a resolved incident's thread stays in the sidebar.
+const RESOLVED_THREAD_DAYS: i64 = 7;
+
+async fn ensure_room(
+    state: &AppState,
+    principal: &Principal,
+    conversation: &ChatConversation,
+) -> Result<()> {
+    if room_allowed(state, principal, conversation).await {
+        Ok(())
+    } else {
+        Err(crate::Error::NotFound(format!("chat conversation {}", conversation.id())))
+    }
+}
+
+/// A short title from a hypothesis: its first sentence, at most ~90 chars.
+fn first_sentence(text: &str) -> String {
+    let end = text.find(". ").map(|i| i + 1).unwrap_or(text.len());
+    let s = text[..end].trim();
+    if s.chars().count() > 90 {
+        format!("{}…", s.chars().take(88).collect::<String>().trim_end())
+    } else {
+        s.to_string()
+    }
 }
 
 pub(crate) fn resolve_conversation(
@@ -245,7 +329,7 @@ pub(crate) fn resolve_conversation(
     raw: Option<&str>,
 ) -> Result<ChatConversation> {
     let conversation = ChatConversation::parse(raw.unwrap_or(ChatConversation::OPERATIONS_ID))?;
-    if let ChatConversation::Environment { project, environment } = &conversation {
+    if let Some((project, environment)) = conversation.environment_of() {
         let exists = state.config.projects.iter().any(|configured_project| {
             configured_project.name == *project
                 && configured_project.envs.iter().any(|env| env.name == *environment)
@@ -257,7 +341,7 @@ pub(crate) fn resolve_conversation(
     Ok(conversation)
 }
 
-async fn conversations(State(state): State<AppState>, Authed(_ctx): Authed) -> Result<Json<Value>> {
+async fn conversations(State(state): State<AppState>, Authed(ctx): Authed) -> Result<Json<Value>> {
     let mut values = vec![json!({
         "id": ChatConversation::OPERATIONS_ID,
         "kind": "operations",
@@ -266,6 +350,9 @@ async fn conversations(State(state): State<AppState>, Authed(_ctx): Authed) -> R
     for project in &state.config.projects {
         for environment in &project.envs {
             let conversation = ChatConversation::environment(&project.name, &environment.name);
+            if !room_allowed(&state, &ctx.principal(), &conversation).await {
+                continue;
+            }
             values.push(json!({
                 "id": conversation.id(),
                 "kind": "environment",
@@ -275,7 +362,41 @@ async fn conversations(State(state): State<AppState>, Authed(_ctx): Authed) -> R
             }));
         }
     }
-    Ok(Json(json!({ "conversations": values })))
+    // One thread per incident the viewer may see: open ones, and resolved
+    // ones from the last week.
+    let principal = ctx.principal();
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(RESOLVED_THREAD_DAYS);
+    let mut threads = Vec::new();
+    for incident in crate::db::IncidentRepo::list(&*state.repos, true, 200).await? {
+        let closed = incident.state == crate::domain::IncidentState::Resolved
+            || incident.state == crate::domain::IncidentState::Expired;
+        if closed && incident.resolved_at.unwrap_or(incident.opened_at) < cutoff {
+            continue;
+        }
+        let Some((incident, view)) = visible_incident(&state, &principal, incident.id).await else {
+            continue;
+        };
+        let conversation = ChatConversation::incident(&incident.target, incident.id);
+        let title = view
+            .hypothesis
+            .as_deref()
+            .map(first_sentence)
+            .unwrap_or_else(|| incident.fault_class.replace('_', " "));
+        threads.push(json!({
+            "id": conversation.id(),
+            "kind": "incident",
+            "incident": incident.id,
+            "label": title,
+            "project": incident.target.project(),
+            "environment": incident.target.environment(),
+            "target": incident.target.to_string(),
+            "severity": incident.severity,
+            "state": incident.state,
+            "closed": closed,
+            "opened_at": incident.opened_at,
+        }));
+    }
+    Ok(Json(json!({ "conversations": values, "threads": threads })))
 }
 
 #[cfg(test)]
@@ -358,5 +479,82 @@ mod tests {
         .await
         .expect("detached turn must persist its terminal outcome");
         assert_eq!(outcome, ChatRequestClaim::Complete("done".into()));
+    }
+
+    #[tokio::test]
+    async fn history_shows_each_answer_as_the_reader_may_see_it() {
+        use crate::http::routes::access_fixture::Fixture;
+        let f = Fixture::new();
+        let room = "acme::prod";
+        let at = chrono::Utc::now();
+        let repos = &f.state.repos;
+        repos
+            .append_chat(room, Some("t1"), at, "user", "bob", "who failed to log in?")
+            .await
+            .unwrap();
+        repos
+            .append_chat(room, Some("t1"), at, "assistant", "assistant", "jane@acme.com did")
+            .await
+            .unwrap();
+        let label = crate::access::Label { target: "acme::prod::aks".into(), class: "logs".into() };
+        repos.add_labels("chat", "t1", &[label]).await.unwrap();
+
+        let show = |ctx| {
+            let state = f.state.clone();
+            async move {
+                let q = HistoryQuery { conversation: Some(room.into()), before: None, limit: None };
+                let Json(v) = history(State(state), Authed(ctx), Query(q)).await.unwrap();
+                v["history"][1]["content"].as_str().unwrap().to_string()
+            }
+        };
+        let bob = f.person("bob@acme.com", &["oncall"]).await;
+        assert_eq!(show(bob).await, "<redacted:email> did");
+        let reader = f.person("reader@acme.com", &[]).await;
+        assert!(show(reader).await.starts_with("[hidden:"));
+        // Someone with no access to the environment can't open the room.
+        let eve = f.person("eve@acme.com", &[]).await;
+        let q = HistoryQuery { conversation: Some(room.into()), before: None, limit: None };
+        assert!(history(State(f.state.clone()), Authed(eve), Query(q)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn incident_threads_are_listed_and_opened_only_by_those_who_may_see_them() {
+        use crate::http::routes::access_fixture::Fixture;
+        let f = Fixture::new();
+        let id = f.incident("disk full on node-3", &[("acme::prod::aks", "state")]).await;
+        let thread = format!("acme::prod#{id}");
+        assert_eq!(
+            ChatConversation::parse(&thread).unwrap(),
+            ChatConversation::Incident {
+                project: "acme".into(),
+                environment: "prod".into(),
+                incident: id
+            }
+        );
+        assert_eq!(ChatConversation::parse(&thread).unwrap().id(), thread);
+        assert!(ChatConversation::parse("acme::prod#not-a-uuid").is_err());
+
+        let listed = |ctx| {
+            let state = f.state.clone();
+            async move {
+                let Json(v) = conversations(State(state), Authed(ctx)).await.unwrap();
+                v["threads"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t["id"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+        let bob = f.person("bob@acme.com", &["oncall"]).await;
+        assert_eq!(listed(bob).await, vec![thread.clone()]);
+        let eve = f.person("eve@acme.com", &[]).await;
+        assert!(listed(eve).await.is_empty());
+
+        let q = |c: &str| HistoryQuery { conversation: Some(c.into()), before: None, limit: None };
+        let eve = f.person("eve2@acme.com", &[]).await;
+        assert!(history(State(f.state.clone()), Authed(eve), Query(q(&thread))).await.is_err());
+        let bob = f.person("bob2@acme.com", &["oncall"]).await;
+        assert!(history(State(f.state.clone()), Authed(bob), Query(q(&thread))).await.is_ok());
     }
 }

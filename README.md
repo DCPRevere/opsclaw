@@ -152,7 +152,7 @@ surface. Commands label themselves `[local]`, `[remote]`, or `[local|remote]`.
 
 ## Build and test
 
-OpsClaw requires Rust 1.88 or newer.
+OpsClaw requires Rust 1.94 or newer.
 
 ```sh
 cargo build --release --locked

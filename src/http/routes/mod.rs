@@ -6,6 +6,9 @@
 //! inline in `handlers::authenticate`'s caller instead (see that module),
 //! since opsclaw has far fewer session-bearing routes to intercept.
 
+pub mod access;
+#[cfg(test)]
+mod access_fixture;
 pub mod approvals;
 pub mod audit;
 pub mod auth_provider;
@@ -15,6 +18,7 @@ pub mod config_ui;
 pub mod estop;
 pub mod incidents;
 pub mod invites;
+mod oidc;
 pub mod push;
 pub mod status;
 pub mod webhooks;
@@ -43,7 +47,20 @@ use super::state::AppState;
 /// everything else authed" holds at the API layer where it's enforced,
 /// not by gating the static shell itself.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let mcp = match (&state.dispatch, state.access.config().mcp.enabled) {
+        (Some(deps), true) => Some(crate::http::mcp::service(state.clone(), deps.clone())),
+        (None, true) => {
+            tracing::warn!("access.mcp.enabled is set but no agent wiring exists; /mcp is off");
+            None
+        }
+        _ => None,
+    };
+    let base = Router::new();
+    let base = match mcp {
+        Some(service) => base.nest_service("/mcp", service),
+        None => base,
+    };
+    base
         // Bare root goes to the app shell — every first-run operator types
         // `localhost:8484` and a 404 there reads as "daemon broken".
         // Temporary (not 308): browsers cache permanent redirects, which
@@ -61,6 +78,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me", get(handlers::me))
         .route("/api/stream", get(sse::stream))
         .route("/api/stream-ticket", get(sse::stream_ticket))
+        .merge(access::router())
+        .merge(oidc::router())
         .merge(auth_provider::router())
         .merge(chat::router())
         .merge(incidents::router())

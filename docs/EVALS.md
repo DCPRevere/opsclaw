@@ -9,9 +9,9 @@ declaring health on a single green check, getting talked into something by
 text embedded in a log line). That's what `tests/evals.rs` is for.
 
 This tier measures the **shipped** provider chain (DESIGN §7 #13:
-`OpenAiCompatProvider` against OpenRouter, `cfg.models` as the ordered
-fallback list, wrapped in `FallbackLlm`) — built via the exact same
-`llm::build_chain(&LlmCfg, &SecretStore)` the daemon itself calls at boot,
+`dcpr-llm`'s OpenRouter client, `cfg.models` as the ordered fallback list,
+wrapped in `Fallback`) — built via the exact same `llm::build_chain` the
+daemon itself calls at boot,
 never a bespoke eval-only client. An eval against a different model than
 production ships is a comfortable lie.
 

@@ -39,6 +39,15 @@ use crate::{Error, Result};
 /// latency.
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// `reflect` is an agentic synthesis on Hindsight 1.x (several LLM calls), so
+/// it gets far longer than a plain read.
+const REFLECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `recall` embeds the query and reranks locally on Hindsight 1.x. On a small
+/// box that takes far longer than a plain read: measured 27-45 s on a 1-CPU
+/// jumpbox with ~1,200 memories.
+const RECALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A thin REST client for a self-hosted Hindsight instance, scoped to this
 /// team's single bank.
 pub struct HindsightClient {
@@ -335,7 +344,7 @@ impl HindsightClient {
         let started = std::time::Instant::now();
         let resp = self
             .req(reqwest::Method::POST, &format!("/v1/default/banks/{}/memories/recall", self.bank))
-            .timeout(READ_TIMEOUT)
+            .timeout(RECALL_TIMEOUT)
             .json(&body)
             .send()
             .await
@@ -417,7 +426,7 @@ impl HindsightClient {
         let started = std::time::Instant::now();
         let resp = self
             .req(reqwest::Method::POST, &format!("/v1/default/banks/{}/reflect", self.bank))
-            .timeout(READ_TIMEOUT)
+            .timeout(REFLECT_TIMEOUT)
             .json(&body)
             .send()
             .await
@@ -483,9 +492,11 @@ fn retain_body(framed_content: &str, opts: &RetainOpts) -> serde_json::Value {
 /// Bank configuration (PATCH /config): steer extraction + reflection for an SRE
 /// operations domain rather than running on stock defaults (gianna's household
 /// mission, re-tuned). 0.7.2 requires the fields wrapped in an `updates` object
-/// (verified live — a bare top-level body 422s). `disposition_literalism` kept
-/// high (0.8, unchanged from gianna) so the extractor records what was
-/// observed/said and doesn't over-infer root cause from a thin signal.
+/// (verified live — a bare top-level body 422s). `disposition_literalism` is
+/// kept high so the extractor records what was observed or said and doesn't
+/// over-infer a root cause from a thin signal. It's an integer from 1
+/// (flexible) to 5 (literal) in every version's schema. 0.8.x silently
+/// accepted the old `0.8` float; 1.x rejects it with a 400.
 fn bank_config() -> serde_json::Value {
     serde_json::json!({
         "updates": {
@@ -501,7 +512,7 @@ fn bank_config() -> serde_json::Value {
                 "Answer as OpsClaw, an SRE agent, using only what the team has \
                  actually recorded about its infrastructure, incidents, and \
                  operator preferences.",
-            "disposition_literalism": 0.8,
+            "disposition_literalism": 4,
         }
     })
 }
@@ -644,8 +655,8 @@ mod tests {
         assert!(retain_mission.contains("infrastructure"));
         assert!(retain_mission.contains("operator preferences"));
         assert!(updates["reflect_mission"].as_str().unwrap().contains("OpsClaw"));
-        // Literalism kept high, unchanged from gianna — don't over-infer.
-        assert_eq!(updates["disposition_literalism"].as_f64().unwrap(), 0.8);
+        // Literalism kept high (1-5 integer scale) — don't over-infer.
+        assert_eq!(updates["disposition_literalism"], 4);
     }
 
     #[test]
@@ -729,7 +740,7 @@ mod tests {
         Mock::given(method("PATCH"))
             .and(path("/v1/default/banks/opsclaw-acme/config"))
             .and(body_partial_json(serde_json::json!({
-                "updates": { "disposition_literalism": 0.8 }
+                "updates": { "disposition_literalism": 4 }
             })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)

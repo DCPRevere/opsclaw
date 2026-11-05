@@ -64,6 +64,21 @@ pub const FAULT_CLASSES: &[&str] = &[
     "other",
 ];
 
+/// Open incidents, one per line, for the model to choose between.
+fn describe_candidates(candidates: &[Incident]) -> String {
+    if candidates.is_empty() {
+        return "none".to_string();
+    }
+    candidates
+        .iter()
+        .map(|i| {
+            let hypothesis: String = i.hypothesis.chars().take(160).collect();
+            format!("{} — {hypothesis}", i.id)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Strip per-instance suffixes so the fingerprint anchors to the WORKLOAD,
 /// not one pod's incarnation: deployment pods carry `-<template-hash>-<id>`
 /// and statefulset pods `-<ordinal>`, both of which churn across restarts
@@ -129,7 +144,9 @@ impl Tool for NotifyTool {
                 "resource": {"type": "string", "description": "the stable workload affected (e.g. namespace/deployment-name, never a pod instance name), or \"\" if none finer than the target"},
                 "evidence": {"type": "string", "description": "observed signals with actual numbers"},
                 "hypothesis": {"type": "string"},
-                "recommended_action": {"type": "string"}
+                "recommended_action": {"type": "string"},
+                "same_as": {"type": "string", "description": "id of an open incident this is the same fault as: attaches to it instead of opening a new one"},
+                "distinct": {"type": "boolean", "description": "true only after notify listed open incidents of the same fault_class on this target and this is genuinely a different fault"}
             },
             "required": ["severity", "target", "fault_class", "resource", "evidence", "hypothesis"]
         })
@@ -199,6 +216,7 @@ impl Tool for NotifyTool {
             .map_err(|e| ToolError::Internal(format!("incident lookup failed: {e}")))?;
 
         if let Some(incident) = existing {
+            label_incident(ctx, incident.id).await;
             return Ok(ToolResult {
                 output: format!(
                     "already tracking this as incident {} (opened {}, {} notifications sent \
@@ -222,6 +240,7 @@ impl Tool for NotifyTool {
             repo.reopen(incident.id, Utc::now())
                 .await
                 .map_err(|e| ToolError::Internal(format!("incident reopen failed: {e}")))?;
+            label_incident(ctx, incident.id).await;
             return Ok(ToolResult {
                 output: format!(
                     "re-opened incident {} (originally opened {}, expired unacknowledged after \
@@ -232,6 +251,46 @@ impl Tool for NotifyTool {
                     incident.notify_count
                 ),
             });
+        }
+
+        // Same target and fault class but a different resource string is
+        // often the SAME fault named differently (one missing secret breaking
+        // three workloads was filed twice on 2026-11-04). Show the open
+        // candidates and make the model say which it is.
+        let same_as = args["same_as"].as_str().filter(|s| !s.trim().is_empty());
+        let distinct = args["distinct"].as_bool().unwrap_or(false);
+        let candidates: Vec<Incident> = repo
+            .list(false, 500)
+            .await
+            .map_err(|e| ToolError::Internal(format!("incident lookup failed: {e}")))?
+            .into_iter()
+            .filter(|i| i.target == target && i.fault_class == fault_class)
+            .collect();
+        if let Some(id) = same_as {
+            let Some(incident) = candidates.iter().find(|i| i.id.to_string() == id) else {
+                return Err(ToolError::UserFacing(format!(
+                    "same_as {id:?} is not an open {fault_class} incident on {target}. Open ones: {}",
+                    describe_candidates(&candidates)
+                )));
+            };
+            label_incident(ctx, incident.id).await;
+            return Ok(ToolResult {
+                output: format!(
+                    "attached to incident {} (opened {}) as a new occurrence of the same fault, \
+                     not a new incident.",
+                    incident.id,
+                    incident.opened_at.to_rfc3339()
+                ),
+            });
+        }
+        if !candidates.is_empty() && !distinct {
+            return Err(ToolError::UserFacing(format!(
+                "not opened yet: {target} already has open {fault_class} incident(s): {}. If \
+                 this is the same fault, call opsclaw_notify again with same_as set to that \
+                 incident's id. If it is a genuinely different fault, call again with \
+                 distinct: true.",
+                describe_candidates(&candidates)
+            )));
         }
 
         let now = Utc::now();
@@ -258,6 +317,7 @@ impl Tool for NotifyTool {
         repo.insert(&incident)
             .await
             .map_err(|e| ToolError::Internal(format!("incident insert failed: {e}")))?;
+        label_incident(ctx, incident.id).await;
 
         Ok(ToolResult {
             output: format!(
@@ -266,6 +326,20 @@ impl Tool for NotifyTool {
                 incident.id, severity
             ),
         })
+    }
+}
+
+/// Record what this turn read on the incident, so each reader sees only
+/// the evidence they may (`crate::access`). Best-effort and loud: the
+/// incident itself matters more than its labels.
+async fn label_incident(ctx: &ToolCtx, id: Uuid) {
+    let (Some(labels), Some(repo)) = (&ctx.call.labels, &ctx.call.repo) else { return };
+    let labels = labels.snapshot();
+    if labels.is_empty() {
+        return;
+    }
+    if let Err(e) = repo.add_labels("incident", &id.to_string(), &labels).await {
+        tracing::warn!(incident = %id, error = %e, "incident labels not stored");
     }
 }
 
@@ -292,6 +366,7 @@ mod tests {
 
     fn ctx_with(incidents: Arc<dyn IncidentRepo>) -> ToolCtx {
         ToolCtx {
+            call: Default::default(),
             principal: Principal::Agent { job: None },
             policy: Arc::new(NoopPolicy),
             known_targets: vec![target()],
@@ -368,6 +443,44 @@ mod tests {
         assert_eq!(stable_resource("prod-backend/notifier"), "prod-backend/notifier");
         assert_eq!(stable_resource("elasticsearch-latest"), "elasticsearch-latest");
         assert_eq!(stable_resource(""), "");
+    }
+
+    /// One missing secret breaking several workloads, named differently by
+    /// a later scan, must not become a second incident unnoticed.
+    #[tokio::test]
+    async fn a_second_incident_of_the_same_class_on_the_target_needs_a_decision() {
+        let db: Arc<dyn IncidentRepo> = Arc::new(InMemoryDb::new());
+        let ctx = ctx_with(db.clone());
+        let mut first = base_args();
+        first["fault_class"] = json!("config_missing");
+        first["resource"] = json!("elastic-backend/elasticsearch");
+        NotifyTool.call(&ctx, first).await.unwrap();
+        let open = db.list(false, 100).await.unwrap();
+        assert_eq!(open.len(), 1);
+        let id = open[0].id.to_string();
+
+        let mut again = base_args();
+        again["fault_class"] = json!("config_missing");
+        again["resource"] = json!("elastic-backend/kibana");
+        let err = NotifyTool.call(&ctx, again.clone()).await.unwrap_err();
+        let ToolError::UserFacing(msg) = err else { panic!("expected UserFacing") };
+        assert!(msg.contains(&id) && msg.contains("same_as"), "{msg}");
+        assert_eq!(db.list(false, 100).await.unwrap().len(), 1, "nothing opened yet");
+
+        let mut same = again.clone();
+        same["same_as"] = json!(id);
+        let out = NotifyTool.call(&ctx, same).await.unwrap().output;
+        assert!(out.contains("attached to incident"), "{out}");
+        assert_eq!(db.list(false, 100).await.unwrap().len(), 1, "attached, not duplicated");
+
+        let mut bad = again.clone();
+        bad["same_as"] = json!("not-an-open-incident");
+        assert!(NotifyTool.call(&ctx, bad).await.is_err());
+
+        let mut distinct = again;
+        distinct["distinct"] = json!(true);
+        NotifyTool.call(&ctx, distinct).await.unwrap();
+        assert_eq!(db.list(false, 100).await.unwrap().len(), 2, "a confirmed distinct fault opens");
     }
 
     #[tokio::test]
@@ -486,6 +599,7 @@ mod tests {
     #[tokio::test]
     async fn missing_incident_store_is_an_internal_fault() {
         let ctx = ToolCtx {
+            call: Default::default(),
             principal: Principal::Agent { job: None },
             policy: Arc::new(NoopPolicy),
             known_targets: vec![target()],

@@ -296,6 +296,8 @@ async fn read_via_policy(
         declared_risk: crate::domain::RiskClass::Read,
         hypothesis: None,
         runbook: None,
+        via: ctx.call.via,
+        labels: ctx.call.labels.clone(),
     };
     match ctx.policy.execute(req).await {
         Ok(PolicyOutcome::Executed(out)) if out.exit_code == 0 => serde_json::from_str(&out.stdout)
@@ -400,6 +402,7 @@ mod tests {
         let mut registry = EndpointRegistry::new();
         registry.insert(&target, a);
         let ctx = ToolCtx {
+            call: Default::default(),
             principal: Principal::Agent { job: None },
             policy,
             known_targets: vec![target.clone()],

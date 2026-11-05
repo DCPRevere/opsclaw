@@ -58,6 +58,11 @@ pub struct AppState {
     /// why (unlike `jwt_secret`) nothing here needs a `SecretStore` and
     /// nothing needs scrubbing from logs.
     pub hanko: Option<Arc<crate::http::hanko::HankoClient>>,
+    /// The agent's tool wiring, for the MCP server (`http::mcp`). Set at
+    /// boot; `None` in fakes (no `/mcp`).
+    pub dispatch: Option<crate::agent::dispatch::DispatchDeps>,
+    /// The SSO client when `auth.provider = "oidc"`.
+    pub oidc: Option<Arc<crate::http::oidc::OidcClient>>,
     pub repos: Arc<dyn AllRepos>,
     /// The configured memory backend, retained on state so deep readiness
     /// probes the same client agent turns use.
@@ -126,6 +131,14 @@ pub struct AppState {
     /// in-memory for the same reason as the stream-ticket guard: a restart
     /// mid-login just means re-running `login`.
     pub cli_auth_codes: Arc<Mutex<CliAuthCodes>>,
+    /// Supervised `kubectl port-forward`s for in-cluster resources. Held
+    /// here so they live exactly as long as the daemon (or CLI scan) does.
+    pub port_forwards: Arc<crate::targets::port_forward::PortForwards>,
+    /// Who may see what (`crate::access`), shared with the policy layer.
+    pub access: Arc<crate::access::Access>,
+    /// The policy layer's audit writer (one writer keeps the chain
+    /// serialized). `None` in fakes: access decisions are then only traced.
+    pub audit: Option<Arc<crate::audit::AuditWriter>>,
 }
 
 impl AppState {
@@ -150,6 +163,17 @@ impl AppState {
         scheduler: SchedulerHandle,
     ) -> crate::Result<Self> {
         let jwt_secret: Arc<str> = config.resolve_jwt_secret(secret_store)?.into();
+        let oidc = match (&config.auth.provider, &config.auth.oidc) {
+            (crate::config::AuthProvider::Oidc, Some(o)) => {
+                let secret =
+                    o.client_secret.as_ref().map(|r| r.resolve(secret_store)).transpose()?;
+                if let Some(s) = &secret {
+                    crate::policy::Scrubber::global().register("OIDC_CLIENT_SECRET", s);
+                }
+                Some(Arc::new(crate::http::oidc::OidcClient::new(o, secret)?))
+            }
+            _ => None,
+        };
         let webhook_secret = match &config.http.webhook_secret {
             Some(r) => Some(Arc::<str>::from(r.resolve(secret_store)?)),
             None => None,
@@ -158,6 +182,7 @@ impl AppState {
         let web = Arc::new(WebHub::new());
         let cost_guard = Arc::new(crate::llm::CostGuard::new(
             Arc::new(crate::llm::FakeLlm::new()),
+            Arc::new(crate::llm::SpendMeter::new()),
             repos.clone(),
             config.limits.max_cost_per_day_cents,
         ));
@@ -167,6 +192,8 @@ impl AppState {
             jwt_secret,
             webhook_secret,
             hanko,
+            oidc,
+            dispatch: None,
             repos,
             memory: Arc::new(crate::memory::Memory::disabled()),
             cost_guard,
@@ -187,6 +214,9 @@ impl AppState {
             auth_limiter: Arc::new(RateLimiter::new(10, 60)),
             used_stream_tickets: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cli_auth_codes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            port_forwards: Arc::new(crate::targets::port_forward::PortForwards::none()),
+            access: Arc::new(crate::access::Access::solo()),
+            audit: None,
         })
     }
 
@@ -250,6 +280,7 @@ impl AppState {
             .join("config.toml");
         let cost_guard = Arc::new(crate::llm::CostGuard::new(
             Arc::new(crate::llm::FakeLlm::new()),
+            Arc::new(crate::llm::SpendMeter::new()),
             repos.clone(),
             config.limits.max_cost_per_day_cents,
         ));
@@ -259,6 +290,8 @@ impl AppState {
             jwt_secret,
             webhook_secret: None,
             hanko,
+            oidc: None,
+            dispatch: None,
             repos,
             memory: Arc::new(crate::memory::Memory::disabled()),
             cost_guard,
@@ -279,6 +312,9 @@ impl AppState {
             auth_limiter: Arc::new(RateLimiter::new(10, 60)),
             used_stream_tickets: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cli_auth_codes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            port_forwards: Arc::new(crate::targets::port_forward::PortForwards::none()),
+            access: Arc::new(crate::access::Access::solo()),
+            audit: None,
         }
     }
 
@@ -295,7 +331,7 @@ impl AppState {
 /// never drift apart on which provider they honour.
 fn build_hanko(config: &Config) -> crate::Result<Option<Arc<crate::http::hanko::HankoClient>>> {
     match config.auth.provider {
-        crate::config::AuthProvider::Local => Ok(None),
+        crate::config::AuthProvider::Local | crate::config::AuthProvider::Oidc => Ok(None),
         crate::config::AuthProvider::Hanko => {
             Ok(Some(Arc::new(crate::http::hanko::HankoClient::new(&config.auth)?)))
         }

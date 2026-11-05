@@ -8,6 +8,7 @@
 //! resolved resource credentials with the scrubber — assemble's
 //! `registry_from_config` deliberately does not re-register (see its doc).
 
+use crate::llm::hindsight_metrics_url;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -56,16 +57,24 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
     let estop = Arc::new(EStop::new(home.join(crate::policy::estop::SENTINEL_FILE), repos.clone()));
     let audit = Arc::new(AuditWriter::new(repos.clone()));
     let config_arc = Arc::new(config.clone());
-    let policy = Arc::new(Policy::new(
-        config_arc.clone(),
-        executors,
-        audit,
-        estop.clone(),
-        repos.clone(),
-        scrubber.clone(),
-    ));
+    // Who may see and do what. A bad `[access]` is a boot error, never a
+    // silent fallback to "everyone sees everything".
+    let access = Arc::new(crate::access::Access::new(&config.access, home)?);
+    access.set_directory(Arc::new(crate::access::RepoDirectory(repos.clone())));
+    tracing::info!(preset = ?config.access.preset, roles = config.access.roles.len(), "access rules loaded");
+    let policy = Arc::new(
+        Policy::new(
+            config_arc.clone(),
+            executors,
+            audit.clone(),
+            estop.clone(),
+            repos.clone(),
+            scrubber.clone(),
+        )
+        .with_access(access.clone()),
+    );
 
-    // The shipped LLM chain (FallbackLlm over OpenRouter, or the
+    // The shipped LLM chain (dcpr-llm's Fallback over OpenRouter, or the
     // clearly-logged FakeLlm with no key) — the same chain the evals gate on
     // — wrapped in the daily cost cap (`limits.max_cost_per_day_cents`).
     // The guard's notifier is installed further down, once the channel
@@ -82,9 +91,18 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         }
         None => None,
     };
-    let base_llm = crate::llm::build_chain(&config.llm, &secret_store)?;
-    let mut cost_guard =
-        crate::llm::CostGuard::new(base_llm, repos.clone(), config.limits.max_cost_per_day_cents);
+    let spend_meter = Arc::new(crate::llm::SpendMeter::new());
+    let base_llm = crate::llm::build_chain(
+        &config.llm,
+        &secret_store,
+        crate::llm::pricing::priced(spend_meter.clone()),
+    )?;
+    let mut cost_guard = crate::llm::CostGuard::new(
+        base_llm,
+        spend_meter,
+        repos.clone(),
+        config.limits.max_cost_per_day_cents,
+    );
     if config.memory.hindsight_url.is_some() {
         let hindsight_key =
             std::env::var("HINDSIGHT_LLM_API_KEY").ok().filter(|key| !key.trim().is_empty());
@@ -97,11 +115,13 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
                 let shared = opsclaw_llm_key.as_deref() == Some(key.as_str());
                 cost_guard.with_hindsight_openrouter_meter(key, shared)
             }
-            _ => cost_guard.with_unmetered_hindsight(),
+            // Any other Hindsight LLM (OpenAI direct, say): meter it from
+            // Hindsight's own token counters.
+            _ => cost_guard.with_hindsight_metrics_meter(hindsight_metrics_url(&config.memory)),
         };
     }
     let cost_guard = Arc::new(cost_guard);
-    let llm: Arc<dyn crate::llm::LlmProvider> = cost_guard.clone();
+    let llm: Arc<crate::llm::Llm> = cost_guard.clone();
 
     // Memory: Hindsight when configured, honest no-op otherwise.
     let memory = match &config.memory.hindsight_url {
@@ -163,7 +183,8 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         repos.clone(),
         memory.clone(),
         llm,
-    )?;
+    )?
+    .with_access(access.clone(), repos.clone());
 
     let scheduler_handle = SchedulerHandle::new(config.daemon.tick_seconds.max(1) * 1000);
     let mut state = AppState::new(
@@ -176,9 +197,22 @@ pub async fn daemon_state(config: Config, config_path: PathBuf, home: &Path) -> 
         estop,
         scheduler_handle,
     )?;
+    state.access = access.clone();
+    state.audit = Some(audit);
+    // In-cluster resources reached through supervised port-forwards: start
+    // them before anything (a scan, the scheduler) can call those tools.
+    state.port_forwards =
+        Arc::new(match crate::targets::port_forward::start(&state.config, &secret_store).await {
+            Ok(forwards) => forwards,
+            Err(e) => {
+                tracing::warn!("port-forwards not started: {e}");
+                crate::targets::port_forward::PortForwards::none()
+            }
+        });
     state.cost_guard = cost_guard.clone();
     state.memory = memory;
     state.turn_gate = deps.turn_gate.clone();
+    state.dispatch = Some(deps.clone());
     // The web-session and webhook signing secrets, resolved by
     // `AppState::new` just above — registered for the same reason as the
     // LLM key: no resolved secret stays scrub-invisible.

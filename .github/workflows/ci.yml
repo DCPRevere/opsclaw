@@ -46,7 +46,8 @@ jobs:
         run: ./scripts/check-migration-immutability.sh
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component clippy
+        # Installs the version pinned in rust-toolchain.toml.
+        run: rustup toolchain install
 
       # Purpose-built rust cache: prunes stale artifacts, splits registry/target,
       # and actually updates on hits (actions/cache never re-saved on exact key).

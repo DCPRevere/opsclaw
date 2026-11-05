@@ -61,6 +61,14 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Result<&str> {
 
 pub(crate) struct Ctx {
     pub(crate) account_id: Uuid,
+    /// Cookie: the web UI. Bearer: the CLI.
+    pub(crate) via: crate::access::Via,
+}
+
+impl Ctx {
+    pub(crate) fn principal(&self) -> crate::domain::Principal {
+        crate::domain::Principal::Operator { account: self.account_id }
+    }
 }
 
 /// Socket peer when the router is served with Axum `ConnectInfo`; absent for
@@ -115,7 +123,7 @@ pub(crate) async fn authenticate(state: &AppState, headers: &HeaderMap) -> Resul
         let span = tracing::Span::current();
         span.record("account", tracing::field::display(&account_id));
         span.record("session", claims.ver);
-        return Ok(Ctx { account_id });
+        return Ok(Ctx { account_id, via: crate::access::Via::Web });
     }
 
     if let Ok(token) = bearer(headers)
@@ -125,14 +133,15 @@ pub(crate) async fn authenticate(state: &AppState, headers: &HeaderMap) -> Resul
         // (see `CliTokenRepo::find_cli_token`) — binding it the other way
         // round hands every `Authed` route the TOKEN row's uuid as the
         // operator identity, which `by_id` then fails to resolve.
-        let (_token_id, account_id) = state
+        let (token_id, account_id) = state
             .repos
             .find_cli_token(&super::cli_auth::token_hash(token))
             .await?
             .ok_or_else(|| Error::unauthorized("token revoked — run `opsclaw-cli login`"))?;
+        super::cli_auth::check_token_age(state, token_id, account_id).await?;
         let span = tracing::Span::current();
         span.record("account", tracing::field::display(&account_id));
-        return Ok(Ctx { account_id });
+        return Ok(Ctx { account_id, via: crate::access::Via::Cli });
     }
 
     Err(Error::unauthorized("not signed in"))
@@ -212,8 +221,20 @@ pub(crate) fn session_response(
     account_id: Uuid,
     token_version: i64,
 ) -> Result<Response> {
-    let token = auth::issue_token(&state.jwt_secret, account_id, token_version)?;
-    let cookie = auth::session_cookie(&token, state.config.http.cookies_secure);
+    let (token, cookie) = match &state.config.auth.oidc {
+        Some(o) if state.config.auth.provider == crate::config::AuthProvider::Oidc => {
+            let ttl = chrono::Duration::hours(o.session_hours.max(1) as i64);
+            let token = auth::issue_token_for(&state.jwt_secret, account_id, token_version, ttl)?;
+            let cookie = auth::session_cookie_for(&token, state.config.http.cookies_secure, ttl);
+            (token, cookie)
+        }
+        _ => {
+            let token = auth::issue_token(&state.jwt_secret, account_id, token_version)?;
+            let cookie = auth::session_cookie(&token, state.config.http.cookies_secure);
+            (token, cookie)
+        }
+    };
+    let _ = &token;
     Ok((
         [(axum::http::header::SET_COOKIE, cookie)],
         axum::Json(json!({ "account_id": account_id })),

@@ -179,6 +179,12 @@ enum Command {
     },
     /// [local] Render a structured postmortem for an incident.
     Postmortem { id: Uuid },
+    /// [local] Access rules: who holds which role, why a decision went the
+    /// way it did, the Cedar policies in force, elevations, restrictions.
+    Access {
+        #[command(subcommand)]
+        command: AccessCommand,
+    },
     /// [local] Runbook authoring + execution.
     #[command(name = "runbooks", alias = "runbook")]
     Runbook {
@@ -208,9 +214,11 @@ enum Command {
         limit: i64,
         #[arg(long)]
         json: bool,
-        /// Shared room: `operations` or `project::environment`.
-        #[arg(long, default_value = "operations")]
-        conversation: String,
+        /// Shared room: `operations` or `project::environment`. Default: the
+        /// only environment when the config has exactly one (local chat),
+        /// otherwise `operations`.
+        #[arg(long)]
+        conversation: Option<String>,
     },
     /// [remote] Daemon status. LOCAL mode has no analogue for this (there is no
     /// running-daemon introspection without a daemon to ask) — this
@@ -340,6 +348,10 @@ enum AccountCommand {
         /// Hanko console). Required under the hanko provider.
         #[arg(long)]
         hanko_subject: Option<String>,
+        /// The person's subject at the SSO provider (`sub` in the ID
+        /// token). For `auth.provider = "oidc"` without auto_create.
+        #[arg(long)]
+        oidc_subject: Option<String>,
     },
     /// List operator accounts.
     List {
@@ -625,6 +637,34 @@ enum InvitesCommand {
 }
 
 #[derive(Subcommand)]
+enum AccessCommand {
+    /// Every account with its roles and IdP groups.
+    Who,
+    /// Explain one decision for one person.
+    Explain {
+        /// The person's account email.
+        email: String,
+        /// Target path, e.g. `example::sandbox::aks::elasticsearch::logs`.
+        target: String,
+        /// Data class (`state`, `logs`, …). Ignored for request/approve.
+        #[arg(long, default_value = "state")]
+        class: String,
+        /// `read`, `request`, `approve`, `view_findings` or `elevate`.
+        #[arg(long, default_value = "read")]
+        action: String,
+        /// Surface: `web`, `cli` or `mcp`.
+        #[arg(long, default_value = "web")]
+        via: String,
+    },
+    /// Print the Cedar policies in force (built-ins, roles, custom file).
+    Policies,
+    /// List elevations (time-boxed raw access).
+    Elevations,
+    /// Restrict an incident to named people or groups; no names lifts it.
+    Restrict { incident: Uuid, to: Vec<String> },
+}
+
+#[derive(Subcommand)]
 enum AuditCommand {
     /// Read the chain: what the agent actually did. Defaults to the most
     /// recent records, since "what just happened?" is the usual question.
@@ -737,6 +777,38 @@ enum MemoryCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Remote chat's room when none is given: the gateway may not share this
+/// machine's config, so there's no "only environment" to pick.
+const REMOTE_DEFAULT_CONVERSATION: &str = "operations";
+
+/// Local chat's room: the one given, else the only configured environment
+/// (the Operations room has no target tools, so a question about a cluster
+/// asked there can't be answered), else `operations`.
+fn local_conversation(cfg_path: &std::path::Path, given: Option<String>) -> String {
+    if let Some(given) = given {
+        return given;
+    }
+    let only_env = Config::load(Some(cfg_path)).ok().and_then(|config| {
+        let mut envs = config
+            .projects
+            .iter()
+            .flat_map(|p| p.envs.iter().map(move |e| format!("{}::{}", p.name, e.name)));
+        match (envs.next(), envs.next()) {
+            (Some(only), None) => Some(only),
+            _ => None,
+        }
+    });
+    match only_env {
+        Some(env) => {
+            eprintln!(
+                "(conversation: {env}, the only environment; --conversation operations for the shared room)"
+            );
+            env
+        }
+        None => "operations".to_string(),
+    }
 }
 
 fn opsclaw_home() -> PathBuf {
@@ -1093,6 +1165,59 @@ async fn dispatch(
             }
         },
 
+        Command::Access { command } => {
+            let config = Config::load(Some(cfg_path))?;
+            match command {
+                AccessCommand::Policies => {
+                    println!("{}", opsclaw::cli::access_cmd::policies(&config, home)?);
+                }
+                AccessCommand::Who => {
+                    let db = open_db(cfg_path).await?;
+                    for line in opsclaw::cli::access_cmd::who(&config, home, &db).await? {
+                        println!("{line}");
+                    }
+                }
+                AccessCommand::Explain { email, target, class, action, via } => {
+                    let via = match via.as_str() {
+                        "web" => opsclaw::access::Via::Web,
+                        "cli" => opsclaw::access::Via::Cli,
+                        "mcp" => opsclaw::access::Via::Mcp,
+                        other => {
+                            return Err(opsclaw::Error::validation(format!(
+                                "--via must be web, cli or mcp, not {other:?}"
+                            )));
+                        }
+                    };
+                    let db = open_db(cfg_path).await?;
+                    for line in opsclaw::cli::access_cmd::explain(
+                        &config, home, &db, &email, &action, &target, &class, via,
+                    )
+                    .await?
+                    {
+                        println!("{line}");
+                    }
+                }
+                AccessCommand::Elevations => {
+                    let db = open_db(cfg_path).await?;
+                    let lines = opsclaw::cli::access_cmd::elevations(&db).await?;
+                    if lines.is_empty() {
+                        println!("no elevations");
+                    }
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }
+                AccessCommand::Restrict { incident, to } => {
+                    let db = open_db(cfg_path).await?;
+                    opsclaw::cli::access_cmd::restrict(&db, incident, &to).await?;
+                    if to.is_empty() {
+                        println!("incident {incident}: restriction lifted");
+                    } else {
+                        println!("incident {incident}: only {} may see it", to.join(", "));
+                    }
+                }
+            }
+        }
         Command::Postmortem { id } => {
             let db = open_db(cfg_path).await?;
             match opsclaw::cli::postmortem_cmd::render(&db, id).await? {
@@ -1321,7 +1446,7 @@ async fn dispatch(
             }
             let body = opsclaw::cli::remote::history::load_scoped(
                 &remote_session()?,
-                &conversation,
+                conversation.as_deref().unwrap_or(REMOTE_DEFAULT_CONVERSATION),
                 before,
                 limit,
             )
@@ -1346,6 +1471,7 @@ async fn dispatch(
                     "--history cannot be combined with a chat message",
                 ));
             }
+            let conversation = local_conversation(cfg_path, conversation);
             let rows = opsclaw::cli::chat_history_cmd::load_scoped(
                 &open_db(cfg_path).await?,
                 &conversation,
@@ -1363,6 +1489,8 @@ async fn dispatch(
         }
         Command::Chat { message, remote: true, history: false, conversation, .. } => {
             let session = remote_session()?;
+            let conversation =
+                conversation.unwrap_or_else(|| REMOTE_DEFAULT_CONVERSATION.to_string());
             match message {
                 Some(m) => {
                     opsclaw::cli::remote::chat::one_shot_scoped(&session, &conversation, &m)
@@ -1371,29 +1499,31 @@ async fn dispatch(
                 None => opsclaw::cli::remote::chat::repl_scoped(&session, &conversation).await?,
             }
         }
-        Command::Chat { message, remote: false, history: false, conversation, .. } => match message
-        {
-            Some(m) => {
-                let config = Config::load(Some(cfg_path))?;
-                config.validate()?;
-                let state =
-                    opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
-                let conversation = opsclaw::domain::ChatConversation::parse(&conversation)?;
-                let reply = state
-                    .chat
-                    .chat_scoped(
-                        &conversation,
-                        &Uuid::new_v4().to_string(),
-                        opsclaw::domain::Principal::System,
-                        opsclaw::cli::chat_repl::LOCAL_SPEAKER,
-                        &m,
-                    )
-                    .await?;
-                println!("{reply}");
-                state.chat.drain(std::time::Duration::from_secs(20)).await;
+        Command::Chat { message, remote: false, history: false, conversation, .. } => {
+            let conversation = local_conversation(cfg_path, conversation);
+            match message {
+                Some(m) => {
+                    let config = Config::load(Some(cfg_path))?;
+                    config.validate()?;
+                    let state =
+                        opsclaw::boot::daemon_state(config, cfg_path.to_path_buf(), home).await?;
+                    let conversation = opsclaw::domain::ChatConversation::parse(&conversation)?;
+                    let reply = state
+                        .chat
+                        .chat_scoped(
+                            &conversation,
+                            &Uuid::new_v4().to_string(),
+                            opsclaw::domain::Principal::System,
+                            opsclaw::cli::chat_repl::LOCAL_SPEAKER,
+                            &m,
+                        )
+                        .await?;
+                    println!("{reply}");
+                    state.chat.drain(std::time::Duration::from_secs(20)).await;
+                }
+                None => opsclaw::cli::chat_repl::run_scoped(cfg_path, home, &conversation).await?,
             }
-            None => opsclaw::cli::chat_repl::run_scoped(cfg_path, home, &conversation).await?,
-        },
+        }
 
         // `status` is remote-only (see `Command::Status`'s doc).
         Command::Status { json } => {
@@ -1536,7 +1666,7 @@ async fn dispatch(
         }
 
         Command::Account { command } => match command {
-            AccountCommand::Create { email, name, hanko_subject } => {
+            AccountCommand::Create { email, name, hanko_subject, oidc_subject } => {
                 // Resolve the configured provider BEFORE prompting. A
                 // password prompt under an external provider blocks the
                 // operator on a hidden read for a credential the daemon
@@ -1549,6 +1679,20 @@ async fn dispatch(
                 use opsclaw::config::AuthProvider;
                 let password;
                 let credential = match (provider, hanko_subject.as_deref()) {
+                    (AuthProvider::Oidc, None) => match oidc_subject.as_deref() {
+                        Some(sub) => Credential::OidcSubject(sub),
+                        None => {
+                            return Err(opsclaw::Error::validation(
+                                "this daemon uses SSO sign-in — pass --oidc-subject <sub>, or set \
+                                 auth.oidc.auto_create = true so accounts are made at first sign-in",
+                            ));
+                        }
+                    },
+                    (AuthProvider::Oidc, Some(_)) => {
+                        return Err(opsclaw::Error::validation(
+                            "this daemon uses SSO sign-in — use --oidc-subject, not --hanko-subject",
+                        ));
+                    }
                     (AuthProvider::Local, None) => {
                         password = read_password_confirmed()?;
                         Credential::Password(&password)
@@ -1717,6 +1861,18 @@ async fn dispatch(
         },
 
         Command::Scan { target, json } => {
+            // A manual scan runs the agent in this process: show its tool
+            // failures and refusals on stderr (RUST_LOG overrides).
+            let _ = tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                        tracing_subscriber::EnvFilter::new(
+                            "opsclaw::agent=warn,opsclaw::tools=warn,opsclaw::memory=warn",
+                        )
+                    }),
+                )
+                .try_init();
             let config = Config::load(Some(cfg_path))?;
             config.validate()?;
             // Full daemon wiring (no HTTP bind) — a scan drives the same

@@ -81,6 +81,32 @@ pub fn token_hash(token: &str) -> String {
     sha256_hex(token)
 }
 
+/// Under SSO, CLI tokens expire (`auth.oidc.cli_token_hours`), so a person
+/// removed at the IdP loses the CLI too: they can't sign in again to mint
+/// a new one. Other providers keep tokens until revoked.
+pub(crate) async fn check_token_age(
+    state: &crate::http::state::AppState,
+    token_id: uuid::Uuid,
+    account: uuid::Uuid,
+) -> crate::Result<()> {
+    let hours = match (&state.config.auth.provider, &state.config.auth.oidc) {
+        (crate::config::AuthProvider::Oidc, Some(o)) if o.cli_token_hours > 0 => o.cli_token_hours,
+        _ => return Ok(()),
+    };
+    let tokens = state.repos.list_cli_tokens(account).await?;
+    let created = tokens
+        .iter()
+        .find(|t| t.id == token_id)
+        .map(|t| t.created_at)
+        .ok_or_else(|| crate::Error::unauthorized("token revoked — run `opsclaw-cli login`"))?;
+    if created + chrono::Duration::hours(hours as i64) < chrono::Utc::now() {
+        return Err(crate::Error::unauthorized(
+            "CLI session expired — run `opsclaw-cli login` to sign in again",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

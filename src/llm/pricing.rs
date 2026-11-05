@@ -1,220 +1,81 @@
-//! Per-model price table and usage recording. Ported from gianna's
-//! `src/usage.rs` (pricing table + provider-cost-wins logic only — the
-//! household/cap/PostHog accounting machinery is NOT ported; DB wiring for
-//! opsclaw's usage sink happens in a later wave).
+//! Pricing for the daily spend cap.
+//!
+//! A provider's reported cost always wins (OpenRouter reports one). For
+//! providers that don't report cost, such as OpenAI direct, `dcpr-llm`'s
+//! [`PricedUsage`] prices each call from its built-in list prices
+//! ([`PriceTable::built_in`]) before it reaches the [`SpendMeter`].
+//!
+//! OpsClaw adds one rule of its own: a model with no price at all is charged
+//! at [`UNKNOWN_MODEL_PRICE`], never treated as free. An unpriced call
+//! silently costing nothing would let the daily cap be blown by a routing
+//! change or a model added without a price.
+//!
+//! [`SpendMeter`]: crate::llm::SpendMeter
 
-use crate::llm::TokenUsage;
+use std::sync::Arc;
 
-/// Price per 1M tokens, in USD cents, for a model.
-#[derive(Debug, Clone, Copy)]
-pub struct ModelPrice {
-    pub input_cents_per_mtok: f64,
-    pub output_cents_per_mtok: f64,
+use dcpr_llm::{ModelPrice, PriceTable, PricedUsage, Usage, UsageSink};
+
+use crate::domain::Principal;
+
+/// Sonnet-class list prices, deliberately expensive: an unknown model costs
+/// about 300 times a cheap production model, so it reaches the cap loudly
+/// instead of passing unmetered.
+pub const UNKNOWN_MODEL_PRICE: ModelPrice = ModelPrice::new(300.0, 1500.0);
+
+/// The usage sink the shipped chain reports to: list prices for anything the
+/// provider didn't price, then `meter`.
+pub fn priced(meter: Arc<dyn UsageSink<Principal>>) -> Arc<dyn UsageSink<Principal>> {
+    Arc::new(PricedUsage::new(meter, PriceTable::built_in()))
 }
 
-/// The mid-tier default applied to an unrecognised model id (~Sonnet-class).
-/// Public so callers/tests can compare against it (an unknown id priced here is
-/// ~300x a cheap prod model and would blow through `limits.max_cost_per_day_cents`
-/// within a few turns — deliberately expensive so a routing/rename event is
-/// loud, not free).
-pub const UNKNOWN_MODEL_PRICE: ModelPrice =
-    ModelPrice { input_cents_per_mtok: 300.0, output_cents_per_mtok: 1500.0 };
-
-/// True when `price_for(model)` fell through to [`UNKNOWN_MODEL_PRICE`] — i.e.
-/// the table has no row for this id, so its cost is a guess.
-pub fn is_unknown_model(model: &str) -> bool {
-    let p = price_for(model);
-    p.input_cents_per_mtok == UNKNOWN_MODEL_PRICE.input_cents_per_mtok
-        && p.output_cents_per_mtok == UNKNOWN_MODEL_PRICE.output_cents_per_mtok
-}
-
-/// Look up pricing for a model id. Falls back to a conservative default so an
-/// unknown model still accrues *some* cost rather than appearing free.
-pub fn price_for(model: &str) -> ModelPrice {
-    // USD cents per 1M tokens (1 USD = 100 cents). Anthropic public pricing.
-    match model {
-        m if m.contains("opus") => {
-            ModelPrice { input_cents_per_mtok: 500.0, output_cents_per_mtok: 2500.0 }
-        }
-        m if m.contains("sonnet") => {
-            ModelPrice { input_cents_per_mtok: 300.0, output_cents_per_mtok: 1500.0 }
-        }
-        m if m.contains("haiku") => {
-            ModelPrice { input_cents_per_mtok: 100.0, output_cents_per_mtok: 500.0 }
-        }
-        // OpenAI (approximate public pricing).
-        m if m.contains("gpt-4o-mini") => {
-            ModelPrice { input_cents_per_mtok: 15.0, output_cents_per_mtok: 60.0 }
-        }
-        m if m.contains("gpt-4o") => {
-            ModelPrice { input_cents_per_mtok: 250.0, output_cents_per_mtok: 1000.0 }
-        }
-        m if m.contains("gpt-4") => {
-            ModelPrice { input_cents_per_mtok: 300.0, output_cents_per_mtok: 1500.0 }
-        }
-        // OpenRouter cheap models (public pricing, 2026-06; c per 1M tokens).
-        m if m.contains("deepseek-v4-flash") => {
-            ModelPrice { input_cents_per_mtok: 0.983, output_cents_per_mtok: 1.966 }
-        }
-        m if m.contains("deepseek-v4-pro") => {
-            ModelPrice { input_cents_per_mtok: 4.35, output_cents_per_mtok: 8.7 }
-        }
-        m if m.contains("minimax-m3") => {
-            ModelPrice { input_cents_per_mtok: 30.0, output_cents_per_mtok: 120.0 }
-        }
-        m if m.contains("qwen3-235b-a22b") => {
-            ModelPrice { input_cents_per_mtok: 9.0, output_cents_per_mtok: 10.0 }
-        }
-        m if m.contains("llama-3.3-70b") => {
-            ModelPrice { input_cents_per_mtok: 10.0, output_cents_per_mtok: 32.0 }
-        }
-        m if m.contains("mistral-small-3.2") => {
-            ModelPrice { input_cents_per_mtok: 7.5, output_cents_per_mtok: 20.0 }
-        }
-        m if m.contains("gemma-3-27b") => {
-            ModelPrice { input_cents_per_mtok: 8.0, output_cents_per_mtok: 16.0 }
-        }
-        m if m.contains("gpt-oss-120b") => {
-            ModelPrice { input_cents_per_mtok: 3.9, output_cents_per_mtok: 18.0 }
-        }
-        // Unknown — assume mid-tier so we don't undercount.
-        _ => UNKNOWN_MODEL_PRICE,
-    }
-}
-
-/// Model ids already WARNed about as unknown, so the log fires once per id (not
-/// once per call). A routing/rename event or a model added to the chain
-/// without a price row is a real spend hazard — see [`warn_if_unknown_model`].
-static WARNED_UNKNOWN_MODELS: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
-    std::sync::Mutex::new(None);
-
-/// WARN once per model id when the unknown-model default is about to price a
-/// call. The default is ~300x a cheap prod model and feeds `max_cost_per_day_cents`
-/// enforcement, so an unrecognised id silently throttling the daemon must be
-/// visible in prod immediately.
-fn warn_if_unknown_model(model: &str) {
-    if !is_unknown_model(model) {
-        return;
-    }
-    let mut guard = WARNED_UNKNOWN_MODELS.lock().unwrap_or_else(|p| p.into_inner());
-    let seen = guard.get_or_insert_with(std::collections::HashSet::new);
-    if seen.insert(model.to_string()) {
-        tracing::warn!(
-            model,
-            "unknown model id priced at the mid-tier DEFAULT (~300x a cheap prod \
-             model) — cost for this id is a guess; add a price row or check for \
-             an OpenRouter routing/rename event"
-        );
-    }
-}
-
-/// The cached-read discount vs the full input rate. Anthropic charges cache
-/// reads at 0.1x input; OpenAI/DeepSeek land near 0.1-0.25x. 0.1 is the
-/// standard (and slightly conservative-high vs some providers).
-const CACHE_READ_RATE_FRACTION: f64 = 0.1;
-
-/// Cost of a token usage record in USD cents (fractional), given the model's
-/// price table row. `cache_read_tokens` is priced at the discounted rate and
-/// is DISJOINT from `input_tokens` (providers report the uncached remainder
-/// there).
-pub fn cost_cents(
-    input_tokens: u64,
-    cache_read_tokens: u64,
-    output_tokens: u64,
-    model: &str,
-) -> f64 {
-    let p = price_for(model);
-    let input = input_tokens as f64 / 1_000_000.0;
-    let cached = cache_read_tokens as f64 / 1_000_000.0;
-    let output = output_tokens as f64 / 1_000_000.0;
-    input * p.input_cents_per_mtok
-        + cached * p.input_cents_per_mtok * CACHE_READ_RATE_FRACTION
-        + output * p.output_cents_per_mtok
-}
-
-/// Fill in `usage.cost_cents` when a provider hasn't already supplied one
-/// (OpenRouter's `usage.cost` is provider-truth and wins; see the
-/// OpenAiCompatProvider quirks). WARNs once per unknown model id actually
-/// priced from the table.
-pub fn price_usage(usage: &mut TokenUsage, model: &str) {
-    if usage.cost_cents.is_some() {
-        return;
-    }
-    warn_if_unknown_model(model);
-    usage.cost_cents = Some(cost_cents(usage.input_tokens, 0, usage.output_tokens, model));
-}
-
-/// Fire-and-forget usage recording sink. DB-backed persistence lands in a
-/// later wave; for now this is the seam a real recorder plugs into.
-pub trait UsageSink: Send + Sync {
-    /// Record one costed LLM call. Must not block the caller — implementations
-    /// that need IO should spawn it.
-    fn record(&self, principal: &crate::domain::Principal, model: &str, usage: TokenUsage);
-}
-
-/// No-op sink — the default until DB wiring lands.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoopUsageSink;
-
-impl UsageSink for NoopUsageSink {
-    fn record(&self, _principal: &crate::domain::Principal, _model: &str, _usage: TokenUsage) {}
+/// The cost of one call in cents: the reported or table price when there is
+/// one, otherwise [`UNKNOWN_MODEL_PRICE`].
+pub fn call_cost_cents(usage: &Usage, model: &str, priced_cents: Option<f64>) -> f64 {
+    priced_cents.unwrap_or_else(|| {
+        // PricedUsage has already warned once for this model.
+        tracing::debug!(model, "unpriced call charged at the unknown-model default");
+        UNKNOWN_MODEL_PRICE.cost_cents(usage)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    #[test]
-    fn cost_is_priced_per_model() {
-        // Sonnet: 300c in + 1500c out = 1800c for 1M+1M.
-        let c = cost_cents(1_000_000, 0, 1_000_000, "claude-sonnet-4-6");
-        assert!((c - 1800.0).abs() < 0.01, "got {c}");
-        // Opus is pricier.
-        assert!(cost_cents(1_000_000, 0, 1_000_000, "claude-opus-4-8") > c);
+    /// Records what reaches the meter.
+    #[derive(Default)]
+    struct Seen(Mutex<Vec<(String, Option<f64>)>>);
+    impl UsageSink<Principal> for Seen {
+        fn record(&self, _: &Principal, model: &str, _: Usage, cents: Option<f64>) {
+            self.0.lock().unwrap().push((model.to_string(), cents));
+        }
+    }
+
+    fn million_in_and_out() -> Usage {
+        Usage { input_tokens: 1_000_000, output_tokens: 1_000_000, ..Default::default() }
     }
 
     #[test]
-    fn cache_reads_are_priced_below_input_and_are_disjoint() {
-        // 1M uncached input + 1M cached reads on Haiku (input 100c/Mtok).
-        let c = cost_cents(1_000_000, 1_000_000, 0, "claude-haiku-4-5");
-        let full = 100.0 + 100.0; // if cached were charged at the input rate
-        assert!(c < full, "cached reads must be discounted: {c} !< {full}");
-        // 100c input + 100c * 0.1 cached = 110c.
-        assert!((c - 110.0).abs() < 0.01, "got {c}");
+    fn openai_calls_are_priced_from_the_library_table() {
+        let seen = Arc::new(Seen::default());
+        let sink = priced(seen.clone());
+        let caller = Principal::Agent { job: None };
+        sink.record(&caller, "gpt-6.1-sol", million_in_and_out(), None);
+        sink.record(&caller, "openai/gpt-6.1-sol", million_in_and_out(), Some(7.0));
+        sink.record(&caller, "some/never-seen-model", million_in_and_out(), None);
+        let seen = seen.0.lock().unwrap();
+        // $2 in + $10 out per million tokens.
+        assert_eq!(seen[0].1, Some(1200.0));
+        assert_eq!(seen[1].1, Some(7.0), "a reported cost is never overridden");
+        assert_eq!(seen[2].1, None, "no price: the meter decides");
     }
 
     #[test]
-    fn unknown_model_is_detected_and_priced_at_the_default() {
-        assert!(is_unknown_model("some/never-seen-model"));
-        assert!(!is_unknown_model("deepseek-v4-flash"));
-        let p = price_for("some/never-seen-model");
-        assert_eq!(p.input_cents_per_mtok, UNKNOWN_MODEL_PRICE.input_cents_per_mtok);
-        assert_eq!(p.output_cents_per_mtok, UNKNOWN_MODEL_PRICE.output_cents_per_mtok);
-    }
-
-    #[test]
-    fn price_usage_fills_cost_from_the_table_when_absent() {
-        let mut usage = TokenUsage { input_tokens: 1_000_000, output_tokens: 0, cost_cents: None };
-        price_usage(&mut usage, "claude-haiku-4-5");
-        assert_eq!(usage.cost_cents, Some(100.0));
-    }
-
-    #[test]
-    fn price_usage_never_overrides_a_provider_reported_cost() {
-        // Table would price Haiku's 1M input at 100c; provider says 3.5c.
-        let mut usage =
-            TokenUsage { input_tokens: 1_000_000, output_tokens: 0, cost_cents: Some(3.5) };
-        price_usage(&mut usage, "claude-haiku-4-5");
-        assert_eq!(usage.cost_cents, Some(3.5), "provider cost must win");
-    }
-
-    #[test]
-    fn noop_sink_does_not_panic() {
-        let sink = NoopUsageSink;
-        sink.record(
-            &crate::domain::Principal::System,
-            "claude-haiku-4-5",
-            TokenUsage { input_tokens: 1, output_tokens: 1, cost_cents: Some(0.1) },
-        );
+    fn an_unpriced_model_is_charged_the_expensive_default_never_nothing() {
+        let usage = million_in_and_out();
+        assert_eq!(call_cost_cents(&usage, "some/never-seen-model", None), 1800.0);
+        assert_eq!(call_cost_cents(&usage, "gpt-6.1-sol", Some(1200.0)), 1200.0);
     }
 }

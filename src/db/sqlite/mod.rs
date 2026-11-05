@@ -10,6 +10,7 @@
 //! unlike gianna's Postgres-gated `pg` tests, there is no env var to set —
 //! see that file's module doc).
 
+mod access;
 mod accounts;
 mod approvals;
 mod audit;

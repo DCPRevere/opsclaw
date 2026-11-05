@@ -3,7 +3,7 @@
 //! `hh`/`household_id` away (opsclaw is single-tenant; no household to
 //! carry in a claim) and the cookie name/env-derived constants localized.
 
-use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+use argon2::password_hash::PasswordHasher;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -13,9 +13,9 @@ use uuid::Uuid;
 use crate::{Error, Result};
 
 pub fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    // argon2 0.6 draws a fresh random salt from the OS for each hash.
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|h| h.to_string())
         .map_err(|e| Error::other(format!("hash: {e}")))
 }
@@ -78,6 +78,24 @@ pub fn issue_token(secret: &str, account_id: Uuid, ver: i64) -> Result<String> {
     let claims = Claims { sub: account_id.to_string(), exp, ver };
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes()))
         .map_err(|e| Error::other(format!("jwt encode: {e}")))
+}
+
+/// Like [`issue_token`], with a provider-chosen lifetime (oidc sessions are
+/// short so IdP changes take effect at the next sign-in).
+pub fn issue_token_for(secret: &str, account_id: Uuid, ver: i64, ttl: Duration) -> Result<String> {
+    let exp = (Utc::now() + ttl).timestamp() as usize;
+    let claims = Claims { sub: account_id.to_string(), exp, ver };
+    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes()))
+        .map_err(|e| Error::other(format!("jwt encode: {e}")))
+}
+
+/// [`session_cookie`] with a matching lifetime.
+pub fn session_cookie_for(token: &str, secure: bool, ttl: Duration) -> String {
+    let max_age = ttl.num_seconds();
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}{secure_attr}"
+    )
 }
 
 /// True when a still-valid token has passed its half-life and should be
@@ -202,6 +220,16 @@ mod tests {
         let h = hash_password("correct horse").unwrap();
         assert!(verify_password("correct horse", &h).unwrap());
         assert!(!verify_password("wrong", &h).unwrap());
+    }
+
+    /// A hash written by argon2 0.5 (OpsClaw ≤ 0.3.0). Accounts created
+    /// before the argon2 upgrade must still sign in.
+    #[test]
+    fn a_hash_from_argon2_0_5_still_verifies() {
+        let h = "$argon2id$v=19$m=19456,t=2,p=1$b3BzY2xhd3JlZ3Jlc3Npb24$\
+                 jajsWFtZ5V1klGWxkpxyO6Y48xM2Oe/T/y9kvEk42BM";
+        assert!(verify_password("correct horse battery staple", h).unwrap());
+        assert!(!verify_password("wrong", h).unwrap());
     }
 
     #[test]

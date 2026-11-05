@@ -221,6 +221,7 @@ mod tests {
             provider: crate::config::AuthProvider::Hanko,
             api_url: Some(url.to_string()),
             audience: vec!["ops.example.com".into()],
+            oidc: None,
         }
     }
 

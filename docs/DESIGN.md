@@ -49,9 +49,10 @@ domain/      Project, Environment, Target, Resource, Autonomy, RiskClass,
 config/      TOML at ~/.opsclaw/config.toml + env; secret store (aes-gcm,
              key file); validate() fails fast; Debug redacts secrets
 db/          trait-per-repo; SQLite impl + in-memory fake; parity suite
-llm/         LlmProvider trait; Anthropic + OpenAI-compat impls; FallbackLlm;
-             FakeLlm + ScriptedLlm doubles; usage/cost tracking
-agent/       tool loop, prompt assembly, token-budgeted replay window
+llm/         shipped chain on dcpr-llm (OpenRouter client + Fallback);
+             daily cost cap; price table; FakeLlm
+agent/       TurnPolicy for dcpr-agent's loop, prompt assembly,
+             token-budgeted replay window
 tools/       Tool trait (self-declared risk class + capability metadata);
              ssh/kubernetes/monitor/systemd/docker/...; endpoint tools
 targets/     TargetExecutor trait per target type (ssh/local/kubernetes/cloud);
@@ -75,28 +76,26 @@ cli/         clap; wizards; every read command takes --json
 
 ## 3. What we take from gianna, subsystem by subsystem
 
-### LLM layer (`src/llm.rs`, `src/llm_providers/` in gianna)
+### LLM layer (`dcpr-llm`, extracted from gianna)
 
-- One `LlmProvider` trait; the load-bearing method is
-  `chat_step(principal, system, history, tools) -> ChatStep`. Non-streaming.
-- `FallbackLlm` wraps an ordered provider list: retryable errors get 3
-  jittered-backoff retries on the same provider *before* falling through;
-  context-overflow fails fast with no retry (the same prompt 400s everywhere).
-  Wrap even a single provider for the retry behaviour.
-- Tool schemas are provider-neutral `{name, description, parameters}` reshaped
-  at the wire boundary per provider. Gianna shipped a real outage by leaking
-  Anthropic's `input_schema` key to the OpenAI path — keep the reshaping.
-- `FakeLlm` (deterministic, keyword-driven, no tools) and `ScriptedLlm`
-  (queue-driven, scripts exact multi-step tool loops, panics if under-scripted)
-  are both essential test doubles.
-- Cost tracking: hand-maintained per-model price table with a deliberately
-  expensive fallback price for unknown models; recorded fire-and-forget. Feeds
-  `max_cost_per_day_cents`.
+- The model is `dcpr_llm::ChatModel<Principal>`: one tool-calling
+  `chat_step(principal, system, history, tools)`. `dcpr-llm` owns the wire —
+  the OpenRouter client, error classification, prompt caching, Hermes-XML
+  recovery — and `Fallback` (retry transient errors with jittered backoff
+  honouring `Retry-After`, then fall through; context overflow fails fast).
+- `ScriptedModel` (queue-driven, scripts exact multi-step tool loops, panics
+  if under-scripted) is the loop test double; `FakeLlm` boots fakes mode.
+- Cost tracking: the chain reports each call's usage to `SpendMeter`; the
+  provider's reported cost wins, otherwise a hand-maintained price table with
+  a deliberately expensive price for unknown models. `CostGuard` wraps the
+  chain and enforces `max_cost_per_day_cents`.
 
 ### Agent loop (`src/agent/`)
 
-- Hand-rolled `for _ in 0..max_steps` tool loop (cap ~10–20) plus a separate
-  wall-clock deadline. Tool errors never abort the turn — they return to the
+- `dcpr-agent`'s `run_turn` drives the loop (step cap ~10–20, plus a
+  wall-clock deadline that also abandons a slow model call); every decision
+  is OpsClaw's `TurnPolicy`. The last step offers no tools and asks for a
+  final report. Tool errors never abort the turn — they return to the
   model as strings, split into user-facing (relayed with detail) vs internal
   fault (scrubbed, plus "do NOT retry" so the model doesn't burn steps on a
   dead backend). Duplicate-call guard on identical repeated action calls.
@@ -496,7 +495,7 @@ path** — `AppState::new(Config::default())` is a fully-faked daemon, no
 separate mock layer to drift.
 
 - **Tier 1**: per-tool integration tests; parity suite for repos; `wiremock`
-  for HTTP-backed tools; `ScriptedLlm` for exact tool-loop scripting.
+  for HTTP-backed tools; `ScriptedModel` for exact tool-loop scripting.
 - **Tier 2 (the acceptance test, brief §9)**: full daemon vs a
   gVisor-sandboxed target; scenarios as directories with
   `arm.sh`/`disarm.sh`/`expected.json`; assert detection, correct naming,
@@ -577,12 +576,11 @@ separate mock layer to drift.
     deployment is example (`a generic reference estate` — k8s + Azure + Elasticsearch),
     where opsclaw runs on their existing bastion; the Helm chart exists for
     teams that want in-cluster, where the external heartbeat is mandatory.
-13. **Shipped LLM default: OpenRouter only** — one provider with its
-    server-side ordered model list, wrapped in `FallbackLlm` for
+13. **Shipped LLM default: OpenRouter only** — `dcpr-llm`'s client with
+    its server-side ordered model list, wrapped in `Fallback` for
     retry/backoff (gianna's production shape; `validate()` requires
     `OPENROUTER_MODELS` when the key is set). Live evals run against this
-    exact chain. The Anthropic/OpenAI provider impls still ship —
-    provider-agnostic per the brief — they're just not the default.
+    exact chain. Any OpenAI-compatible endpoint works via `llm.base_url`.
 14. **Remote CLI v1: small set** — chat, incidents, approve/deny, estop,
     status over the token-auth gateway; everything else is local CLI or
     web UI.

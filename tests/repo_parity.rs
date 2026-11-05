@@ -29,9 +29,9 @@ use opsclaw::audit::{AuditOutcome, AuditRecord};
 use opsclaw::db::memory::InMemoryDb;
 use opsclaw::db::sqlite::SqliteDb;
 use opsclaw::db::{
-    AUTH_PROVIDER_HANKO, AUTH_PROVIDER_LOCAL, Account, AccountRepo, ApprovalRepo, AuditRepo,
-    ChannelStateRepo, ChatRepo, ChatRequestClaim, CliToken, ControlRepo, HealthRepo, IncidentRepo,
-    Invite, InviteRepo, JobRepo, PushSubscription, PushSubscriptionRepo, RunbookRun,
+    AUTH_PROVIDER_HANKO, AUTH_PROVIDER_LOCAL, AccessRepo, Account, AccountRepo, ApprovalRepo,
+    AuditRepo, ChannelStateRepo, ChatRepo, ChatRequestClaim, CliToken, ControlRepo, HealthRepo,
+    IncidentRepo, Invite, InviteRepo, JobRepo, PushSubscription, PushSubscriptionRepo, RunbookRun,
     RunbookRunRepo, StepOutcome, StepStatus, TokenRepo,
 };
 use opsclaw::domain::{
@@ -55,6 +55,7 @@ pub trait RepoSuite:
     + ChannelStateRepo
     + ChatRepo
     + HealthRepo
+    + AccessRepo
 {
 }
 impl<T> RepoSuite for T where
@@ -71,6 +72,7 @@ impl<T> RepoSuite for T where
         + ChannelStateRepo
         + ChatRepo
         + HealthRepo
+        + AccessRepo
 {
 }
 
@@ -258,6 +260,63 @@ fn runbook_run(id: Uuid, runbook_name: &str, success: bool) -> RunbookRun {
 }
 
 parity_tests! {
+    access_groups_replace_wholesale => |db| {
+        let a = Uuid::new_v4();
+        AccountRepo::insert(db, &account(a, "g@example.com")).await.unwrap();
+        assert!(db.groups(a).await.unwrap().is_empty());
+        db.set_groups(a, &["x".into(), "y".into()]).await.unwrap();
+        db.set_groups(a, &["z".into()]).await.unwrap();
+        assert_eq!(db.groups(a).await.unwrap(), vec!["z".to_string()]);
+    }
+
+    access_elevations_round_trip_and_decide => |db| {
+        use opsclaw::access::{Elevation, ElevationState};
+        let a = Uuid::new_v4();
+        let approver = Uuid::new_v4();
+        AccountRepo::insert(db, &account(a, "e@example.com")).await.unwrap();
+        let e = Elevation {
+            id: Uuid::new_v4(),
+            account: a,
+            scope: "p::e".into(),
+            class: "logs".into(),
+            reason: "INC-7".into(),
+            requested_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            state: ElevationState::Pending,
+            decided_by: None,
+        };
+        db.insert_elevation(&e).await.unwrap();
+        let later = Utc::now() + chrono::Duration::hours(2);
+        db.decide_elevation(e.id, ElevationState::Active, Some(approver), Some(later)).await.unwrap();
+        let got = db.elevation(e.id).await.unwrap().unwrap();
+        assert_eq!(got.state, ElevationState::Active);
+        assert_eq!(got.decided_by, Some(approver));
+        assert_eq!(got.expires_at.timestamp(), later.timestamp());
+        assert_eq!(db.elevations_for(a).await.unwrap().len(), 1);
+        assert_eq!(db.list_elevations().await.unwrap().len(), 1);
+        db.decide_elevation(e.id, ElevationState::Revoked, None, None).await.unwrap();
+        assert_eq!(db.elevation(e.id).await.unwrap().unwrap().decided_by, Some(approver));
+        assert!(db.decide_elevation(Uuid::new_v4(), ElevationState::Denied, None, None).await.is_err());
+    }
+
+    access_labels_union_and_restrictions => |db| {
+        use opsclaw::access::Label;
+        let l = |t: &str, c: &str| Label { target: t.into(), class: c.into() };
+        db.add_labels("incident", "i1", &[l("a", "logs")]).await.unwrap();
+        db.add_labels("incident", "i1", &[l("a", "logs"), l("a", "state")]).await.unwrap();
+        assert_eq!(db.labels("incident", "i1").await.unwrap(), vec![l("a", "logs"), l("a", "state")]);
+        assert!(db.labels("chat", "i1").await.unwrap().is_empty());
+        assert_eq!(db.restricted("incident", "i1").await.unwrap(), None);
+        db.set_restricted("incident", "i1", Some(&["sec-team".into()])).await.unwrap();
+        assert_eq!(db.restricted("incident", "i1").await.unwrap(), Some(vec!["sec-team".to_string()]));
+        // Labels survive a restriction change, and vice versa.
+        assert_eq!(db.labels("incident", "i1").await.unwrap().len(), 2);
+        db.set_restricted("incident", "i1", None).await.unwrap();
+        assert_eq!(db.restricted("incident", "i1").await.unwrap(), None);
+        db.set_restricted("incident", "i2", Some(&[])).await.unwrap();
+        assert!(db.labels("incident", "i2").await.unwrap().is_empty());
+    }
+
 
 // ---- Incidents ----
 

@@ -15,6 +15,7 @@ const PRECACHE = [
   '/app/api.js',
   '/app/auth.js',
   '/app/chat.js',
+  '/app/threads.js',
   '/app/incidents.js',
   '/app/approvals.js',
   '/app/status.js',

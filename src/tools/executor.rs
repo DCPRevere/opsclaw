@@ -47,6 +47,8 @@ pub async fn run_command(
         declared_risk,
         hypothesis,
         runbook,
+        via: ctx.call.via,
+        labels: ctx.call.labels.clone(),
     };
     let outcome = ctx
         .policy
@@ -137,6 +139,7 @@ pub(crate) mod tests {
 
     fn ctx_with(policy: std::sync::Arc<dyn PolicyExecute>) -> ToolCtx {
         ToolCtx {
+            call: Default::default(),
             principal: Principal::Agent { job: None },
             policy,
             known_targets: vec![target()],

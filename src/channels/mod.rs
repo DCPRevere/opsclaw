@@ -155,7 +155,7 @@ pub trait ChatHandler: Send + Sync {
     /// A snapshot of the shared team transcript as (role, content) pairs —
     /// `role` is `"user"` or `"assistant"` (a stable, low-cardinality tag a
     /// render-on-load caller can switch on without depending on
-    /// `llm::Turn`'s shape directly). DEFAULTED, empty: most callers of
+    /// `llm::ToolTurn`'s shape directly). DEFAULTED, empty: most callers of
     /// this trait (the channel inbound loop, the CLI REPL) have no history
     /// surface to render and don't need it; `http::routes::chat`'s
     /// `GET /api/chat/history` is the one caller that does, and

@@ -134,15 +134,23 @@ async fn drive_one(
     }
 
     let contact = &chain.steps[step.min(chain.steps.len() - 1)].contact;
-    let body = render_page(incident, kind, step, chain.steps.len());
+    // Outside `solo`, a channel is read by people with different access,
+    // so a page carries the summary only; the evidence is in OpsClaw, where
+    // each reader sees what they may (`crate::access::findings`).
+    let summary_only = deps.config.access.preset != crate::access::Preset::Solo;
+    let body = if summary_only {
+        render_summary_page(incident, kind, step, chain.steps.len())
+    } else {
+        render_page(incident, kind, step, chain.steps.len())
+    };
     // Structured twin for action-capable channels (web chat renders an
     // inline Acknowledge button from this); text-only channels ignore it.
     let meta = Some(serde_json::json!({
         "kind": "incident",
         "id": incident.id,
         "severity": incident.severity,
-        "target": incident.target,
-        "hypothesis": incident.hypothesis,
+        "target": incident.target.to_string(),
+        "hypothesis": if summary_only { serde_json::Value::Null } else { incident.hypothesis.clone().into() },
     }));
     match contact_channel(deps, contact).send(OutboundMessage { operator: None, body, meta }).await
     {
@@ -214,6 +222,23 @@ fn render_page(incident: &Incident, kind: &str, step: usize, total_steps: usize)
     )
 }
 
+/// The page without evidence: what, where, how bad, and where to look.
+fn render_summary_page(incident: &Incident, kind: &str, step: usize, total_steps: usize) -> String {
+    format!(
+        "{kind}\n\
+         [{severity:?}] {fault} on {target}\n\
+         incident {id} — step {step_no}/{total_steps}, notification #{n}. Open it in OpsClaw \
+         (web UI → incidents) for the evidence you have access to, and acknowledge it there \
+         to stop this chain.",
+        severity = incident.severity,
+        fault = incident.fault_class,
+        target = incident.target,
+        id = incident.id,
+        step_no = step + 1,
+        n = incident.notify_count + 1,
+    )
+}
+
 /// The approval-timeout sweep (DESIGN §4 Approvals: "Timeouts cancel via a
 /// scheduler sweep"): expire every pending request past its deadline and
 /// announce each lapse once — `ApprovalRepo::expire_due` only returns rows
@@ -241,4 +266,38 @@ pub(super) async fn expire_approvals(deps: &SchedulerDeps, now: DateTime<Utc>) -
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_summary_page_carries_no_evidence() {
+        let mut incident = Incident {
+            id: uuid::Uuid::new_v4(),
+            fingerprint: "f".into(),
+            fault_class: "config_error".into(),
+            target: crate::domain::FqTarget::new("acme", "prod", "aks"),
+            severity: crate::domain::Severity::Critical,
+            state: crate::domain::IncidentState::Active,
+            signals: "jane@acme.com failed".into(),
+            hypothesis: "jane's payroll".into(),
+            recommended_action: Some("call jane".into()),
+            opened_at: chrono::Utc::now(),
+            reopened_at: None,
+            acked_at: None,
+            acked_by: None,
+            resolved_at: None,
+            last_notified_at: None,
+            notify_count: 0,
+            escalation_step: 0,
+            step_started_at: None,
+        };
+        let page = render_summary_page(&incident, "NEW", 0, 2);
+        assert!(page.contains("config_error on acme::prod::aks"), "{page}");
+        assert!(!page.to_lowercase().contains("jane"), "{page}");
+        incident.notify_count = 1;
+        assert!(render_summary_page(&incident, "NEW", 1, 2).contains("notification #2"));
+    }
 }

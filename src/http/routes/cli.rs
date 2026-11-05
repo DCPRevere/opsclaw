@@ -151,6 +151,7 @@ async fn authenticate_cli(state: &AppState, headers: &HeaderMap) -> Result<(Uuid
         .find_cli_token(&cli_auth::token_hash(token))
         .await?
         .ok_or_else(|| Error::unauthorized("token revoked — run `opsclaw-cli login`"))?;
+    cli_auth::check_token_age(state, token_id, account_id).await?;
     Ok((account_id, token_id))
 }
 

@@ -4,7 +4,7 @@
 //! real auth, real requests via `reqwest` — but with the policy engine wired
 //! to an observable [`FakeExecutor`] instead of the fakes spine's empty
 //! executor map, and (for the chat-driven test) the REAL agent dispatch
-//! (`agent::dispatch::ChatTurn`) over a [`ScriptedLlm`] so the mutation
+//! (`agent::dispatch::ChatTurn`) over a [`ScriptedModel`] so the mutation
 //! arrives the way it does in production: the operator says something in
 //! chat, the model composes a tool call, and policy queues it.
 //!
@@ -26,7 +26,7 @@ use opsclaw::db::memory::InMemoryDb;
 use opsclaw::db::{Account, AccountRepo, ApprovalRepo, AuditRepo};
 use opsclaw::domain::{ApprovalState, FqTarget, Principal, RiskClass};
 use opsclaw::http::AppState;
-use opsclaw::llm::ScriptedLlm;
+use opsclaw::llm::ScriptedModel;
 use opsclaw::memory::Memory;
 use opsclaw::policy::{CommandRequest, EStop, Policy, PolicyOutcome, Scrubber};
 use opsclaw::targets::{Command, ExecOutput, ProbeReport, TargetExecutor};
@@ -215,12 +215,12 @@ fn rig() -> Rig {
 }
 
 /// Wire the REAL chat dispatch (`agent::dispatch::ChatTurn`) over a
-/// [`ScriptedLlm`] whose one deterministic turn proposes [`REMEDIATION`]
+/// [`ScriptedModel`] whose one deterministic turn proposes [`REMEDIATION`]
 /// via the `shell` tool — the exact production path from an operator's chat
 /// message to a queued approval, minus only the nondeterministic model.
 fn wire_scripted_chat(rig: &mut Rig) {
     let store = SecretStore::open(rig.home.path()).expect("secret store");
-    let mut llm = ScriptedLlm::new();
+    let mut llm = ScriptedModel::new();
     llm.push_tool_call(
         "shell",
         serde_json::json!({
@@ -383,6 +383,8 @@ async fn deny_over_http_records_the_decision_and_never_executes() {
             declared_risk: RiskClass::Medium,
             hypothesis: Some("heartbeat scan thinks nginx is wedged".into()),
             runbook: None,
+            via: Default::default(),
+            labels: None,
         })
         .await
         .unwrap();

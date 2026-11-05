@@ -22,7 +22,17 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ChatConversation {
     Operations,
-    Environment { project: String, environment: String },
+    Environment {
+        project: String,
+        environment: String,
+    },
+    /// One incident's thread, inside its environment: `project::env#<id>`.
+    /// Tools are scoped exactly as for the environment.
+    Incident {
+        project: String,
+        environment: String,
+        incident: uuid::Uuid,
+    },
 }
 
 impl ChatConversation {
@@ -36,12 +46,44 @@ impl ChatConversation {
         match self {
             Self::Operations => Self::OPERATIONS_ID.to_string(),
             Self::Environment { project, environment } => format!("{project}::{environment}"),
+            Self::Incident { project, environment, incident } => {
+                format!("{project}::{environment}#{incident}")
+            }
+        }
+    }
+
+    /// The thread for an incident on `target`.
+    pub fn incident(target: &FqTarget, incident: uuid::Uuid) -> Self {
+        Self::Incident {
+            project: target.project.clone(),
+            environment: target.env.clone(),
+            incident,
+        }
+    }
+
+    /// The environment a room or thread belongs to, if any.
+    pub fn environment_of(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Operations => None,
+            Self::Environment { project, environment }
+            | Self::Incident { project, environment, .. } => Some((project, environment)),
         }
     }
 
     pub fn parse(value: &str) -> crate::Result<Self> {
         if value == Self::OPERATIONS_ID {
             return Ok(Self::Operations);
+        }
+        if let Some((env, id)) = value.split_once('#') {
+            let incident = uuid::Uuid::parse_str(id).map_err(|_| {
+                crate::Error::validation(format!("invalid chat conversation {value:?}"))
+            })?;
+            let Self::Environment { project, environment } = Self::parse(env)? else {
+                return Err(crate::Error::validation(format!(
+                    "invalid chat conversation {value:?}"
+                )));
+            };
+            return Ok(Self::Incident { project, environment, incident });
         }
         let parts: Vec<_> = value.split("::").collect();
         match parts.as_slice() {
@@ -60,7 +102,8 @@ impl ChatConversation {
     pub fn contains(&self, target: &FqTarget) -> bool {
         match self {
             Self::Operations => false,
-            Self::Environment { project, environment } => {
+            Self::Environment { project, environment }
+            | Self::Incident { project, environment, .. } => {
                 target.project() == project && target.environment() == environment
             }
         }
@@ -182,6 +225,8 @@ pub enum ResourceType {
     AzureServiceBus,
     Eventstore,
     Prometheus,
+    /// Grafana Tempo (traces).
+    Tempo,
     Argocd,
     Postgres,
     Rabbitmq,

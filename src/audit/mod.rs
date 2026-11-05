@@ -27,6 +27,10 @@ pub enum AuditOutcome {
     /// Command ran; exit code recorded.
     Executed,
     Blocked,
+    /// Refused by the access rules: the person may not see or do this
+    /// (`crate::access`). Separate from `Blocked` (autonomy and safety
+    /// rules), so `blocked-actions` stays about what the agent would do.
+    Denied,
     ApprovalQueued,
     EStopped,
     /// Transport/internal failure — the command may or may not have run.

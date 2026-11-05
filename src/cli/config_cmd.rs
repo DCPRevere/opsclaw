@@ -391,6 +391,8 @@ fn wizard_target(p: &mut dyn Prompter, store: &SecretStore) -> Result<TargetCfg>
         ssh_known_hosts_path: None,
         ssh_strict_host_key_checking: None,
         resources: Vec::<ResourceCfg>::new(),
+        port_forwards: Vec::new(),
+        scan: None,
     })
 }
 

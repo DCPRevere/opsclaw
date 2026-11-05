@@ -82,7 +82,35 @@
   #chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .5rem; margin-bottom: .6rem; }
   #chat-scope { display: flex; align-items: center; gap: .65rem; margin-bottom: .6rem; flex: none; }
   #chat-scope label { color: var(--text-dim); font-size: .82rem; }
-  #chat-conversation { min-width: 12rem; }
+  #chat-view.view { padding: 0; }
+  .chat-layout { display: flex; flex: 1; min-height: 0; }
+  #chat-sidebar { width: 17rem; flex: none; overflow-y: auto; border-right: 1px solid var(--border); background: var(--panel); padding: .6rem .4rem; }
+  .chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 1rem; }
+  .side-heading { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); margin: .8rem .5rem .3rem; }
+  .side-heading:first-child { margin-top: .2rem; }
+  .side-item { display: flex; align-items: center; gap: .45rem; width: 100%; text-align: left; background: none; border: none; color: var(--text); padding: .35rem .5rem; border-radius: .4rem; cursor: pointer; font: inherit; font-size: .88rem; }
+  .side-item:hover { background: var(--panel-2); }
+  .side-item.active { background: var(--panel-2); outline: 1px solid var(--border); }
+  .side-pin { color: var(--text-dim); width: .8rem; text-align: center; }
+  .side-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side-meta { color: var(--text-dim); font-size: .75rem; flex: none; }
+  .side-empty { padding: .3rem .5rem; }
+  .side-closed summary { cursor: pointer; font-size: .78rem; color: var(--text-dim); margin: .8rem .5rem .3rem; }
+  .side-closed .side-item { opacity: .65; }
+  .sev-dot { width: .55rem; height: .55rem; border-radius: 50%; flex: none; background: var(--text-dim); }
+  .sev-dot.sev-critical { background: var(--danger); }
+  .sev-dot.sev-warning { background: var(--warn); }
+  .sev-dot.sev-info { background: var(--accent); }
+  #thread-header { flex: none; margin-bottom: .6rem; max-height: 40vh; overflow-y: auto; }
+  #thread-header .th-top { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .4rem; }
+  #thread-header .th-block { margin: .35rem 0; font-size: .9rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #thread-header .th-label { font-size: .72rem; text-transform: uppercase; color: var(--text-dim); }
+  #thread-header .th-actions { display: flex; gap: .5rem; margin-top: .5rem; }
+  @media (max-width: 760px) {
+    .chat-layout { flex-direction: column; }
+    #chat-sidebar { width: auto; max-height: 34vh; border-right: none; border-bottom: 1px solid var(--border); }
+    .chat-main { padding: .6rem; }
+  }
   #chat-scope-note { color: var(--text-dim); font-size: .8rem; }
   .msgwrap { max-width: 80%; align-self: flex-start; }
   .msgwrap.out { align-self: flex-end; }
@@ -185,16 +213,18 @@
   </section>
 
   <section id="chat-view" class="view">
-    <div id="chat-scope">
-      <label for="chat-conversation">Conversation</label>
-      <select id="chat-conversation"><option value="operations">Operations</option></select>
-      <span id="chat-scope-note">Team coordination; select an environment to operate on targets.</span>
+    <div class="chat-layout">
+      <aside id="chat-sidebar" aria-label="Conversations"></aside>
+      <div class="chat-main">
+        <div id="chat-scope"><span id="chat-scope-note"></span></div>
+        <div id="thread-header" class="card" style="display:none"></div>
+        <div id="chat-log"></div>
+        <form id="chat-form">
+          <input id="chat-input" placeholder="Ask the agent…" autocomplete="off" />
+          <button class="primary" type="submit">Send</button>
+        </form>
+      </div>
     </div>
-    <div id="chat-log"></div>
-    <form id="chat-form">
-      <input id="chat-input" placeholder="Ask the agent…" autocomplete="off" />
-      <button class="primary" type="submit">Send</button>
-    </form>
   </section>
 
   <section id="incidents-view" class="view">

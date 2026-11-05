@@ -53,6 +53,8 @@ pub enum Credential<'a> {
     /// password hash at all — the sentinel `auth::NO_PASSWORD`, which
     /// `verify_password` refuses.
     HankoSubject(&'a str),
+    /// An OIDC subject (`sub` in the IdP's ID token).
+    OidcSubject(&'a str),
 }
 
 /// Create an operator account.
@@ -75,6 +77,27 @@ pub async fn create(
                 ));
             }
             (auth::hash_password(password)?, crate::db::AUTH_PROVIDER_LOCAL, None)
+        }
+        Credential::OidcSubject(subject) => {
+            let subject = subject.trim();
+            if subject.is_empty() {
+                return Err(crate::Error::validation("the oidc subject must not be empty"));
+            }
+            if db
+                .repos()
+                .by_external_subject(crate::db::AUTH_PROVIDER_OIDC, subject)
+                .await?
+                .is_some()
+            {
+                return Err(crate::Error::validation(format!(
+                    "an account is already linked to oidc subject {subject}"
+                )));
+            }
+            (
+                auth::NO_PASSWORD.to_string(),
+                crate::db::AUTH_PROVIDER_OIDC,
+                Some(subject.to_string()),
+            )
         }
         Credential::HankoSubject(subject) => {
             let subject = subject.trim();

@@ -83,7 +83,11 @@ services:
   # retain/reflect extraction — set the HINDSIGHT_LLM_* vars below.
   opsclaw-hindsight:
     container_name: opsclaw-hindsight
-    image: ghcr.io/vectorize-io/hindsight:0.8.3
+    # 1.2.0: verified 2026-11-04 with tests/hindsight_live.rs (every call the
+    # daemon makes) against OpenAI gpt-6.1-sol. 0.8.3 fails fact extraction
+    # on current OpenAI models (it sends `max_tokens`). Existing 0.8.x data
+    # is migrated in place by Hindsight's own migrations on first start.
+    image: ghcr.io/vectorize-io/hindsight:1.2.0
     restart: unless-stopped
     logging: *bounded-logs
     environment:
@@ -96,6 +100,9 @@ services:
       # `doctor` FAIL on an unreachable Hindsight — the real cause buried in a
       # DIFFERENT container's logs. Fail here instead, before anything starts.
       HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_LLM_API_KEY:?set HINDSIGHT_LLM_API_KEY in .env — Hindsight refuses to start without one}
+      # Language for every memory Hindsight writes. Without it, small models
+      # (gpt-6-luna, seen 2026-11-04) can write facts in another language.
+      HINDSIGHT_API_LLM_OUTPUT_LANGUAGE: ${HINDSIGHT_LLM_OUTPUT_LANGUAGE:-English}
     volumes:
       - opsclaw_hindsight:/home/hindsight/.pg0
     # Not exposed to the host network; only opsclaw-daemon talks to it, over
@@ -132,6 +139,9 @@ services:
       # LLM: shipped default is OpenRouter only (DESIGN.md §7 decision 13) —
       # one provider, server-side ordered model fallback.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # OpenAI directly: referenced from config.toml as env:OPENAI_API_KEY
+      # (see .env.example). Unused unless the config points at it.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPSCLAW_MODELS: ${OPSCLAW_MODELS:-}
       # Memory: Hindsight is the SOLE backend. Unset HINDSIGHT_URL to run
       # fully faked (no live memory) — there is no in-process fallback.
@@ -150,6 +160,9 @@ services:
       # heartbeat, or any webhook outside this host's own failure domain.
       OPSCLAW_DEADMAN_URL: ${OPSCLAW_DEADMAN_URL:-}
       RUST_LOG: ${RUST_LOG:-opsclaw=info,tower_http=info}
+      # Minutes between the seeded per-target scans (default 30). Blank keeps
+      # the default. Longer intervals cut LLM spend roughly in proportion.
+      OPSCLAW_SCAN_INTERVAL_MINUTES: ${OPSCLAW_SCAN_INTERVAL_MINUTES:-}
     volumes:
       # Config (~/.opsclaw/config.toml inside the container) and the SQLite
       # store both live on this named volume so they survive a container

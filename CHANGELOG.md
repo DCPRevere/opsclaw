@@ -4,6 +4,129 @@ Operator-facing changes. Anything that needs manual work at upgrade time
 carries a **Deploying** note (AGENTS.md); read those before rolling a
 release out.
 
+## Unreleased
+
+### Incident threads, traces, and scan scope
+
+- The web chat has a sidebar.
+  - At the top: "*" (Operations) and one room per environment.
+  - Below: one thread per incident, grouped by environment. Threads carry
+    the incident's details, Acknowledge and Resolve, and a conversation
+    that stays on that incident.
+  - Each person sees only the threads they may see.
+- New `tempo` resource type with `tempo_search` (TraceQL) and
+  `tempo_trace` tools. Traces are a new `traces` data class (redacted
+  unless raw). Scans now look for failing traces.
+- `scan = false` on a target keeps it available to chat and tools but
+  off the scan schedule.
+- `port_forward` entries on Kubernetes targets: OpsClaw keeps
+  `kubectl port-forward`s open itself, so ClusterIP-only monitoring is
+  reachable.
+- Fixed: incident and approval cards in chat showed `[object Object]`
+  for the target.
+- `deploy/sandbox-rbac.yaml` no longer grants Dapr `components` (they can
+  hold inline passwords). It adds read on Traefik routes, cert-manager,
+  KEDA and Velero objects.
+
+### Access control, SSO and MCP
+
+Who may see and do what is now enforced for every person, on every
+surface (docs/plans/ACCESS.md):
+- `[access]` roles say where, which data classes, how much of the
+  findings, and which actions. They compile to Cedar policies.
+- Logs and messages come back redacted unless a role grants raw access,
+  and raw access can require a time-boxed, approved elevation.
+- Incidents and chat answers carry the labels of what they were built
+  from, and each reader sees them hidden, redacted or in full.
+- `auth.provider = "oidc"` signs people in with any OpenID Connect
+  provider and takes their groups from the token.
+- `/mcp` serves OpsClaw's tools to people's own agents, as them.
+- `opsclaw-cli access` explains decisions and lists roles and elevations.
+
+**Deploying:**
+- Migration 0012 adds three tables; it is additive.
+- Without an `[access]` block, the preset is `solo` and nothing changes,
+  with one exception: no person can read `kubectl get secret` output any
+  more (OpsClaw itself still can).
+- `serde_json`'s `preserve_order` is now on through `cedar-policy`, so
+  JSON maps keep insertion order.
+
+### The LLM client and tool loop come from dcpr-ai-rs
+
+OpsClaw's own OpenRouter client, fallback chain and tool loop are replaced by
+`dcpr-llm` and `dcpr-agent` 0.2.0. Behaviour is unchanged apart from:
+the stable part of the system prompt is marked for provider prompt caching;
+the wall-clock deadline now also abandons a model call still running at it;
+the final report after the step budget is the last step of the budget
+rather than an extra call; parallel tool calls stay grouped in one exchange;
+table-priced calls get the cache-read discount and are priced for the model
+that actually ran. The direct Anthropic provider is removed; any
+OpenAI-compatible endpoint still works through `llm.base_url`.
+
+**Deploying** — until `dcpr-llm` and `dcpr-agent` 0.2.0 are on crates.io,
+Cargo.toml's `[patch.crates-io]` takes them from the `v0.2.0` tag of
+github.com/DCPRevere/dcpr-ai-rs, so builds need network access to GitHub.
+Delete that block (and the matching `allow-git` entry in `deny.toml`) once
+they are published. Rust 1.94 or newer is required.
+
+### OpenAI directly, and Hindsight 1.2.0
+
+- OpsClaw can use OpenAI directly: set `llm.base_url =
+  "https://api.openai.com/v1"` and reference `env:OPENAI_API_KEY`, which
+  Compose now passes through. Tool steps then use OpenAI's Responses API,
+  because current OpenAI models refuse tools on Chat Completions.
+  `gpt-6.1-sol` is in the price table. This needs a dcpr-llm release with its
+  OpenAI fixes before it works end to end.
+- The bundled Hindsight moves from 0.8.3 to 1.2.0. 0.8.3 can't extract
+  memories with current OpenAI models. 1.2.0 was checked against every call
+  the daemon makes (`tests/hindsight_live.rs`), and against a 0.8.3 volume
+  upgraded in place.
+- Fixed: the memory bank's literalism setting was sent as `0.8` on a scale
+  of 1 to 5. Hindsight 0.8.x silently accepted it; 1.x refuses it. It's now
+  4.
+- `OPSCLAW_SCAN_INTERVAL_MINUTES` reaches the container. It's the main way to
+  control LLM spend.
+
+**Deploying** — the first start on Hindsight 1.2.0 migrates its database in
+place. Back up the `opsclaw_hindsight` volume first if its memories matter.
+
+### Faster, stricter tool calls
+
+- Several read-only tool calls in one model step now run at the same time
+  instead of one after another. A call that may change something still runs
+  alone, after the reads before it and before the reads after it.
+- Tool arguments are checked against each tool's schema before the tool runs.
+  Spellings such as `"5"` for a number are corrected; unknown or wrongly typed
+  arguments are refused and the model is told why.
+- A turn that only read (for example `kubectl get`) no longer counts as having
+  acted, so its fallback reply no longer claims an action ran.
+
+### Kubernetes logs can see why a pod crashed
+
+`kubernetes` `logs` takes `previous` (the crashed container instance, where a
+crashloop's reason is), `container` or `all_containers` for multi-container
+pods, `since` (for example `15m`) and `tail` (default 200, at most 2000). Scans
+are told to read the crashed container's logs for every crash-looping pod.
+
+### Toolchain pinned
+
+`rust-toolchain.toml` pins Rust 1.99.1 for local builds, CI and the Docker
+builder, so a new stable release can't turn CI red. RUSTSEC-2026-0387 is
+accepted with its reasoning in `deny.toml` until `jsonwebtoken` and
+`web-push-native` move to `p256` 0.14.
+
+### Dependencies updated
+
+All dependencies are on their latest releases, including new major versions
+of `argon2` (0.6), `base64` (0.23), `croner` (4), `jsonwebtoken` (11),
+`toml` (1) and `web-push-native` (0.5). This clears eight of the nine
+RustSec advisories `cargo deny` reported. The one left
+(RUSTSEC-2026-0387, `crypto-bigint` 0.5) comes in through `p256` 0.13 in
+`jsonwebtoken` and `web-push-native` and needs those crates to move first.
+Nothing changes for operators: password hashes made before the upgrade
+still verify, and stored cron schedules that use the shorthand step form
+(`5/15 * * * *`), which croner 4 rejects by default, are still accepted.
+
 ## v0.3.0
 
 ### Team chat follows operational context

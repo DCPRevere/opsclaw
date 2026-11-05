@@ -99,9 +99,20 @@ rules:
       - elasticsearch.k8s.elastic.co
       - kibana.k8s.elastic.co
       - argoproj.io
-      - dapr.io
       - apisix.apache.org
+      - cert-manager.io
+      - keda.sh
+      # Ingress routes (which URL reaches which service) and Velero's
+      # backup objects (schedules, locations, results; no credentials).
+      - traefik.io
+      - traefik.containo.us
+      - velero.io
     resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Dapr: not `components`, whose metadata can hold inline connection
+  # strings and passwords that would reach the model unscrubbed.
+  - apiGroups: ["dapr.io"]
+    resources: ["configurations", "resiliencies", "subscriptions"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

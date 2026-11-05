@@ -68,22 +68,44 @@ impl Tool for ListIncidentsTool {
             });
         }
 
-        let out = incidents
-            .iter()
-            .map(|i| {
-                format!(
-                    "- {} [{:?}/{:?}] {} — {} (opened {})",
-                    i.id,
-                    i.severity,
-                    i.state,
-                    i.target,
-                    i.hypothesis,
-                    i.opened_at.to_rfc3339()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok(ToolResult { output: out })
+        // Shown as the asker may see them (`crate::access::findings`): an
+        // incident they may not know about is left out, withheld evidence
+        // says so.
+        let mut lines = Vec::new();
+        for i in &incidents {
+            let hypothesis = match (&ctx.call.engine, &ctx.call.repo) {
+                (Some(engine), Some(repo)) => {
+                    match crate::access::findings::incident_view(
+                        engine,
+                        &**repo,
+                        &ctx.principal,
+                        ctx.call.via,
+                        i,
+                    )
+                    .await
+                    {
+                        None => continue,
+                        Some(v) => v.hypothesis.unwrap_or_else(|| {
+                            format!("({})", v.note.unwrap_or_else(|| "withheld".into()))
+                        }),
+                    }
+                }
+                _ => i.hypothesis.clone(),
+            };
+            lines.push(format!(
+                "- {} [{:?}/{:?}] {} — {} (opened {})",
+                i.id,
+                i.severity,
+                i.state,
+                i.target,
+                hypothesis,
+                i.opened_at.to_rfc3339()
+            ));
+        }
+        if lines.is_empty() {
+            return Ok(ToolResult { output: "no incidents you have access to.".to_string() });
+        }
+        Ok(ToolResult { output: lines.join("\n") })
     }
 }
 
@@ -131,6 +153,7 @@ mod tests {
 
     fn ctx_with(incidents: Arc<dyn IncidentRepo>) -> ToolCtx {
         ToolCtx {
+            call: Default::default(),
             principal: Principal::Agent { job: None },
             policy: Arc::new(NoopPolicy),
             known_targets: vec![],
@@ -177,6 +200,7 @@ mod tests {
     #[tokio::test]
     async fn missing_repo_is_internal_fault() {
         let ctx = ToolCtx {
+            call: Default::default(),
             principal: Principal::Agent { job: None },
             policy: Arc::new(NoopPolicy),
             known_targets: vec![],

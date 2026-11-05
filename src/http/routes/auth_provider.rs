@@ -46,6 +46,10 @@ async fn auth_config(State(state): State<AppState>) -> Result<axum::Json<Value>>
             "provider": "hanko",
             "api_url": state.config.auth.api_base(),
         }),
+        AuthProvider::Oidc => json!({
+            "provider": "oidc",
+            "login_url": "/api/auth/oidc/start",
+        }),
     }))
 }
 

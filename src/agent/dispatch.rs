@@ -30,7 +30,7 @@ use crate::config::{Config, SecretStore};
 use crate::db::{ApprovalRepo, IncidentRepo, RunbookRunRepo};
 use crate::domain::{ChatConversation, FqTarget, Job, Payload, Principal};
 use crate::http::webhook::IngestAlert;
-use crate::llm::{LlmProvider, Turn};
+use crate::llm::{Llm, ToolTurn};
 use crate::memory::{self, Memory};
 use crate::policy::PolicyExecute;
 use crate::runbooks::RunbookStore;
@@ -53,11 +53,17 @@ pub struct DispatchDeps {
     pub memory: Arc<Memory>,
     pub runbooks: Arc<RunbookStore>,
     pub endpoints: Arc<EndpointRegistry>,
-    pub llm: Arc<dyn LlmProvider>,
+    pub llm: Arc<Llm>,
     /// Conflict-domain gate shared by every entry point. Broad webhook turns
     /// exclude all work; environment chat excludes that environment; scans
     /// exclude their exact target.
     pub(crate) turn_gate: crate::agent::turn_gate::TurnGate,
+    /// Who may see what (`crate::access`): labels on findings, and what a
+    /// reader is shown of earlier answers. Enforcement on commands lives in
+    /// the policy layer; this is the same engine.
+    pub access: Arc<crate::access::Access>,
+    /// Where turns store the labels of what they read. `None` in tests.
+    pub access_repo: Option<Arc<dyn crate::db::AccessRepo>>,
 }
 
 impl DispatchDeps {
@@ -83,7 +89,7 @@ impl DispatchDeps {
         approvals: Arc<dyn ApprovalRepo>,
         runbook_runs: Arc<dyn RunbookRunRepo>,
         memory: Arc<Memory>,
-        llm: Arc<dyn LlmProvider>,
+        llm: Arc<Llm>,
     ) -> Result<Self> {
         let runbooks = Arc::new(RunbookStore::load(config.daemon.runbooks_dir.clone())?);
         let endpoints = Arc::new(registry_from_config(&config, store)?);
@@ -98,7 +104,20 @@ impl DispatchDeps {
             endpoints,
             llm,
             turn_gate: crate::agent::turn_gate::TurnGate::new(),
+            access: Arc::new(crate::access::Access::solo()),
+            access_repo: None,
         })
+    }
+
+    /// Use the daemon's access engine and label store.
+    pub fn with_access(
+        mut self,
+        access: Arc<crate::access::Access>,
+        repo: Arc<dyn crate::db::AccessRepo>,
+    ) -> Self {
+        self.access = access;
+        self.access_repo = Some(repo);
+        self
     }
 }
 
@@ -144,6 +163,12 @@ pub fn build_tool_ctx(deps: &DispatchDeps, principal: Principal) -> ToolCtx {
         config: Some(deps.config.clone()),
         endpoints: Some(deps.endpoints.clone()),
         runbooks: Some(deps.runbooks.clone()),
+        call: crate::tools::CallAccess {
+            via: crate::access::Via::Internal,
+            labels: Some(crate::access::Labels::default()),
+            repo: deps.access_repo.clone(),
+            engine: Some(deps.access.clone()),
+        },
     }
 }
 
@@ -299,7 +324,7 @@ impl JobComposer for AgentJobComposer {
         // scheduler's own retry/dead-letter path should see (never a
         // panic) — `run_turn`'s own `Result` already carries that
         // distinction (llm_hard on non-convergence, transient on a
-        // provider hiccup `FallbackLlm` gave up on), so this just
+        // provider hiccup the fallback chain gave up on), so this just
         // propagates it through `?` rather than swallowing or downgrading
         // it.
         let reply =
@@ -321,6 +346,10 @@ impl JobComposer for AgentJobComposer {
         // consolidated layer — while a real finding has, per the scan
         // contract, run opsclaw_notify or another action tool.
         let text = reply.reply.trim();
+        // Memory isn't labelled per reader yet, so outside `solo` nothing
+        // personal goes into it: the text is redacted for every redacted
+        // class the turn read.
+        let text = &for_memory(&self.deps.access, &ctx, text);
         if reply.acted && !text.is_empty() {
             match &job.payload {
                 Payload::ScanRoutine { target: Some(target), .. } => {
@@ -413,8 +442,9 @@ impl IngestAlert for WebhookIngest {
         // raw payload is transient signal that belongs to the incident
         // record, not to long-lived memory.
         let diagnosis = reply.reply.trim();
-        if memory::should_retain(diagnosis) {
-            agent::retain_turn_detached(&self.deps.memory, "agent", diagnosis.to_string());
+        let remembered = for_memory(&self.deps.access, &ctx, diagnosis);
+        if memory::should_retain(&remembered) {
+            agent::retain_turn_detached(&self.deps.memory, "agent", remembered);
         }
 
         if !diagnosis.is_empty() {
@@ -442,13 +472,69 @@ impl IngestAlert for WebhookIngest {
 /// the replayed context bounded without a second token estimator here.
 const TRANSCRIPT_KEEP_ENTRIES: usize = 30;
 
+/// `text`, built from `labels`, as `principal` may see it: hidden if any
+/// source is unreadable to them, redacted for sources they see redacted.
+pub async fn shown_to(
+    access: &crate::access::Access,
+    principal: &Principal,
+    text: &str,
+    labels: &[crate::access::Label],
+) -> String {
+    let mut redact = Vec::new();
+    for l in labels {
+        match access.read(principal, crate::access::Via::Web, &l.target, &l.class).await {
+            Ok(crate::access::Exposure::Raw) => {}
+            Ok(crate::access::Exposure::Redacted) => redact.push(l.class.as_str()),
+            Err(_) => {
+                return format!(
+                    "[hidden: this answer used {} on {}, which you don't have access to]",
+                    l.class, l.target
+                );
+            }
+        }
+    }
+    let mut out = text.to_string();
+    redact.sort();
+    redact.dedup();
+    for class in redact {
+        out = access.redact(class, &out);
+    }
+    out
+}
+
+/// `text` as it may go into shared memory.
+fn for_memory(access: &crate::access::Access, ctx: &ToolCtx, text: &str) -> String {
+    if access.config().preset == crate::access::Preset::Solo {
+        return text.to_string();
+    }
+    let mut classes: Vec<String> = ctx
+        .call
+        .labels
+        .as_ref()
+        .map(|l| l.snapshot().into_iter().map(|l| l.class).collect())
+        .unwrap_or_default();
+    classes.sort();
+    classes.dedup();
+    let mut out = text.to_string();
+    for class in classes.iter().filter(|c| access.redacts(c)) {
+        out = access.redact(class, &out);
+    }
+    out
+}
+
+/// One transcript entry and what it was built from.
+type Entry = (ToolTurn, Vec<crate::access::Label>);
+
 /// The real, agent-backed [`ChatHandler`]. Conversations are team-visible,
 /// never per-operator: `Operations` is the global coordination room and each
 /// configured project environment has its own replay transcript and target
 /// allow-list. Attribution rides in `"{speaker} said: …"` framing.
 pub struct ChatTurn {
     deps: DispatchDeps,
-    transcripts: std::sync::Mutex<std::collections::HashMap<String, Vec<Turn>>>,
+    /// Each entry carries the labels of what it was built from (empty for
+    /// people's own messages), so a replay can hide what the asker may not
+    /// see.
+    transcripts: std::sync::Mutex<std::collections::HashMap<String, Vec<Entry>>>,
     /// Durable side of the shared transcript (migration 0007). `None` only
     /// in tests/fixtures that don't care — every real boot wires it, so a
     /// restart no longer erases the team's chat history.
@@ -515,11 +601,19 @@ impl ChatTurn {
             let mut transcript = Vec::new();
             for row in rows {
                 match row.role.as_str() {
-                    "user" => transcript.push(Turn::User {
-                        content: format!("{} said: {}", row.speaker, row.content),
-                    }),
-                    "assistant" => transcript
-                        .push(Turn::Assistant { content: row.content, tool_calls: Vec::new() }),
+                    "user" => transcript.push((
+                        ToolTurn::User(format!("{} said: {}", row.speaker, row.content)),
+                        Vec::new(),
+                    )),
+                    "assistant" => {
+                        let labels = match (&self.deps.access_repo, &row.turn_id) {
+                            (Some(repo), Some(turn)) => {
+                                repo.labels("chat", turn).await.unwrap_or_default()
+                            }
+                            _ => Vec::new(),
+                        };
+                        transcript.push((ToolTurn::Assistant(row.content), labels));
+                    }
                     _ => {}
                 }
             }
@@ -532,17 +626,101 @@ impl ChatTurn {
 
     /// A snapshot of the shared transcript (user/assistant text pairs) —
     /// what a chat surface renders as history on load.
-    pub fn transcript(&self) -> Vec<Turn> {
+    pub fn transcript(&self) -> Vec<ToolTurn> {
         self.transcript_for(&ChatConversation::Operations)
     }
 
-    pub fn transcript_for(&self, conversation: &ChatConversation) -> Vec<Turn> {
+    pub fn transcript_for(&self, conversation: &ChatConversation) -> Vec<ToolTurn> {
         self.transcripts
             .lock()
             .expect("chat transcripts lock poisoned")
             .get(&conversation.id())
-            .cloned()
+            .map(|t| t.iter().map(|(turn, _)| turn.clone()).collect())
             .unwrap_or_default()
+    }
+
+    /// The transcript as `principal` may see it: an earlier answer built
+    /// from data they can't read is replaced by a note, and one built from
+    /// data they see redacted is redacted. This is what the model is given
+    /// for their turn, so it can't repeat what they couldn't read.
+    pub async fn transcript_as(
+        &self,
+        conversation: &ChatConversation,
+        principal: &Principal,
+    ) -> Vec<ToolTurn> {
+        let entries: Vec<Entry> = self
+            .transcripts
+            .lock()
+            .expect("chat transcripts lock poisoned")
+            .get(&conversation.id())
+            .cloned()
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(entries.len());
+        for (turn, labels) in entries {
+            out.push(match turn {
+                ToolTurn::Assistant(text) if !labels.is_empty() => {
+                    ToolTurn::Assistant(self.shown_to(principal, &text, &labels).await)
+                }
+                other => other,
+            });
+        }
+        out
+    }
+
+    /// The incident a thread is about, as `principal` may see it, for the
+    /// model's context. Not found (or not visible) refuses the turn.
+    async fn incident_brief(&self, id: uuid::Uuid, principal: &Principal) -> Result<String> {
+        let not_found = || crate::Error::NotFound(format!("incident {id}"));
+        let incident = self.deps.incidents.get(id).await?.ok_or_else(not_found)?;
+        let view = match &self.deps.access_repo {
+            Some(repo) => crate::access::findings::incident_view(
+                &self.deps.access,
+                &**repo,
+                principal,
+                crate::access::Via::Web,
+                &incident,
+            )
+            .await
+            .ok_or_else(not_found)?,
+            None => crate::access::findings::IncidentView {
+                level: crate::access::FindingsLevel::Full,
+                signals: Some(incident.signals.clone()),
+                hypothesis: Some(incident.hypothesis.clone()),
+                recommended_action: incident.recommended_action.clone(),
+                note: None,
+            },
+        };
+        let mut out = format!(
+            "Incident {id}: {:?} {} on {}, state {:?}, opened {}.",
+            incident.severity,
+            incident.fault_class,
+            incident.target,
+            incident.state,
+            incident.opened_at.format("%Y-%m-%d %H:%M UTC")
+        );
+        if let Some(h) = view.hypothesis {
+            out.push_str(&format!("\nHypothesis: {h}"));
+        }
+        if let Some(e) = view.signals {
+            out.push_str(&format!("\nEvidence: {e}"));
+        }
+        if let Some(r) = view.recommended_action {
+            out.push_str(&format!("\nRecommended action: {r}"));
+        }
+        if let Some(n) = view.note {
+            out.push_str(&format!("\n({n})"));
+        }
+        Ok(out)
+    }
+
+    /// `text` (built from `labels`) as `principal` may see it.
+    pub async fn shown_to(
+        &self,
+        principal: &Principal,
+        text: &str,
+        labels: &[crate::access::Label],
+    ) -> String {
+        shown_to(&self.deps.access, principal, text, labels).await
     }
 
     /// Append one row to the durable log, loudly best-effort (a full disk
@@ -594,7 +772,7 @@ impl ChatHandler for ChatTurn {
         message: &str,
     ) -> Result<String> {
         let conversation_id = conversation.id();
-        if let ChatConversation::Environment { project, environment } = conversation
+        if let Some((project, environment)) = conversation.environment_of()
             && !self.deps.config.projects.iter().any(|configured_project| {
                 configured_project.name == *project
                     && configured_project
@@ -605,7 +783,8 @@ impl ChatHandler for ChatTurn {
         {
             return Err(crate::Error::NotFound(format!("chat conversation {conversation_id}")));
         }
-        let mut ctx = build_tool_ctx(&self.deps, principal);
+        let mut ctx = build_tool_ctx(&self.deps, principal.clone());
+        ctx.call.via = crate::access::Via::Web;
         ctx.known_targets.retain(|target| conversation.contains(target));
         // Environment chat receives the interactive registry over its scoped
         // targets. Operations retains only coordination/context tools.
@@ -634,6 +813,18 @@ impl ChatHandler for ChatTurn {
                 Some(match team_context_line(&ctx.known_targets, &self.deps.config) {
                     Some(targets) => format!("{scope} {targets}"),
                     None => format!("{scope} No targets are configured in this environment."),
+                })
+            }
+            ChatConversation::Incident { project, environment, incident } => {
+                let brief = self.incident_brief(*incident, &principal).await?;
+                let scope = format!(
+                    "Conversation: the thread for one incident in {project} / {environment}. Stay \
+                     on this incident: help investigate it, confirm or rule out its hypothesis, and \
+                     work out the fix. Every target tool is restricted to this environment.\n{brief}"
+                );
+                Some(match team_context_line(&ctx.known_targets, &self.deps.config) {
+                    Some(targets) => format!("{scope}\n{targets}"),
+                    None => scope,
                 })
             }
         };
@@ -717,17 +908,12 @@ impl ChatHandler for ChatTurn {
             ChatConversation::Operations => {
                 self.deps.turn_gate.acquire_isolated("chat", ChatConversation::OPERATIONS_ID).await
             }
-            ChatConversation::Environment { project, environment } => {
+            ChatConversation::Environment { project, environment }
+            | ChatConversation::Incident { project, environment, .. } => {
                 self.deps.turn_gate.acquire_environment("chat", project, environment).await
             }
         };
-        let prior = self
-            .transcripts
-            .lock()
-            .expect("chat transcripts lock poisoned")
-            .get(&conversation_id)
-            .cloned()
-            .unwrap_or_default();
+        let prior = self.transcript_as(conversation, &principal).await;
 
         // The user's message is durable and broadcast BEFORE the turn runs
         // (it happened regardless of whether the reply succeeds) — every
@@ -771,22 +957,32 @@ impl ChatHandler for ChatTurn {
             };
             self.log_row(&conversation_id, turn_id, "tool", &name, &content).await;
         }
+        let labels = ctx.call.labels.as_ref().map(|l| l.snapshot()).unwrap_or_default();
+        if let Some(repo) = &self.deps.access_repo
+            && !labels.is_empty()
+            && let Err(e) = repo.add_labels("chat", turn_id, &labels).await
+        {
+            tracing::warn!(error = %e, "chat labels not stored; the answer is unlabelled");
+        }
         self.log_row(&conversation_id, turn_id, "assistant", "assistant", &reply.reply).await;
         if let Some(web) = &self.web {
-            web.publish(crate::channels::web::WebEvent::chat(
-                &conversation_id,
-                turn_id,
-                "assistant",
-                "assistant",
-                &reply.reply,
-            ));
+            web.publish(
+                crate::channels::web::WebEvent::chat(
+                    &conversation_id,
+                    turn_id,
+                    "assistant",
+                    "assistant",
+                    &reply.reply,
+                )
+                .with_labels(labels.clone()),
+            );
         }
 
         {
             let mut transcripts = self.transcripts.lock().expect("chat transcripts lock poisoned");
             let t = transcripts.entry(conversation_id).or_default();
-            t.push(Turn::User { content: attributed });
-            t.push(Turn::Assistant { content: reply.reply.clone(), tool_calls: Vec::new() });
+            t.push((ToolTurn::User(attributed), Vec::new()));
+            t.push((ToolTurn::Assistant(reply.reply.clone()), labels));
             if t.len() > TRANSCRIPT_KEEP_ENTRIES {
                 let excess = t.len() - TRANSCRIPT_KEEP_ENTRIES;
                 t.drain(..excess);
@@ -808,24 +1004,29 @@ impl ChatHandler for ChatTurn {
     }
 
     /// `ChatHandler::transcript`'s real implementation: this struct's own
-    /// `transcript()` (`Vec<Turn>`) flattened to (role, content) pairs for
-    /// a render-on-load caller (`http::routes::chat::history`). `Turn::
-    /// User`/`Turn::Assistant` are the only variants `chat` ever pushes
-    /// (see above — `ToolResult` never lands in the shared transcript, tool
-    /// exchanges are collapsed by construction before a turn returns), but
-    /// this maps defensively rather than assuming: an unexpected
-    /// `ToolResult` is surfaced as role `"tool"` rather than silently
-    /// dropped, so a future push site's mistake shows up in the UI instead
-    /// of vanishing.
+    /// `transcript()` (`Vec<ToolTurn>`) flattened to (role, content) pairs
+    /// for a render-on-load caller (`http::routes::chat::history`).
+    /// `User`/`Assistant` are the only variants `chat` ever pushes (tool
+    /// exchanges never land in the shared transcript), but this maps
+    /// defensively rather than assuming: an unexpected tool turn is
+    /// surfaced as role `"tool"` rather than silently dropped, so a future
+    /// push site's mistake shows up in the UI instead of vanishing.
     async fn transcript(&self) -> Vec<(String, String)> {
         self.transcript()
             .into_iter()
             .map(|t| match t {
-                Turn::User { content } => ("user".to_string(), content),
-                Turn::Assistant { content, .. } => ("assistant".to_string(), content),
-                Turn::ToolResult { name, output, .. } => {
-                    ("tool".to_string(), format!("{name}: {output}"))
+                ToolTurn::User(content) | ToolTurn::UserWithImages(content, _) => {
+                    ("user".to_string(), content)
                 }
+                ToolTurn::Assistant(content) => ("assistant".to_string(), content),
+                ToolTurn::AssistantToolCalls(calls) => (
+                    "tool".to_string(),
+                    calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "),
+                ),
+                ToolTurn::ToolResults(results) => (
+                    "tool".to_string(),
+                    results.into_iter().map(|(_, o)| o).collect::<Vec<_>>().join("\n"),
+                ),
             })
             .collect()
     }
@@ -856,7 +1057,7 @@ mod tests {
     use crate::config::{DaemonCfg, EnvCfg, ProjectCfg, ResourceCfg, TargetCfg, TargetKindName};
     use crate::db::memory::InMemoryDb;
     use crate::domain::{IncidentState, Payload, Severity};
-    use crate::llm::ScriptedLlm;
+    use crate::llm::ScriptedModel;
     use crate::policy::{CommandRequest, PolicyOutcome};
     use serde_json::json;
     use std::sync::Mutex;
@@ -922,6 +1123,8 @@ mod tests {
                             ca_cert_path: None,
                             insecure_tls: false,
                         })],
+                        port_forwards: Vec::new(),
+                        scan: None,
                     }],
                 }],
             }],
@@ -929,7 +1132,7 @@ mod tests {
         }
     }
 
-    fn test_deps(llm: Arc<dyn LlmProvider>, policy: Arc<dyn PolicyExecute>) -> DispatchDeps {
+    fn test_deps(llm: Arc<Llm>, policy: Arc<dyn PolicyExecute>) -> DispatchDeps {
         test_deps_with_memory(llm, policy, Arc::new(Memory::disabled()))
     }
 
@@ -937,7 +1140,7 @@ mod tests {
     /// framing tests need a real (wiremock-backed) one so they can read the
     /// exact retain bodies each dispatch path sends.
     fn test_deps_with_memory(
-        llm: Arc<dyn LlmProvider>,
+        llm: Arc<Llm>,
         policy: Arc<dyn PolicyExecute>,
         memory: Arc<Memory>,
     ) -> DispatchDeps {
@@ -1000,7 +1203,7 @@ mod tests {
 
     #[tokio::test]
     async fn scan_job_notify_opens_exactly_one_incident_with_a_fingerprint() {
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         scripted
             .push_tool_call("monitor", json!({"target": "example::prod::web-1", "view": "disk"}))
             .push_tool_call(
@@ -1015,7 +1218,7 @@ mod tests {
                 }),
             )
             .push_text("opened an incident for the disk issue.");
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let recording_policy = Arc::new(RecordingPolicy::new());
         let policy: Arc<dyn PolicyExecute> = recording_policy.clone();
         let deps = test_deps(llm, policy);
@@ -1062,9 +1265,9 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_alert_frames_the_payload_as_observation_and_sends_the_reply() {
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         scripted.push_text("Acknowledged the alert; nothing actionable yet.");
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let deps = test_deps(llm, policy);
         let channel = Arc::new(RecordingChannel::new());
@@ -1078,7 +1281,7 @@ mod tests {
         assert_eq!(sent[0].body, "Acknowledged the alert; nothing actionable yet.");
     }
 
-    /// A `ScriptedLlm` doesn't let a test inspect the exact system prompt it
+    /// A `ScriptedModel` doesn't let a test inspect the exact system prompt it
     /// was handed (`chat_step`'s `_system`/`_history` args are discarded by
     /// the fake) — so this test instead pins the OBSERVATION FRAMING
     /// FUNCTION's own contract directly (the same function `WebhookIngest`
@@ -1115,7 +1318,7 @@ mod tests {
         // the mutating-but-heartbeat-excluded tool is present/absent,
         // exactly mirroring what AgentJobComposer/WebhookIngest each pass.
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
-        let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::new());
+        let llm: Arc<Llm> = Arc::new(ScriptedModel::new());
         let deps = test_deps(llm, policy);
         let ctx = build_tool_ctx(&deps, Principal::Agent { job: None });
 
@@ -1139,7 +1342,7 @@ mod tests {
         // heartbeat=true) can NEVER contain a tool whose own
         // `allowed_in_heartbeat()` says no, no matter what the model asks
         // for, because the tool was never in the registry the model's
-        // ToolSpec list was built from — an unlisted tool cannot be called.
+        // tool specs were built from — an unlisted tool cannot be called.
         for tool in &heartbeat_registry {
             assert!(
                 tool.allowed_in_heartbeat(),
@@ -1161,13 +1364,13 @@ mod tests {
         // half of that contract (the scheduler-side half, that Err flows
         // into fire_one_job's failure-budget path, is scheduler::jobs's own
         // test surface, not this module's).
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         // Heartbeat turns run on the deeper unattended cap; +1 covers the
         // post-cap final-report call (also blank here — nothing usable).
         for _ in 0..=agent::MAX_STEPS_HEARTBEAT {
             scripted.push_text("   ");
         }
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let deps = test_deps(llm, policy);
         let composer = AgentJobComposer::new(deps);
@@ -1263,10 +1466,10 @@ mod tests {
 
     #[tokio::test]
     async fn chat_turn_frames_attribution_and_accumulates_the_shared_transcript() {
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         scripted.push_text("hi alice");
         scripted.push_text("hi bob");
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let chat = ChatTurn::new(test_deps(llm, policy));
 
@@ -1282,7 +1485,7 @@ mod tests {
         let t = chat.transcript();
         assert_eq!(t.len(), 4);
         match (&t[0], &t[2]) {
-            (Turn::User { content: a }, Turn::User { content: b }) => {
+            (ToolTurn::User(a), ToolTurn::User(b)) => {
                 assert_eq!(a, "alice said: what's up?");
                 assert_eq!(b, "bob said: and me?");
             }
@@ -1307,35 +1510,32 @@ mod tests {
     }
 
     #[async_trait]
-    impl LlmProvider for ConcurrencyProbeLlm {
+    impl crate::llm::ChatModel<Principal> for ConcurrencyProbeLlm {
+        fn model_id(&self) -> &str {
+            "concurrency-probe"
+        }
+
         async fn chat_step(
             &self,
             _principal: &Principal,
-            _system: &str,
-            _history: &[Turn],
-            _tools: &[crate::llm::ToolSpec],
-        ) -> Result<crate::llm::ChatStep> {
+            _system: crate::llm::SystemPrompt<'_>,
+            _history: &[ToolTurn],
+            _tools: &[serde_json::Value],
+        ) -> dcpr_llm::Result<crate::llm::ChatStep> {
             use std::sync::atomic::Ordering;
             let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_seen.fetch_max(now, Ordering::SeqCst);
             // Long enough that unserialized turns WOULD overlap.
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             self.active.fetch_sub(1, Ordering::SeqCst);
-            Ok(crate::llm::ChatStep {
-                text: Some("ok".into()),
-                tool_calls: Vec::new(),
-                usage: Default::default(),
-            })
-        }
-        fn name(&self) -> &str {
-            "concurrency-probe"
+            Ok(crate::llm::ChatStep::Text("ok".into()))
         }
     }
 
     #[tokio::test]
     async fn turn_gate_serializes_chat_scan_and_webhook_turns() {
         let probe = Arc::new(ConcurrencyProbeLlm::new());
-        let llm: Arc<dyn LlmProvider> = probe.clone();
+        let llm: Arc<Llm> = probe.clone();
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let deps = test_deps(llm, policy);
 
@@ -1379,9 +1579,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn chat_retain_is_framed_exactly_once_with_the_speaker() {
         let (server, memory) = recording_memory().await;
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         scripted.push_text("noted");
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let chat = ChatTurn::new(test_deps_with_memory(llm, policy, memory.clone()));
 
@@ -1406,7 +1606,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scan_finding_is_retained_as_an_observation_of_its_target() {
         let (server, memory) = recording_memory().await;
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         scripted
             .push_tool_call(
                 "opsclaw_notify",
@@ -1420,7 +1620,7 @@ mod tests {
                 }),
             )
             .push_text("disk on web-1 at 98%; opened a critical incident.");
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let composer = AgentJobComposer::new(test_deps_with_memory(llm, policy, memory.clone()));
         let job = Job::new(
@@ -1456,12 +1656,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quiet_scan_retains_nothing() {
         let (server, memory) = recording_memory().await;
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         // No tool calls → acted=false: an all-clear tick, ~48×/day/target at
         // the default cadence, must not reach the bank (see compose's own
         // WHY-comment).
         scripted.push_text("nothing wrong; all metrics nominal.");
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let composer = AgentJobComposer::new(test_deps_with_memory(llm, policy, memory.clone()));
         let job = Job::new(
@@ -1483,9 +1683,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn webhook_retains_the_diagnosis_as_agent_speech_not_the_payload() {
         let (server, memory) = recording_memory().await;
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         scripted.push_text("the payments pod is OOMing again; same pattern as last week.");
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let ingest = WebhookIngest::new(
             test_deps_with_memory(llm, policy, memory.clone()),
@@ -1511,11 +1711,11 @@ mod tests {
 
     #[tokio::test]
     async fn chat_transcript_stays_bounded() {
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         for _ in 0..(TRANSCRIPT_KEEP_ENTRIES + 10) {
             scripted.push_text("ok");
         }
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let chat = ChatTurn::new(test_deps(llm, policy));
         let op = Principal::Operator { account: uuid::Uuid::new_v4() };
@@ -1527,18 +1727,18 @@ mod tests {
         assert!(t.len() <= TRANSCRIPT_KEEP_ENTRIES, "transcript grew to {}", t.len());
         // The SURVIVING entries are the most recent ones.
         match t.last().unwrap() {
-            Turn::Assistant { content, .. } => assert_eq!(content, "ok"),
+            ToolTurn::Assistant(content) => assert_eq!(content, "ok"),
             other => panic!("expected assistant last, got {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn operations_conversation_cannot_invoke_target_tools() {
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         scripted
             .push_tool_call("monitor", json!({"target": "example::prod::web-1", "view": "disk"}))
             .push_text("select the environment first");
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let recording = Arc::new(RecordingPolicy::new());
         let policy: Arc<dyn PolicyExecute> = recording.clone();
         let chat = ChatTurn::new(test_deps(llm, policy));
@@ -1559,7 +1759,7 @@ mod tests {
     async fn chat_turn_persists_the_durable_log_streams_tools_and_hydrates() {
         use crate::db::ChatRepo;
 
-        let mut scripted = ScriptedLlm::new();
+        let mut scripted = ScriptedModel::new();
         // Two tool calls mid-turn: one that resolves and succeeds (monitor
         // — the RecordingPolicy's NeedsApproval outcome is still an Ok
         // ToolResult), and one that doesn't resolve at all (the observer
@@ -1572,7 +1772,7 @@ mod tests {
         );
         scripted.push_tool_call("probe_pods", serde_json::json!({"ns": "monitoring"}));
         scripted.push_text("all quiet");
-        let llm: Arc<dyn LlmProvider> = Arc::new(scripted);
+        let llm: Arc<Llm> = Arc::new(scripted);
         let policy: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let db = Arc::new(InMemoryDb::new());
         let hub = Arc::new(crate::channels::web::WebHub::new());
@@ -1625,9 +1825,9 @@ mod tests {
 
         // A fresh ChatTurn over the same store (a daemon restart) hydrates
         // the REPLAY transcript: user/assistant only, re-framed.
-        let mut scripted2 = ScriptedLlm::new();
+        let mut scripted2 = ScriptedModel::new();
         scripted2.push_text("unused");
-        let llm2: Arc<dyn LlmProvider> = Arc::new(scripted2);
+        let llm2: Arc<Llm> = Arc::new(scripted2);
         let policy2: Arc<dyn PolicyExecute> = Arc::new(RecordingPolicy::new());
         let rebooted = ChatTurn::new(test_deps(llm2, policy2))
             .with_surfaces(db.clone(), Arc::new(crate::channels::web::WebHub::new()));
@@ -1635,7 +1835,7 @@ mod tests {
         let t = rebooted.transcript_for(&conversation);
         assert_eq!(t.len(), 2, "tool rows must not enter the replay transcript");
         match (&t[0], &t[1]) {
-            (Turn::User { content: u }, Turn::Assistant { content: a, .. }) => {
+            (ToolTurn::User(u), ToolTurn::Assistant(a)) => {
                 assert_eq!(u, "alice said: check the cluster");
                 assert_eq!(a, "all quiet");
             }

@@ -5,6 +5,7 @@
 //! SQLite is the spec (AGENTS.md): where the two disagree, this file is the
 //! one that gets fixed.
 
+mod access;
 mod accounts;
 mod approvals;
 mod audit;
@@ -54,7 +55,14 @@ struct Store {
     /// The durable shared chat log (append-only; `seq` assigned on append).
     chat_messages: Vec<crate::db::ChatMessage>,
     chat_requests: HashMap<(Uuid, String), (String, crate::db::ChatRequestClaim)>,
+    account_groups: HashMap<Uuid, Vec<String>>,
+    elevations: HashMap<Uuid, crate::access::Elevation>,
+    /// (kind, id) -> (labels, restricted_to).
+    finding_labels: HashMap<(String, String), FindingLabels>,
 }
+
+/// A finding's labels and optional restriction list.
+type FindingLabels = (Vec<crate::access::Label>, Option<Vec<String>>);
 
 /// A single in-memory store shared across all repo trait impls.
 #[derive(Clone, Default)]

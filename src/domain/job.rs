@@ -56,13 +56,18 @@ impl Schedule {
                 Duration::try_minutes((*every_minutes).max(1)).map(|d| after + d)
             }
             Schedule::Cron { expr, timezone } => {
-                use croner::Cron;
-                use std::str::FromStr;
                 // `timezone` is already a typed `Tz` (validated at construction /
                 // deserialization) — no fallible string parse, so a stored cron
                 // job can never silently mis-fire in UTC.
                 let tz: Tz = *timezone;
-                let cron = Cron::from_str(expr).ok()?;
+                // croner 4 rejects shorthand steps like `5/5` by default;
+                // `sloppy_ranges` keeps the 3.x reading, so jobs stored
+                // before the upgrade keep firing instead of going quiet.
+                let cron = croner::parser::CronParser::builder()
+                    .sloppy_ranges(true)
+                    .build()
+                    .parse(expr)
+                    .ok()?;
                 let local_after = after.with_timezone(&tz);
                 cron.find_next_occurrence(&local_after, false).ok().map(|dt| dt.with_timezone(&Utc))
             }
@@ -263,6 +268,14 @@ mod tests {
         let s = Schedule::Cron { expr: "0 8 * * *".into(), timezone: chrono_tz::Europe::London };
         let next = s.next_after(t(10, 0)).unwrap();
         assert_eq!(next.format("%H:%M").to_string(), "07:00");
+    }
+
+    /// `5/5` was valid under croner 3; jobs stored with it must keep firing.
+    #[test]
+    fn shorthand_cron_steps_still_schedule() {
+        let s = Schedule::Cron { expr: "5/15 * * * *".into(), timezone: chrono_tz::UTC };
+        assert_eq!(s.next_after(t(8, 0)), Some(t(8, 5)));
+        assert_eq!(s.next_after(t(8, 5)), Some(t(8, 20)));
     }
 
     #[test]

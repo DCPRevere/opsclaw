@@ -160,6 +160,11 @@ fn ask_auth(p: &mut dyn Prompter, cfg: &mut Config, summary: &mut Vec<String>) -
     let current = match cfg.auth.provider {
         AuthProvider::Local => "local",
         AuthProvider::Hanko => "hanko",
+        AuthProvider::Oidc => {
+            p.say("          SSO (oidc) is configured in [auth.oidc]; leaving it as it is.");
+            summary.push("Sign-in: SSO (oidc), unchanged".into());
+            return Ok(());
+        }
     };
     let provider = ask_choice(p, "auth provider", &["local", "hanko"], current)?;
     if provider != "hanko" {
@@ -282,6 +287,13 @@ async fn wizard_account(p: &mut dyn Prompter, cfg: &Config, opsclaw_home: &Path)
     let email = p.ask("operator email", None)?;
     let display_name = p.ask("display name", Some(&email))?;
     let out = match cfg.auth.provider {
+        AuthProvider::Oidc => {
+            return Err(crate::Error::validation(
+                "this daemon signs in through SSO (oidc): set auth.oidc.auto_create = true so \
+                 accounts are made at first sign-in, or run `opsclaw-cli account create <email> \
+                 --oidc-subject <sub>`",
+            ));
+        }
         AuthProvider::Local => {
             p.say(
                 "  the password must be at least 12 characters (it guards a daemon that can act on",
@@ -647,6 +659,7 @@ pub async fn run(
     let account_cmd = match cfg.auth.provider {
         AuthProvider::Local => "`opsclaw-cli account create <email>`",
         AuthProvider::Hanko => "`opsclaw-cli account create <email> --hanko-subject <id>`",
+        AuthProvider::Oidc => "`opsclaw-cli account create <email> --oidc-subject <sub>`",
     };
     p.say("[account] the web UI needs an operator account; the FIRST one can only be created");
     p.say("          from this CLI (it goes straight into the daemon's local database).");
@@ -763,6 +776,10 @@ pub async fn run_non_interactive(
             "Sign-in: hanko at {}, audience {}",
             cfg.auth.api_base().unwrap_or("(unset)"),
             cfg.auth.audience.join(", ")
+        ),
+        AuthProvider::Oidc => format!(
+            "Sign-in: SSO (oidc) at {}",
+            cfg.auth.oidc.as_ref().map(|o| o.issuer.as_str()).unwrap_or("(unset)")
         ),
     });
 

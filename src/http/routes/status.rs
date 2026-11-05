@@ -97,8 +97,12 @@ mod tests {
         let state = AppState::fake();
         let guard = state.turn_gate.acquire_interactive("chat").await;
         let account_id = uuid::Uuid::new_v4();
-        let Json(body) =
-            status(State(state), Authed(crate::http::handlers::Ctx { account_id })).await.unwrap();
+        let Json(body) = status(
+            State(state),
+            Authed(crate::http::handlers::Ctx { account_id, via: crate::access::Via::Web }),
+        )
+        .await
+        .unwrap();
         assert_eq!(body["turns"][0]["kind"], "chat");
         assert_eq!(body["turns"][0]["conflict_domain"], "all targets");
         assert_eq!(body["turns"][0]["state"], "active");

@@ -162,6 +162,9 @@ impl SchedulerHandle {
 
     /// Release one prior `tighten` call. A `relax` with no matching prior
     /// `tighten` is a no-op (the counter is saturating, never goes negative).
+    // `fetch_update` is deprecated in favour of `try_update` on Rust 1.99, but
+    // the crate's MSRV (1.94) predates `try_update`.
+    #[allow(deprecated)]
     pub fn relax(&self) {
         let _ = self
             .tighten_count

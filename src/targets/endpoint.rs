@@ -122,6 +122,13 @@ fn read_path_allowed(kind: ResourceType, path: &str) -> std::result::Result<(), 
         ResourceType::Elasticsearch | ResourceType::Eventstore | ResourceType::AzureServiceBus => {
             Ok(())
         }
+        ResourceType::Tempo => {
+            if path.starts_with("/api/") {
+                Ok(())
+            } else {
+                Err(format!("tempo reads live under /api/, got {path:?}"))
+            }
+        }
         ResourceType::Prometheus | ResourceType::Argocd => {
             if path.starts_with("/api/v1/") {
                 Ok(())
@@ -205,6 +212,7 @@ impl TargetExecutor for EndpointExecutor {
     async fn probe(&self) -> Result<ProbeReport> {
         let path = match self.kind {
             ResourceType::Argocd => "/healthz",
+            ResourceType::Tempo => "/ready",
             _ => "/",
         };
         let url = format!("{}{path}", self.auth.base_url);

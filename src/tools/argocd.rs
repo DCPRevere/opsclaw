@@ -250,6 +250,7 @@ mod tests {
         let mut reg = EndpointRegistry::new();
         reg.insert(&target(), EndpointAuth::new(base_url, token.map(str::to_string)));
         ToolCtx {
+            call: Default::default(),
             principal: Principal::Agent { job: None },
             policy,
             known_targets: vec![target()],

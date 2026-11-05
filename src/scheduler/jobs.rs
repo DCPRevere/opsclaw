@@ -474,11 +474,22 @@ const DEFAULT_SCAN_PROMPT: &str = "Run a full health scan of the single target n
      target, and use the configured namespace for a namespace-scoped target), and flag anything crash-looping, restarting excessively, \
      failing to pull images, stuck initializing/terminating, or not ready. Aggregate metrics \
      and log searches do NOT substitute for this sweep — a crash-looping pod can look healthy \
-     in both.\n\
+     in both. For each crash-looping or restarted pod, read the crashed container's logs \
+     (kubernetes logs with previous: true, and container for a multi-container pod) and \
+     name the crash reason rather than only the symptom.\n\
      2. RESOURCE PRESSURE — CPU, memory, and disk headroom, flagging anything saturated or \
      trending toward exhaustion.\n\
      3. FAULT SIGNALS — elevated error rates and log lines indicating a fault, using the \
-     target's configured metrics/log resources.\n\
+     target's configured metrics/log resources. With a Prometheus resource, list the firing \
+     alerts (ALERTS{alertstate=\"firing\"}) and account for each one: a firing alert is a \
+     lead to confirm or dismiss with evidence, not a finding by itself. On a managed \
+     Kubernetes control plane (AKS, EKS, GKE) the scheduler, controller-manager and \
+     kube-proxy targets cannot be scraped, so their *Down alerts are expected noise. With an \
+     Elasticsearch resource, also check the cluster's own health: status, unassigned shards, \
+     and data streams or indices that keep growing without rolling over. With a Tempo \
+     resource, search the scan window for failing traces ({ status = error }) and slow ones, \
+     and open one or two to name the failing service and operation; a trace often shows the \
+     downstream cause (a dependency, a queue, a database) that the logs only hint at.\n\
      Corroborate any single weak signal before treating it as a finding (an app health \
      endpoint proves only that its own process loop is alive) — never open an incident on one \
      weak signal alone. A LONG-STANDING fault is still a fault: report it with its age; do not \
@@ -526,7 +537,7 @@ pub async fn seed_default_scan_jobs(deps: &SchedulerDeps, every_minutes: i64) ->
         .iter()
         .flat_map(|project| {
             project.envs.iter().flat_map(move |env| {
-                env.targets.iter().map(move |target| {
+                env.targets.iter().filter(|target| target.scan != Some(false)).map(move |target| {
                     let fq = crate::domain::FqTarget::new(&project.name, &env.name, &target.name);
                     (format!("{fq}-scan"), fq)
                 })
@@ -564,7 +575,7 @@ pub async fn seed_default_scan_jobs(deps: &SchedulerDeps, every_minutes: i64) ->
 
     for project in &deps.config.projects {
         for env in &project.envs {
-            for target in &env.targets {
+            for target in env.targets.iter().filter(|t| t.scan != Some(false)) {
                 let name = format!("{}::{}::{}-scan", project.name, env.name, target.name);
                 if existing_system_names.contains(name.as_str()) {
                     continue; // already seeded; an operator edit converts it away from `system`

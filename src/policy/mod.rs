@@ -70,6 +70,14 @@ pub struct CommandRequest {
     /// output, which would let the model grant itself pre-approval.
     #[serde(default)]
     pub runbook: Option<String>,
+    /// The surface the request came through (`crate::access::Via`).
+    /// Trusted positional context, set from `ToolCtx`.
+    #[serde(default)]
+    pub via: crate::access::Via,
+    /// Where an executed read records its (target, class) label, so the
+    /// turn's findings carry what they were built from.
+    #[serde(skip)]
+    pub labels: Option<crate::access::Labels>,
 }
 
 #[derive(Debug)]
@@ -165,6 +173,14 @@ fn gate(risk: RiskClass, autonomy: Autonomy, runbook_matched: bool) -> Gate {
     }
 }
 
+/// How an executed command's output is shown, decided by the access check.
+#[derive(Clone, Copy)]
+struct Shown<'a> {
+    class: &'a str,
+    exposure: crate::access::Exposure,
+    labels: Option<&'a crate::access::Labels>,
+}
+
 /// The policy engine. Owns the executor registry — the ONLY reference to
 /// `TargetExecutor`s in the daemon — plus the audit writer, e-stop, scrubber,
 /// and the action-rate window.
@@ -187,6 +203,11 @@ pub struct Policy {
     /// late-wiring pattern as `CostGuard::set_notifier`; unset (tests,
     /// early boot) simply skips the announcement.
     notifier: std::sync::OnceLock<Arc<dyn crate::channels::Channel>>,
+    /// Who may see and do what. Built from `config.access` by [`Policy::new`];
+    /// boot replaces it ([`Policy::with_access`]) with the instance that
+    /// has the account directory and the right home for a custom Cedar
+    /// file.
+    access: Arc<crate::access::Access>,
 }
 
 impl Policy {
@@ -252,14 +273,32 @@ impl Policy {
     ) -> Self {
         Policy {
             executors,
-            config,
             audit,
             estop,
             approvals,
             scrubber,
+            access: Arc::new(
+                crate::access::Access::new(&config.access, std::path::Path::new("."))
+                    .unwrap_or_else(|e| {
+                        // Fail closed: nobody but OpsClaw itself gets in.
+                        tracing::error!("access config refused, denying every person: {e}");
+                        crate::access::Access::nobody()
+                    }),
+            ),
+            config,
             actions: Mutex::new(VecDeque::new()),
             notifier: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Use this access engine (shared with the read surfaces).
+    pub fn with_access(mut self, access: Arc<crate::access::Access>) -> Self {
+        self.access = access;
+        self
+    }
+
+    pub fn access(&self) -> &Arc<crate::access::Access> {
+        &self.access
     }
 
     /// Install the channel fan-out the approval announcement goes out on.
@@ -299,7 +338,7 @@ impl Policy {
             "id": approval.id,
             "risk": approval.risk.to_string(),
             "tool": approval.tool,
-            "target": approval.target,
+            "target": approval.target.to_string(),
             "command": scrubbed_command,
             "hypothesis": approval.hypothesis,
             "expires_at": approval.expires_at.to_rfc3339(),
@@ -373,6 +412,38 @@ impl Policy {
                 dry_run_logged: false,
             });
         }
+
+        // Access: may THIS person see this class on this target, or ask for
+        // this mutation? Checked as the asker (an agent turn carries the
+        // asker's principal), before any autonomy rule, and audited as
+        // `denied` so it is never mistaken for an autonomy block.
+        let class = self.access.classify(&req.tool, &fq, &req.command);
+        let read_decision = self.access.read(&req.principal, req.via, &fq, &class).await;
+        let decision = if risk == RiskClass::Read {
+            read_decision.clone().map(|_| ())
+        } else {
+            self.access.request(&req.principal, req.via, &fq).await
+        };
+        if let Err(denied) = decision {
+            self.audit_one(
+                &req.principal,
+                &fq,
+                &req.tool,
+                &scrubbed_command,
+                risk,
+                AuditOutcome::Denied,
+                None,
+            )
+            .await?;
+            return Ok(PolicyOutcome::Blocked {
+                reason: format!("access: {denied}. Do not retry this for this person"),
+                dry_run_logged: false,
+            });
+        }
+        // A mutation's output is shown the way its class would be, and
+        // redacted when the person may not read the class at all.
+        let exposure = read_decision.unwrap_or(crate::access::Exposure::Redacted);
+        let shown = Shown { class: &class, exposure, labels: req.labels.as_ref() };
 
         // Forbidden paths (brief §5): hard-blocked at EVERY level, like the
         // destructive-pattern list — checked on the raw line so a path
@@ -455,6 +526,15 @@ impl Policy {
             g => g,
         };
 
+        // Bring-your-own agents never act directly: a mutation over MCP
+        // always waits for a human, whatever the autonomy level.
+        let gated = match gated {
+            Gate::Execute if risk != RiskClass::Read && req.via == crate::access::Via::Mcp => {
+                Gate::Approval
+            }
+            g => g,
+        };
+
         match gated {
             Gate::Block => {
                 // The audit record IS the dry-run log: what would have run,
@@ -516,6 +596,7 @@ impl Policy {
                     &req.command,
                     &scrubbed_command,
                     risk,
+                    shown,
                 )
                 .await
             }
@@ -533,6 +614,7 @@ impl Policy {
         command: &str,
         scrubbed_command: &str,
         risk: RiskClass,
+        shown: Shown<'_>,
     ) -> Result<PolicyOutcome> {
         let fq = target.to_string();
         // Reads are unmetered; mutations claim a rate slot first.
@@ -599,6 +681,15 @@ impl Policy {
                 // or any log line.
                 out.stdout = self.scrubber.scrub(&out.stdout);
                 out.stderr = self.scrubber.scrub(&out.stderr);
+                if shown.exposure == crate::access::Exposure::Redacted
+                    && self.access.redacts(shown.class)
+                {
+                    out.stdout = self.access.redact(shown.class, &out.stdout);
+                    out.stderr = self.access.redact(shown.class, &out.stderr);
+                }
+                if let Some(labels) = shown.labels {
+                    labels.add(&fq, shown.class);
+                }
                 self.audit_one(
                     principal,
                     &fq,
@@ -650,7 +741,7 @@ impl ExecuteApproved for Policy {
     async fn execute_approved(
         &self,
         approval: &ApprovalRequest,
-        _operator: Uuid,
+        operator: Uuid,
     ) -> Result<PolicyOutcome> {
         let mut approved_req = CommandRequest {
             principal: approval.requested_by.clone(),
@@ -660,6 +751,8 @@ impl ExecuteApproved for Policy {
             declared_risk: approval.risk,
             hypothesis: Some(approval.hypothesis.clone()),
             runbook: None,
+            via: Default::default(),
+            labels: None,
         };
         approved_req.command = self.canonical_command(&approved_req)?;
         // Re-derive risk defensively; the human approved THIS command, but
@@ -748,6 +841,34 @@ impl ExecuteApproved for Policy {
                 dry_run_logged: false,
             });
         }
+        // The approver must be allowed to approve on this target, and may
+        // not approve their own request. Their read access to the class
+        // decides how the output is shown.
+        let approver = Principal::Operator { account: operator };
+        let class = self.access.classify(&approval.tool, &fq, &approved_req.command);
+        if let Err(denied) =
+            self.access.approve(&approver, crate::access::Via::Web, &fq, principal).await
+        {
+            self.audit_one(
+                &approver,
+                &fq,
+                &approval.tool,
+                &scrubbed,
+                risk,
+                AuditOutcome::Denied,
+                None,
+            )
+            .await?;
+            return Ok(PolicyOutcome::Blocked {
+                reason: format!("access: {denied}"),
+                dry_run_logged: false,
+            });
+        }
+        let exposure = self
+            .access
+            .read(&approver, crate::access::Via::Web, &fq, &class)
+            .await
+            .unwrap_or(crate::access::Exposure::Redacted);
         self.run_capped(
             principal,
             &approval.tool,
@@ -755,6 +876,7 @@ impl ExecuteApproved for Policy {
             &approved_req.command,
             &scrubbed,
             risk,
+            Shown { class: &class, exposure, labels: None },
         )
         .await
     }
@@ -858,6 +980,8 @@ mod tests {
             declared_risk: declared,
             hypothesis: Some("test hypothesis".into()),
             runbook: None,
+            via: Default::default(),
+            labels: None,
         }
     }
 
@@ -1459,5 +1583,118 @@ mod tests {
         let mut req = request("uptime", RiskClass::Read);
         req.target = FqTarget::new("example", "prod", "unknown-target");
         assert!(rig.policy.execute(req).await.is_err());
+    }
+
+    // ---- access (crate::access) ------------------------------------------
+
+    const TEAM: &str = r#"
+        [access]
+        preset = "team"
+        [[access.role]]
+        name = "ops"
+        members = ["ops@example.com"]
+        where = ["example::prod"]
+        data = ["host"]
+        actions = "request"
+        [[access.role]]
+        name = "lead"
+        members = ["lead@example.com"]
+        where = ["*"]
+        data = ["state"]
+        actions = "approve"
+    "#;
+
+    async fn person(db: &InMemoryDb, email: &str) -> Principal {
+        let id = Uuid::new_v4();
+        crate::db::AccountRepo::insert(
+            db,
+            &crate::db::Account {
+                id,
+                email: email.into(),
+                display_name: email.into(),
+                password_hash: "x".into(),
+                token_version: 0,
+                created_at: Utc::now(),
+                auth_provider: "local".into(),
+                external_subject: None,
+            },
+        )
+        .await
+        .unwrap();
+        Principal::Operator { account: id }
+    }
+
+    fn team_rig(autonomy: Autonomy, stdout: &str) -> Rig {
+        let mut cfg = config_at(autonomy);
+        cfg.access =
+            toml::from_str::<toml::Table>(TEAM).unwrap()["access"].clone().try_into().unwrap();
+        let rig = rig_with(cfg.clone(), FakeExecutor::ok(stdout));
+        let access =
+            Arc::new(crate::access::Access::new(&cfg.access, std::path::Path::new(".")).unwrap());
+        access.set_directory(Arc::new(crate::access::RepoDirectory(rig.db.clone())));
+        Rig { policy: rig.policy.with_access(access), ..rig }
+    }
+
+    #[tokio::test]
+    async fn a_person_without_a_grant_is_denied_and_audited() {
+        let rig = team_rig(Autonomy::Auto, "up 3 days");
+        let eve = person(&rig.db, "eve@example.com").await;
+        let mut req = request("uptime", RiskClass::Read);
+        req.principal = eve;
+        let out = rig.policy.execute(req).await.unwrap();
+        assert!(
+            matches!(out, PolicyOutcome::Blocked { ref reason, .. } if reason.contains("access")),
+            "{out:?}"
+        );
+        assert!(rig.executor.ran.lock().unwrap().is_empty());
+        assert_eq!(outcomes(&rig.db).await, vec![AuditOutcome::Denied]);
+    }
+
+    #[tokio::test]
+    async fn redacted_classes_come_back_redacted_and_labelled() {
+        let rig = team_rig(Autonomy::Auto, "session for bob@example.com from +44 7700 900123");
+        let ops = person(&rig.db, "ops@example.com").await;
+        let labels = crate::access::Labels::default();
+        let mut req = request("last -n 5", RiskClass::Read);
+        req.principal = ops;
+        req.labels = Some(labels.clone());
+        let PolicyOutcome::Executed(out) = rig.policy.execute(req).await.unwrap() else { panic!() };
+        assert_eq!(out.stdout, "session for <redacted:email> from <redacted:phone>");
+        assert_eq!(
+            labels.snapshot(),
+            vec![crate::access::Label {
+                target: "example::prod::bastion".into(),
+                class: "host".into()
+            }]
+        );
+        // OpsClaw itself reads raw.
+        let mut req = request("last -n 5", RiskClass::Read);
+        req.principal = Principal::Agent { job: None };
+        let PolicyOutcome::Executed(out) = rig.policy.execute(req).await.unwrap() else { panic!() };
+        assert!(out.stdout.contains("bob@example.com"));
+    }
+
+    #[tokio::test]
+    async fn mcp_mutations_always_queue_and_approvals_need_four_eyes() {
+        let rig = team_rig(Autonomy::Auto, "restarted");
+        let ops = person(&rig.db, "ops@example.com").await;
+        let lead = person(&rig.db, "lead@example.com").await;
+        let mut req = request("systemctl restart nginx", RiskClass::Medium);
+        req.principal = ops.clone();
+        req.via = crate::access::Via::Mcp;
+        let PolicyOutcome::NeedsApproval(id) = rig.policy.execute(req).await.unwrap() else {
+            panic!("an MCP mutation must queue even at auto")
+        };
+        let approval = rig.db.get(id).await.unwrap().unwrap();
+        let Principal::Operator { account: ops_id } = ops else { unreachable!() };
+        let Principal::Operator { account: lead_id } = lead else { unreachable!() };
+        let own = rig.policy.execute_approved(&approval, ops_id).await.unwrap();
+        assert!(
+            matches!(own, PolicyOutcome::Blocked { ref reason, .. } if reason.contains("own request")),
+            "{own:?}"
+        );
+        assert!(rig.executor.ran.lock().unwrap().is_empty());
+        let ok = rig.policy.execute_approved(&approval, lead_id).await.unwrap();
+        assert!(matches!(ok, PolicyOutcome::Executed(_)), "{ok:?}");
     }
 }

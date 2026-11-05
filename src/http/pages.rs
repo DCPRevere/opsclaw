@@ -59,6 +59,7 @@ const APP_FORMAT_JS: &str = include_str!("../../static/app/format.js");
 const APP_API_JS: &str = include_str!("../../static/app/api.js");
 const APP_AUTH_JS: &str = include_str!("../../static/app/auth.js");
 const APP_CHAT_JS: &str = include_str!("../../static/app/chat.js");
+const APP_THREADS_JS: &str = include_str!("../../static/app/threads.js");
 const APP_INCIDENTS_JS: &str = include_str!("../../static/app/incidents.js");
 const APP_APPROVALS_JS: &str = include_str!("../../static/app/approvals.js");
 const APP_STATUS_JS: &str = include_str!("../../static/app/status.js");
@@ -82,6 +83,7 @@ pub async fn app_module(Path(name): Path<String>) -> Response {
         "api.js" => Some(APP_API_JS),
         "auth.js" => Some(APP_AUTH_JS),
         "chat.js" => Some(APP_CHAT_JS),
+        "threads.js" => Some(APP_THREADS_JS),
         "incidents.js" => Some(APP_INCIDENTS_JS),
         "approvals.js" => Some(APP_APPROVALS_JS),
         "status.js" => Some(APP_STATUS_JS),
@@ -203,6 +205,7 @@ mod tests {
             "api.js",
             "auth.js",
             "chat.js",
+            "threads.js",
             "incidents.js",
             "approvals.js",
             "status.js",

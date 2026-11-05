@@ -94,6 +94,7 @@ pub async fn run(config_path: &std::path::Path, opsclaw_home: &std::path::Path) 
 
     // 3. Per-target executor probe.
     checks.extend(check_targets(&cfg, opsclaw_home).await);
+    checks.extend(check_resources(&cfg, opsclaw_home).await);
 
     // 4. DB open/migrate.
     let db_path = effective_db_path(&cfg, opsclaw_home);
@@ -220,6 +221,53 @@ fn check_secrets(cfg: &Config, opsclaw_home: &std::path::Path) -> Result<Vec<Che
         });
     }
     Ok(out)
+}
+
+/// Every configured resource (Elasticsearch, Prometheus, …) answers, with
+/// the same auth and TLS settings its tools use. A dead port-forward or a
+/// wrong password shows here instead of mid-scan.
+async fn check_resources(cfg: &Config, opsclaw_home: &std::path::Path) -> Vec<CheckResult> {
+    let store = match SecretStore::open(opsclaw_home) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(), // check_targets already reported it
+    };
+    // Start any declared port-forwards for the duration of the probes, so the
+    // check covers the same path a scan uses.
+    let _forwards = match crate::targets::port_forward::start(cfg, &store).await {
+        Ok(forwards) => forwards,
+        Err(e) => {
+            return vec![CheckResult {
+                name: "port-forwards".into(),
+                ok: false,
+                detail: e.to_string(),
+            }];
+        }
+    };
+    let scrubber = crate::policy::scrub::Scrubber::new();
+    let executors = match crate::targets::wiring::build_executors(cfg, &store, &scrubber) {
+        Ok((executors, _warnings)) => executors,
+        Err(e) => {
+            return vec![CheckResult {
+                name: "resources".into(),
+                ok: false,
+                detail: format!("could not build resource connections: {e}"),
+            }];
+        }
+    };
+    let mut resources: Vec<_> = executors
+        .into_iter()
+        .filter(|(fq, _)| FqTarget::parse(fq).is_ok_and(|t| t.resource().is_some()))
+        .collect();
+    resources.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = Vec::new();
+    for (fq, executor) in resources {
+        let name = format!("resource: {fq}");
+        out.push(match executor.probe().await {
+            Ok(report) => CheckResult { name, ok: report.reachable, detail: report.detail },
+            Err(e) => CheckResult { name, ok: false, detail: scrubber.scrub(&e.to_string()) },
+        });
+    }
+    out
 }
 
 async fn check_targets(cfg: &Config, opsclaw_home: &std::path::Path) -> Vec<CheckResult> {

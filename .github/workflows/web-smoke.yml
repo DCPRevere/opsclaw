@@ -25,7 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        # Installs the version pinned in rust-toolchain.toml.
+        run: rustup toolchain install
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
       - name: Build daemon and CLI

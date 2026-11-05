@@ -100,6 +100,7 @@ mod tests {
 
     fn ctx_with(policy: Arc<dyn PolicyExecute>) -> ToolCtx {
         ToolCtx {
+            call: Default::default(),
             principal: Principal::Agent { job: None },
             policy,
             known_targets: vec![target()],

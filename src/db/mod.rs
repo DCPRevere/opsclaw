@@ -12,11 +12,11 @@ pub mod repo;
 pub mod sqlite;
 
 pub use repo::{
-    AUTH_PROVIDER_HANKO, AUTH_PROVIDER_LOCAL, Account, AccountRepo, ApprovalRepo, AuditRepo,
-    ChannelStateRepo, ChatMessage, ChatRepo, ChatRequestClaim, CliToken, ControlRepo, HealthRepo,
-    IncidentRepo, Invite, InviteRepo, JobFailure, JobRepo, PushSubscription, PushSubscriptionRepo,
-    RunbookRun, RunbookRunRepo, RunbookSuccessRate, StepOutcome, StepStatus, TelegramBinding,
-    TokenRepo,
+    AUTH_PROVIDER_HANKO, AUTH_PROVIDER_LOCAL, AUTH_PROVIDER_OIDC, AccessRepo, Account, AccountRepo,
+    ApprovalRepo, AuditRepo, ChannelStateRepo, ChatMessage, ChatRepo, ChatRequestClaim, CliToken,
+    ControlRepo, HealthRepo, IncidentRepo, Invite, InviteRepo, JobFailure, JobRepo,
+    PushSubscription, PushSubscriptionRepo, RunbookRun, RunbookRunRepo, RunbookSuccessRate,
+    StepOutcome, StepStatus, TelegramBinding, TokenRepo,
 };
 
 use std::sync::Arc;
@@ -40,6 +40,7 @@ pub trait AllRepos:
     + ChannelStateRepo
     + ChatRepo
     + HealthRepo
+    + AccessRepo
 {
 }
 
@@ -57,6 +58,7 @@ impl<T> AllRepos for T where
         + ChannelStateRepo
         + ChatRepo
         + HealthRepo
+        + AccessRepo
 {
 }
 

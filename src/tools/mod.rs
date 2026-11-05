@@ -69,6 +69,7 @@ pub mod runbooks_tool;
 pub mod shell;
 pub mod ssh;
 pub mod systemd;
+pub mod tempo;
 pub mod web_fetch;
 
 use std::sync::Arc;
@@ -108,6 +109,9 @@ use crate::tools::endpoint::EndpointRegistry;
 #[derive(Clone)]
 pub struct ToolCtx {
     pub principal: Principal,
+    /// The surface this turn came through and where its reads record
+    /// labels (`crate::access`). Default: internal, no labels.
+    pub call: CallAccess,
     pub policy: Arc<dyn PolicyExecute>,
     pub known_targets: Vec<FqTarget>,
     pub incidents: Option<Arc<dyn IncidentRepo>>,
@@ -131,6 +135,29 @@ pub struct ToolCtx {
     pub runbooks: Option<Arc<crate::runbooks::RunbookStore>>,
 }
 
+/// Per-turn access context threaded into every `CommandRequest`.
+#[derive(Clone, Default)]
+pub struct CallAccess {
+    pub via: crate::access::Via,
+    pub labels: Option<crate::access::Labels>,
+    /// Where tools that create findings (incidents) store the turn's
+    /// labels on them.
+    pub repo: Option<Arc<dyn crate::db::AccessRepo>>,
+    /// The access engine, for tools that show findings to the asker.
+    pub engine: Option<Arc<crate::access::Access>>,
+}
+
+impl std::fmt::Debug for CallAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallAccess")
+            .field("via", &self.via)
+            .field("labels", &self.labels)
+            .field("repo", &self.repo.is_some())
+            .field("engine", &self.engine.is_some())
+            .finish()
+    }
+}
+
 impl ToolCtx {
     /// A minimal, all-fakes `ToolCtx` for tests: `principal` and `policy`
     /// are the only two fields that can't have a sensible universal default
@@ -151,6 +178,7 @@ impl ToolCtx {
     /// waves).
     pub fn for_tests(principal: Principal, policy: Arc<dyn PolicyExecute>) -> Self {
         ToolCtx {
+            call: Default::default(),
             principal,
             policy,
             known_targets: Vec::new(),
@@ -300,7 +328,137 @@ pub trait Tool: Send + Sync {
     /// Deny-by-default subset for background heartbeat runs.
     fn allowed_in_heartbeat(&self) -> bool;
 
+    /// True when THIS call (these arguments) only reads. Read-only calls in
+    /// one model batch run concurrently, and don't count as the turn having
+    /// acted. Tools mixing read and write verbs (kubernetes, docker,
+    /// systemd) override this per action; when in doubt, return false: the
+    /// call then runs alone, in order.
+    fn reads_only(&self, _args: &Value) -> bool {
+        !self.is_action()
+    }
+
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolResult, ToolError>;
+}
+
+/// OpsClaw's `dcpr-agent` runtime: tools run against a [`ToolCtx`] and fail
+/// with a [`ToolError`].
+pub struct Ops;
+
+impl dcpr_agent::Runtime for Ops {
+    type Context = ToolCtx;
+    type Error = ToolError;
+    type Extra = ();
+}
+
+/// dcpr-agent's default argument check: coerce scalar spellings to the
+/// schema's types, then refuse anything it doesn't allow.
+fn prepare_args(mut args: Value, schema: &Value) -> Result<Value, dcpr_agent::ToolInputError> {
+    if !args.is_object() {
+        return Err(dcpr_agent::ToolInputError::new("expected a JSON object"));
+    }
+    dcpr_agent::coerce_args_to_schema(&mut args, schema);
+    dcpr_agent::validate_args_against_schema(&args, schema, "arguments")?;
+    Ok(args)
+}
+
+/// Every OpsClaw tool is a `dcpr-agent` tool: argument checking against its
+/// schema, shared (concurrent) execution of reads, and MCP exposure come
+/// from the library. Risk and heartbeat eligibility stay on [`Tool`]: they
+/// are OpsClaw policy, not tool-loop mechanics.
+#[async_trait]
+impl dcpr_agent::Tool<Ops> for Box<dyn Tool> {
+    fn name(&self) -> &str {
+        Tool::name(self.as_ref())
+    }
+
+    fn description(&self) -> &str {
+        Tool::description(self.as_ref())
+    }
+
+    fn parameters(&self) -> Value {
+        Tool::schema(self.as_ref())
+    }
+
+    /// dcpr-agent's check, except that a top-level property declared as a
+    /// bare `{"type": "object"}` (no `properties`) is free-form, such as
+    /// an Elasticsearch Query DSL body. dcpr-agent 0.3.0 treats every object
+    /// as closed, which refused every real query. Free-form values are
+    /// checked to be objects and otherwise passed through untouched.
+    fn prepare_arguments(&self, args: Value) -> Result<Value, dcpr_agent::ToolInputError> {
+        let schema = Tool::schema(self.as_ref());
+        let free_form: Vec<String> = schema["properties"]
+            .as_object()
+            .map(|props| {
+                props
+                    .iter()
+                    .filter(|(_, p)| p["type"] == "object" && p.get("properties").is_none())
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if free_form.is_empty() {
+            return prepare_args(args, &schema);
+        }
+        let Value::Object(mut map) = args else {
+            return Err(dcpr_agent::ToolInputError::new("expected a JSON object"));
+        };
+        let mut held = serde_json::Map::new();
+        let mut checked_schema = schema.clone();
+        for key in &free_form {
+            if let Some(value) = map.remove(key) {
+                if !value.is_object() {
+                    return Err(dcpr_agent::ToolInputError::new(format!(
+                        "arguments.{key} must be an object"
+                    )));
+                }
+                held.insert(key.clone(), value);
+            }
+            if let Some(props) = checked_schema["properties"].as_object_mut() {
+                props.remove(key);
+            }
+            if let Some(required) = checked_schema["required"].as_array_mut() {
+                required.retain(|r| r.as_str() != Some(key.as_str()));
+            }
+        }
+        // A required free-form field still has to be there.
+        for required in schema["required"].as_array().into_iter().flatten() {
+            if let Some(key) = required.as_str()
+                && free_form.iter().any(|f| f == key)
+                && !held.contains_key(key)
+            {
+                return Err(dcpr_agent::ToolInputError::new(format!(
+                    "arguments.{key} is required"
+                )));
+            }
+        }
+        let Value::Object(mut prepared) = prepare_args(Value::Object(map), &checked_schema)? else {
+            return Err(dcpr_agent::ToolInputError::new("expected a JSON object"));
+        };
+        prepared.extend(held);
+        Ok(Value::Object(prepared))
+    }
+
+    fn concurrency(&self) -> dcpr_agent::ToolConcurrency {
+        if Tool::is_action(self.as_ref()) {
+            dcpr_agent::ToolConcurrency::Exclusive
+        } else {
+            dcpr_agent::ToolConcurrency::Shared
+        }
+    }
+
+    fn is_action(&self) -> bool {
+        Tool::is_action(self.as_ref())
+    }
+
+    async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<dcpr_agent::ToolResult, ToolError> {
+        let read = Tool::reads_only(self.as_ref(), &args);
+        let result = Tool::call(self.as_ref(), ctx, args).await?;
+        Ok(if read {
+            dcpr_agent::ToolResult::observed(result.output)
+        } else {
+            dcpr_agent::ToolResult::text(result.output)
+        })
+    }
 }
 
 /// The per-turn registry (DESIGN.md §4 "Tool surface", registration rules):
@@ -407,6 +565,10 @@ pub fn registry(ctx: &ToolCtx, heartbeat: bool) -> Vec<Box<dyn Tool>> {
             tools.push(Box::new(prometheus::InstantQueryTool));
             tools.push(Box::new(prometheus::RangeQueryTool));
         }
+        if has_resource(ResourceType::Tempo) {
+            tools.push(Box::new(tempo::SearchTool));
+            tools.push(Box::new(tempo::TraceTool));
+        }
         if has_resource(ResourceType::Argocd) {
             tools.push(Box::new(argocd::ListAppsTool));
             tools.push(Box::new(argocd::SyncStatusTool));
@@ -496,6 +658,7 @@ pub(crate) fn endpoint_test_ctx(
     let mut reg = endpoint::EndpointRegistry::new();
     reg.insert(&target, auth);
     let ctx = ToolCtx {
+        call: Default::default(),
         principal: crate::domain::Principal::Agent { job: None },
         policy,
         known_targets: vec![target],
@@ -508,4 +671,110 @@ pub(crate) fn endpoint_test_ctx(
         runbooks: None,
     };
     (ctx, dir)
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    /// Every tool OpsClaw ships, whatever config would register.
+    fn every_tool() -> Vec<Box<dyn Tool>> {
+        let memory = Arc::new(Memory::disabled());
+        vec![
+            Box::new(notify::NotifyTool),
+            Box::new(web_fetch::WebFetchTool),
+            Box::new(config_tool::ConfigTool),
+            Box::new(files::FileReadTool),
+            Box::new(files::FileWriteTool),
+            Box::new(memory_tools::RecallMemoryTool { memory: memory.clone() }),
+            Box::new(memory_tools::StoreMemoryTool { memory: memory.clone() }),
+            Box::new(memory_tools::ForgetMemoryTool { memory }),
+            Box::new(incidents_tool::ListIncidentsTool),
+            Box::new(runbooks_tool::RunbookListTool),
+            Box::new(runbooks_tool::RunbookHistoryTool),
+            Box::new(ssh::SshTool),
+            Box::new(shell::ShellTool),
+            Box::new(monitor::MonitorTool),
+            Box::new(systemd::SystemdTool),
+            Box::new(docker::DockerTool),
+            Box::new(dns::DnsTool),
+            Box::new(cert::CertTool),
+            Box::new(firewall::FirewallTool),
+            Box::new(kubernetes::KubernetesTool),
+            Box::new(elasticsearch::ElasticsearchSearchTool),
+            Box::new(elasticsearch::ElasticsearchIndexStatsTool),
+            Box::new(elasticsearch::ElasticsearchClusterHealthTool),
+            Box::new(azure_service_bus::QueueDepthTool),
+            Box::new(azure_service_bus::PeekMessagesTool),
+            Box::new(eventstore::ReadStreamTool),
+            Box::new(eventstore::ProjectionStatusTool),
+            Box::new(prometheus::InstantQueryTool),
+            Box::new(prometheus::RangeQueryTool),
+            Box::new(argocd::ListAppsTool),
+            Box::new(argocd::SyncStatusTool),
+            Box::new(argocd::RollbackTool),
+        ]
+    }
+
+    /// The agent loop rejects any argument a schema doesn't declare, so a
+    /// schema without `properties` would make its tool uncallable.
+    #[test]
+    fn every_schema_declares_its_arguments() {
+        for tool in every_tool() {
+            let schema = tool.schema();
+            let name = tool.name();
+            assert_eq!(schema["type"], "object", "{name}");
+            let props = schema["properties"].as_object().unwrap_or_else(|| {
+                panic!("{name}: no properties, so every argument would be rejected")
+            });
+            for required in schema["required"].as_array().into_iter().flatten() {
+                let required = required.as_str().unwrap();
+                assert!(
+                    props.contains_key(required),
+                    "{name}: required {required:?} is undeclared"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_query_dsl_body_is_free_form_but_the_rest_is_still_checked() {
+        let es: Box<dyn Tool> = Box::new(elasticsearch::ElasticsearchSearchTool);
+        let query = serde_json::json!({
+            "bool": {"filter": [{"range": {"@timestamp": {"gte": "now-1h"}}}]},
+            "_source": ["message"], "aggs": {"by_ns": {"terms": {"field": "kubernetes.namespace"}}}
+        });
+        let args = dcpr_agent::Tool::<Ops>::prepare_arguments(
+            &es,
+            serde_json::json!({"resource": "r", "index": "fb-ds-*", "query": query, "size": "5"}),
+        )
+        .unwrap();
+        assert_eq!(args["query"], query, "the DSL passes through untouched");
+        assert_eq!(args["size"], 5, "the other fields are still coerced");
+        for bad in [
+            serde_json::json!({"resource": "r", "index": "i", "query": "match_all"}),
+            serde_json::json!({"resource": "r", "index": "i"}),
+            serde_json::json!({"resource": "r", "index": "i", "query": {}, "bogus": 1}),
+        ] {
+            assert!(dcpr_agent::Tool::<Ops>::prepare_arguments(&es, bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn real_arguments_pass_the_loop_check_and_are_coerced() {
+        let kubernetes: Box<dyn Tool> = Box::new(kubernetes::KubernetesTool);
+        let args = dcpr_agent::Tool::<Ops>::prepare_arguments(
+            &kubernetes,
+            serde_json::json!({
+                "target": "example::sandbox::aks", "action": "logs", "name": "api-7d8f",
+                "namespace": "app", "previous": "true", "tail": "50"
+            }),
+        )
+        .unwrap();
+        assert_eq!(args["previous"], true);
+        assert_eq!(args["tail"], 50);
+        assert!(kubernetes.reads_only(&args));
+        assert!(!kubernetes.reads_only(&serde_json::json!({"action": "delete_pod"})));
+        assert!(!kubernetes.reads_only(&serde_json::json!({"action": "something-new"})));
+    }
 }

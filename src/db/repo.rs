@@ -78,6 +78,9 @@ pub trait AuditRepo: Send + Sync {
 pub const AUTH_PROVIDER_LOCAL: &str = "local";
 /// `Account::auth_provider` for an operator who signs in through Hanko.
 pub const AUTH_PROVIDER_HANKO: &str = "hanko";
+/// Accounts that sign in through `[auth.oidc]`; `external_subject` is the
+/// IdP's `sub`.
+pub const AUTH_PROVIDER_OIDC: &str = "oidc";
 
 /// Operator accounts (web UI auth; Wave 4 fills the auth stack around this).
 #[derive(Debug, Clone)]
@@ -506,4 +509,36 @@ pub trait ChatRepo: Send + Sync {
 #[async_trait]
 pub trait HealthRepo: Send + Sync {
     async fn ping(&self) -> Result<()>;
+}
+
+/// Access-control state (`crate::access`): IdP groups per account,
+/// elevations, and the labels and restrictions on findings.
+#[async_trait]
+pub trait AccessRepo: Send + Sync {
+    /// Replace the account's IdP groups (at each sign-in).
+    async fn set_groups(&self, account: Uuid, groups: &[String]) -> Result<()>;
+    async fn groups(&self, account: Uuid) -> Result<Vec<String>>;
+
+    async fn insert_elevation(&self, e: &crate::access::Elevation) -> Result<()>;
+    async fn elevation(&self, id: Uuid) -> Result<Option<crate::access::Elevation>>;
+    async fn elevations_for(&self, account: Uuid) -> Result<Vec<crate::access::Elevation>>;
+    /// Every elevation, newest first.
+    async fn list_elevations(&self) -> Result<Vec<crate::access::Elevation>>;
+    /// Set state and decider; `expires_at` restarts the window when an
+    /// approval activates it.
+    async fn decide_elevation(
+        &self,
+        id: Uuid,
+        state: crate::access::ElevationState,
+        decided_by: Option<Uuid>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<()>;
+
+    /// Add labels to a finding (a union with what it already has).
+    async fn add_labels(&self, kind: &str, id: &str, labels: &[crate::access::Label])
+    -> Result<()>;
+    async fn labels(&self, kind: &str, id: &str) -> Result<Vec<crate::access::Label>>;
+    /// Restrict a finding to named people or groups (`None` lifts it).
+    async fn set_restricted(&self, kind: &str, id: &str, to: Option<&[String]>) -> Result<()>;
+    async fn restricted(&self, kind: &str, id: &str) -> Result<Option<Vec<String>>>;
 }

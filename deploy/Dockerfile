@@ -6,7 +6,7 @@
 # Build context is the repo root: docker build -f deploy/Dockerfile .
 #
 # Stage 1: build a release binary.
-FROM rust:1.96-slim AS builder
+FROM rust:1.99.1-slim AS builder
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config && rm -rf /var/lib/apt/lists/*
@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends pkg-config && r
 # Cache dependencies: copy manifests first, build a dummy main/lib so
 # dependencies compile and cache in their own layer before the real source
 # ever invalidates it.
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 RUN mkdir -p src/bin/cli \
     && echo "fn main() {}" > src/main.rs \
     && echo "fn main() {}" > src/bin/cli/main.rs \
@@ -46,7 +46,7 @@ RUN find src migrations static -type f -exec touch {} +
 RUN cargo build --release --bin opsclaw --bin opsclaw-cli
 
 # Stage 2: a slim runtime image. MUST track the builder's Debian release
-# (rust:1.96-slim is trixie-based, confirmed via /etc/os-release
+# (rust:1.99.1-slim is trixie-based, confirmed via /etc/os-release
 # VERSION_CODENAME) — a binary built against a newer glibc will not run on an
 # older runtime image. Bump both FROM lines together, never one alone
 # (gianna's lockstep-pinning rule, DESIGN.md §5).

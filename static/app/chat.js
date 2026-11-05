@@ -21,6 +21,7 @@
 import { api, escapeHtml } from './api.js';
 import { state } from './state.js';
 import { renderMarkdown, asDate, fmtTime, dayKey, dayLabel } from './format.js';
+import { initThreads, loadSidebar, renderHeader, threadIdFor } from './threads.js';
 
 let evtSource = null;
 let streamConnecting = false;
@@ -98,6 +99,8 @@ export async function openStream() {
     let ev = {};
     try { ev = JSON.parse(e.data); } catch (_) { return; }
     const body = ev.body || {};
+    // A new or re-sent page: its thread may be new, so refresh the sidebar.
+    loadSidebar();
     if ((body.conversation || 'operations') === state.chatConversation) addIncidentCard(body);
   });
   evtSource.onerror = () => {
@@ -152,11 +155,20 @@ function line(cls, text) {
   return d;
 }
 
+// A target arrives as `project::env::target` (older events carried the
+// structured form; render that too rather than "[object Object]").
+function targetText(t) {
+  if (!t) return '';
+  if (typeof t === 'string') return t;
+  const base = [t.project, t.env, t.target].filter(Boolean).join('::');
+  return t.resource ? `${base}::${[].concat(t.resource).join('::')}` : base;
+}
+
 function addApprovalCard(a) {
   const cmd = document.createElement('code');
   cmd.className = 'ac-cmd';
   cmd.textContent = a.command || '';
-  const rows = [cmd, line('ac-line', `${a.tool || ''} on ${a.target || ''}`)];
+  const rows = [cmd, line('ac-line', `${a.tool || ''} on ${targetText(a.target)}`)];
   if (a.hypothesis) rows.push(line('ac-line muted', a.hypothesis));
   const { card, actions, note } = actionCard(
     'approval',
@@ -186,13 +198,26 @@ function addApprovalCard(a) {
 }
 
 function addIncidentCard(i) {
-  const rows = [line('ac-line', i.target || '')];
+  const rows = [line('ac-line', targetText(i.target))];
   if (i.hypothesis) rows.push(line('ac-line muted', i.hypothesis));
   const { card, actions, note } = actionCard(
     'incident',
     `Incident <span class="badge">${escapeHtml(i.severity || '')}</span>`,
     rows,
   );
+  const thread = threadIdFor(targetText(i.target), i.id);
+  if (thread) {
+    const open = document.createElement('button');
+    open.className = 'ghost';
+    open.textContent = 'Open thread';
+    open.addEventListener('click', () => {
+      state.chatConversation = thread;
+      uncertainSend = null;
+      clearPending();
+      loadHistory();
+    });
+    actions.appendChild(open);
+  }
   const ack = document.createElement('button');
   ack.className = 'primary';
   ack.textContent = 'Acknowledge';
@@ -377,7 +402,9 @@ function showError(text) {
 // every 'opsclaw:view' -> 'chat' transition. Best-effort: a failed/empty
 // history just leaves the log as-is.
 export async function loadHistory() {
-  await loadConversations();
+  await loadSidebar();
+  updateScopeNote();
+  renderHeader();
   const conversation = state.chatConversation;
   const r = await api('/api/chat/history?conversation=' + encodeURIComponent(conversation));
   if (!r.ok) return;
@@ -436,12 +463,9 @@ export function initChat() {
   const input = document.getElementById('chat-input');
   const form = document.getElementById('chat-form');
   const submitBtn = form.querySelector('button[type=submit]');
-  const conversationSelect = document.getElementById('chat-conversation');
-  conversationSelect.addEventListener('change', () => {
-    state.chatConversation = conversationSelect.value;
+  initThreads(() => {
     uncertainSend = null;
     clearPending();
-    updateScopeNote();
     loadHistory();
   });
 
@@ -465,7 +489,6 @@ export function initChat() {
     if (!message) return;
     input.disabled = true;
     submitBtn.disabled = true;
-    conversationSelect.disabled = true;
     try {
       if (!(await ensureStreamOpen())) {
         showError('The live chat connection is not ready — try again.');
@@ -512,39 +535,15 @@ export function initChat() {
     } finally {
       input.disabled = false;
       submitBtn.disabled = false;
-      conversationSelect.disabled = false;
       input.focus();
     }
   });
 }
 
-async function loadConversations() {
-  const select = document.getElementById('chat-conversation');
-  if (select.dataset.loaded === 'true') return;
-  const response = await api('/api/chat/conversations');
-  if (!response.ok) return;
-  const conversations = response.data.conversations || [];
-  select.innerHTML = '';
-  for (const conversation of conversations) {
-    const option = document.createElement('option');
-    option.value = conversation.id;
-    option.textContent = conversation.label;
-    select.appendChild(option);
-  }
-  if (![...select.options].some((option) => option.value === state.chatConversation)) {
-    state.chatConversation = 'operations';
-  }
-  select.value = state.chatConversation;
-  select.dataset.loaded = 'true';
-  updateScopeNote();
-}
-
 function updateScopeNote() {
-  const environment = state.chatConversation !== 'operations';
-  document.getElementById('chat-scope-note').textContent = environment
-    ? 'Shared team context and tools are restricted to this environment.'
-    : 'Team coordination; select an environment to operate on targets.';
-  document.getElementById('chat-input').placeholder = environment
-    ? `Ask about ${state.chatConversation}…`
-    : 'Ask the agent…';
+  const id = state.chatConversation;
+  const input = document.getElementById('chat-input');
+  if (id === 'operations') input.placeholder = 'Ask the agent…';
+  else if (id.includes('#')) input.placeholder = 'Ask about this issue…';
+  else input.placeholder = `Ask about ${id.replace('::', ' / ')}…`;
 }

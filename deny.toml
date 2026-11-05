@@ -8,7 +8,15 @@ all-features = true
 version = 2
 # `rsa` arrives transitively (jsonwebtoken, web-push-native); no RSA code path
 # is used and no upstream fix is available yet. Tracked in docs/plans.
-ignore = ["RUSTSEC-2023-0071"]
+#
+# RUSTSEC-2026-0387: timing leaks in `crypto-bigint` 0.5, reached through
+# `p256` 0.13 (jsonwebtoken, web-push-native). Sessions use HS256, so JWTs never
+# touch it. Web push does: VAPID ES256 signing uses the private key. Exploiting
+# it needs precise timing of many signatures, and OpsClaw only signs when it
+# sends a notification. The worst case is forged push notifications to
+# subscribed browsers. The fix needs `p256` 0.14 in both crates. Accepted
+# 2026-11-04; remove once they upgrade.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0387"]
 
 [licenses]
 version = 2
@@ -50,4 +58,6 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# The unpublished dcpr-ai-rs crates (Cargo.toml [patch.crates-io]). Remove
+# with that patch once dcpr-llm and dcpr-agent are on crates.io.
+allow-git = ["https://github.com/DCPRevere/dcpr-ai-rs"]

@@ -14,6 +14,8 @@ pub mod auth;
 pub mod cli_auth;
 pub mod handlers;
 pub mod hanko;
+pub mod mcp;
+pub mod oidc;
 pub mod pages;
 pub mod ratelimit;
 pub mod routes;

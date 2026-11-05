@@ -12,6 +12,11 @@
       "description": "Stable fault-class identifier the daemon's notify payload must name (brief §6: 'name it correctly'). Matches the scenario directory name.",
       "pattern": "^[a-z0-9-]+$"
     },
+    "fault_class": {
+      "type": "string",
+      "description": "The opsclaw_notify fault_class (closed vocabulary, src/tools/notify.rs FAULT_CLASSES) a correct diagnosis files this fault under. Optional; when present, an incident with exactly this fault_class names the fault correctly.",
+      "pattern": "^[a-z_]+$"
+    },
     "severity": {
       "type": "string",
       "description": "Expected severity in the notify payload when must_notify is true. Ignored (but still schema-valid) when must_notify is false.",

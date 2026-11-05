@@ -1,0 +1,7 @@
+# Pinned so a new stable release can't turn CI red overnight (new lints under
+# `clippy -D warnings`). CI, the Docker builder and local builds all use this.
+# Bump deliberately, together with deploy/Dockerfile's builder image.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

@@ -25,11 +25,15 @@ use crate::channels::{Channel, OutboundMessage};
 pub struct WebEvent {
     pub kind: &'static str,
     pub body: serde_json::Value,
+    /// What a chat answer was built from (`crate::access`). The SSE stream
+    /// shows `body.text` to each subscriber as they may see it. Never sent.
+    #[serde(skip)]
+    pub labels: Vec<crate::access::Label>,
 }
 
 impl WebEvent {
     pub fn message(text: &str) -> Self {
-        WebEvent { kind: "message", body: serde_json::json!({ "text": text }) }
+        WebEvent { kind: "message", body: serde_json::json!({ "text": text }), labels: Vec::new() }
     }
 
     /// A chat-turn event (`http::routes::chat`'s broadcast after a turn
@@ -51,7 +55,13 @@ impl WebEvent {
                 "speaker": speaker,
                 "text": text,
             }),
+            labels: Vec::new(),
         }
+    }
+
+    pub fn with_labels(mut self, labels: Vec<crate::access::Label>) -> Self {
+        self.labels = labels;
+        self
     }
 }
 
@@ -130,7 +140,7 @@ impl Channel for WebHub {
                         );
                     }
                 }
-                self.publish(WebEvent { kind, body });
+                self.publish(WebEvent { kind, body, labels: Vec::new() });
                 return Ok(());
             }
         }

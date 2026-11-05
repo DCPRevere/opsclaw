@@ -1,5 +1,6 @@
 {
   "fault": "disk-fill",
+  "fault_class": "resource_saturation",
   "severity": "critical",
   "fq_target": "sim::default::baseline-target",
   "expected_signals": ["disk_writable_pct", "mount_point", "largest_file"],

@@ -198,6 +198,8 @@ impl crate::channels::Channel for FlakyThenOkChannel {
         "flaky"
     }
 
+    // `fetch_update`: see `relax` in scheduler/mod.rs for why not `try_update`.
+    #[allow(deprecated)]
     async fn send(&self, msg: crate::channels::OutboundMessage) -> Result<()> {
         // `then_some` eagerly evaluates its argument regardless of the guard
         // (unlike `then`/`then_with`), so `n - 1` must be computed only
@@ -508,6 +510,8 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
                 ssh_known_hosts_path: None,
                 ssh_strict_host_key_checking: None,
                 resources: vec![],
+                port_forwards: Vec::new(),
+                scan: None,
             }],
         }],
     });
@@ -578,6 +582,19 @@ async fn seeded_scan_job_prompt_resolves_from_const_not_a_snapshot() {
     assert!(restored.enabled);
     assert!(restored.next_run_at.is_some());
     assert!(jobs.iter().all(|job| job.name != "example::staging::cluster-scan"));
+
+    // `scan = false` retires the target's seeded scan and never re-seeds it.
+    let mut quiet = (*deps.config).clone();
+    quiet.projects[0].envs[0].targets[0].scan = Some(false);
+    let quiet_deps = SchedulerDeps { config: Arc::new(quiet), ..deps.clone() };
+    seed_default_scan_jobs(&quiet_deps, 5).await.unwrap();
+    seed_default_scan_jobs(&quiet_deps, 5).await.unwrap();
+    let left = db.list().await.unwrap();
+    assert!(
+        left.is_empty(),
+        "a target with scan = false has no scan job: {:?}",
+        left.iter().map(|j| (&j.name, j.system)).collect::<Vec<_>>()
+    );
 }
 
 // ---- adaptive tick interval ----

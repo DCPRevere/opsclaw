@@ -8,6 +8,7 @@
 pub mod endpoint;
 pub mod kubernetes;
 pub mod local;
+pub mod port_forward;
 pub mod ssh;
 pub mod stub;
 pub mod wiring;

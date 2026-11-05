@@ -4,6 +4,7 @@
 // /api/chat/conversations, already filtered to what this person may see.
 import { api, escapeHtml } from './api.js';
 import { state } from './state.js';
+import { refreshIncidentCards } from './chat.js';
 
 let data = { conversations: [], threads: [] };
 let onSelect = () => {};
@@ -62,11 +63,12 @@ function heading(text) {
 function threadItem(t) {
   const sev = String(t.severity || '').toLowerCase();
   const state_ = String(t.state || '').toLowerCase();
+  const tag = t.accepted ? '' : ({ acknowledged: 'ack · ', expired: 'expired · ' }[state_] || '');
   return item(
     t.id,
     `<span class="sev-dot sev-${escapeHtml(sev)}"></span>`
       + `<span class="side-label">${escapeHtml(t.label)}</span>`
-      + `<span class="side-meta">${state_ === 'acknowledged' ? 'ack · ' : ''}${age(t.opened_at)}</span>`,
+      + `<span class="side-meta">${tag}${age(t.opened_at)}</span>`,
     'thread',
   );
 }
@@ -80,7 +82,8 @@ function render() {
     const label = c.kind === 'operations' ? '* Everything' : c.label;
     side.appendChild(item(c.id, `<span class="side-pin">#</span><span class="side-label">${escapeHtml(label)}</span>`, 'room'));
   }
-  const open = data.threads.filter((t) => !t.closed);
+  const open = data.threads.filter((t) => !t.closed && !t.accepted);
+  const known = data.threads.filter((t) => !t.closed && t.accepted);
   const closed = data.threads.filter((t) => t.closed);
   const envs = [...new Set(data.threads.map((t) => `${t.project}::${t.environment}`))].sort();
   const rank = { critical: 0, warning: 1, info: 2 };
@@ -99,16 +102,20 @@ function render() {
     none.textContent = 'No open issues.';
     side.appendChild(none);
   }
-  if (closed.length) {
-    const d = document.createElement('details');
-    d.className = 'side-closed';
-    if (closed.some((t) => t.id === state.chatConversation)) d.open = true;
-    const s = document.createElement('summary');
-    s.textContent = `Resolved this week (${closed.length})`;
-    d.appendChild(s);
-    for (const t of closed) d.appendChild(threadItem(t));
-    side.appendChild(d);
-  }
+  fold(side, `Known, left alone (${known.length})`, known);
+  fold(side, `Closed this week (${closed.length})`, closed);
+}
+
+function fold(side, title, threads) {
+  if (!threads.length) return;
+  const d = document.createElement('details');
+  d.className = 'side-closed';
+  if (threads.some((t) => t.id === state.chatConversation)) d.open = true;
+  const s = document.createElement('summary');
+  s.textContent = title;
+  d.appendChild(s);
+  for (const t of threads) d.appendChild(threadItem(t));
+  side.appendChild(d);
 }
 
 // The header above the log: for an incident thread, the incident itself
@@ -141,6 +148,8 @@ export async function renderHeader() {
   const timeline = [
     `opened ${when(i.opened_at)}`,
     i.acked_at && `acknowledged ${when(i.acked_at)}`,
+    i.reopened_at && `re-opened ${when(i.reopened_at)}`,
+    i.accepted_at && `accepted as known ${when(i.accepted_at)}`,
     i.resolved_at && `resolved ${when(i.resolved_at)}`,
     i.notify_count ? `${i.notify_count} notification(s)` : null,
   ].filter(Boolean).join(' · ');
@@ -151,6 +160,7 @@ export async function renderHeader() {
     <div class="th-top">
       <span class="badge severity-${escapeHtml(sev)}">${escapeHtml(i.severity)}</span>
       <span class="badge state-${escapeHtml(st)}">${escapeHtml(i.state)}</span>
+      ${i.accepted_at ? '<span class="badge state-accepted">known, left alone</span>' : ''}
       <strong>${escapeHtml(i.target)}</strong>
       <span class="muted">${escapeHtml(timeline)}</span>
     </div>
@@ -176,11 +186,15 @@ export async function renderHeader() {
       }
       await loadSidebar();
       await renderHeader();
+      refreshIncidentCards();
     });
     actions.appendChild(b);
   };
-  if (st === 'active') act('Acknowledge', 'ack', 'primary');
-  if (st !== 'resolved') act('Resolve', 'resolve', 'ghost');
+  if (st === 'resolved') return;
+  if (st === 'active' || st === 'expired') act('Acknowledge', 'ack', 'primary');
+  if (i.accepted_at) act('Watch again', 'unaccept', 'ghost');
+  else act('Known, leave it', 'accept', 'ghost');
+  act('Resolve', 'resolve', 'ghost');
 }
 
 // The thread id for an incident event (`target` is `project::env::name…`).

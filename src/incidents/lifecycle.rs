@@ -22,6 +22,8 @@ use crate::domain::IncidentState;
 /// - `Expired -> Active` (the SAME fault re-detected after the chain
 ///   exhausted — the incident re-opens rather than duplicating; see
 ///   `IncidentRepo::reopen`)
+/// - `Expired -> Resolved` (someone fixed it after nobody acked it)
+/// - `Expired -> Acknowledged` (accepted as known: `IncidentRepo::accept`)
 ///
 /// `Resolved` is terminal: nothing transitions out of it. A fresh detection
 /// matching a RESOLVED incident's fingerprint opens a NEW incident (a fault
@@ -39,6 +41,8 @@ pub fn validate_transition(from: IncidentState, to: IncidentState) -> crate::Res
             | (Acknowledged, Resolved)
             | (Acknowledged, Active)
             | (Expired, Active)
+            | (Expired, Resolved)
+            | (Expired, Acknowledged)
     );
     if valid {
         Ok(())
@@ -131,13 +135,14 @@ mod tests {
     }
 
     #[test]
-    fn expired_reopens_only_to_active() {
-        // Re-detection of an expired incident's fingerprint re-opens it —
-        // but only back to Active (the chain restarts from the top); there
-        // is no path from Expired straight to Acknowledged or Resolved.
+    fn expired_can_reopen_be_acked_or_be_resolved() {
+        // Re-detection re-opens to Active (the chain restarts from the top).
+        // A person can also ack or resolve it directly: with alerts only in
+        // the web UI, most incidents expire before anyone looks, and an
+        // expired incident nobody could close was stuck forever.
         assert!(validate_transition(Expired, Active).is_ok());
-        assert!(validate_transition(Expired, Acknowledged).is_err());
-        assert!(validate_transition(Expired, Resolved).is_err());
+        assert!(validate_transition(Expired, Acknowledged).is_ok());
+        assert!(validate_transition(Expired, Resolved).is_ok());
     }
 
     #[test]

@@ -78,6 +78,12 @@ fn row_to_incident(row: &SqliteRow) -> Incident {
         step_started_at: row
             .get::<Option<String>, _>("step_started_at")
             .map(|s| s.parse::<DateTime<Utc>>().expect("stored rfc3339")),
+        accepted_at: row
+            .get::<Option<String>, _>("accepted_at")
+            .map(|s| s.parse::<DateTime<Utc>>().expect("stored rfc3339")),
+        accepted_by: row
+            .get::<Option<String>, _>("accepted_by")
+            .map(|s| Uuid::parse_str(&s).expect("stored uuid")),
     }
 }
 
@@ -91,8 +97,9 @@ impl crate::db::IncidentRepo for SqliteDb {
                (id, fingerprint, fault_class, target, severity, state, signals,
                 hypothesis, recommended_action, opened_at, reopened_at,
                 acked_at, acked_by, resolved_at, last_notified_at,
-                notify_count, escalation_step, step_started_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                notify_count, escalation_step, step_started_at,
+                accepted_at, accepted_by)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(incident.id.to_string())
         .bind(&incident.fingerprint)
@@ -112,6 +119,8 @@ impl crate::db::IncidentRepo for SqliteDb {
         .bind(incident.notify_count)
         .bind(incident.escalation_step)
         .bind(incident.step_started_at.map(|t| t.to_rfc3339()))
+        .bind(incident.accepted_at.map(|t| t.to_rfc3339()))
+        .bind(incident.accepted_by.map(|u| u.to_string()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -192,6 +201,34 @@ impl crate::db::IncidentRepo for SqliteDb {
                     .await?;
             }
         }
+        Ok(())
+    }
+
+    async fn accept(&self, id: Uuid, by: Option<Uuid>, at: DateTime<Utc>) -> Result<()> {
+        let at = at.to_rfc3339();
+        let by = by.map(|u| u.to_string());
+        sqlx::query(
+            "UPDATE incidents SET state = 'acknowledged',
+                    acked_by = CASE WHEN acked_at IS NULL THEN ? ELSE acked_by END,
+                    acked_at = COALESCE(acked_at, ?),
+                    accepted_at = ?, accepted_by = ?
+             WHERE id = ?",
+        )
+        .bind(&by)
+        .bind(&at)
+        .bind(&at)
+        .bind(&by)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn unaccept(&self, id: Uuid) -> Result<()> {
+        sqlx::query("UPDATE incidents SET accepted_at = NULL, accepted_by = NULL WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

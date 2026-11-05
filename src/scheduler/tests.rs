@@ -901,6 +901,8 @@ fn active_incident(fingerprint: &str, opened_at: DateTime<Utc>) -> crate::domain
         notify_count: 0,
         escalation_step: 0,
         step_started_at: None,
+        accepted_at: None,
+        accepted_by: None,
     }
 }
 

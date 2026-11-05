@@ -73,7 +73,16 @@ fn describe_candidates(candidates: &[Incident]) -> String {
         .iter()
         .map(|i| {
             let hypothesis: String = i.hypothesis.chars().take(160).collect();
-            format!("{} — {hypothesis}", i.id)
+            let state = if i.accepted_at.is_some() {
+                "accepted as known"
+            } else {
+                match i.state {
+                    IncidentState::Expired => "expired",
+                    IncidentState::Acknowledged => "acknowledged",
+                    _ => "open",
+                }
+            };
+            format!("{} ({state}) — {hypothesis}", i.id)
         })
         .collect::<Vec<_>>()
         .join("; ")
@@ -111,6 +120,51 @@ fn stable_resource(resource: &str) -> String {
         Some(p) => format!("{p}/{name}"),
         None => name,
     }
+}
+
+/// Attach a re-detection to an existing incident: an accepted one is left
+/// alone, an expired one re-opens, an open one gains an occurrence.
+async fn attach(
+    ctx: &ToolCtx,
+    repo: &std::sync::Arc<dyn crate::db::IncidentRepo>,
+    incident: &Incident,
+) -> Result<ToolResult, ToolError> {
+    label_incident(ctx, incident.id).await;
+    if incident.accepted_at.is_some() {
+        return Ok(ToolResult {
+            output: format!(
+                "incident {} is a known fault a person accepted (\"known, leave it\") on {}. \
+                 Nothing was raised or notified. Don't investigate it further or list it as a \
+                 finding; mention it only as known, if at all.",
+                incident.id,
+                incident.accepted_at.map(|t| t.to_rfc3339()).unwrap_or_default()
+            ),
+        });
+    }
+    if incident.state == IncidentState::Expired {
+        repo.reopen(incident.id, Utc::now())
+            .await
+            .map_err(|e| ToolError::Internal(format!("incident reopen failed: {e}")))?;
+        return Ok(ToolResult {
+            output: format!(
+                "re-opened incident {} (originally opened {}, expired unacknowledged after \
+                 {} notifications) — same fault re-detected; a single re-open notification \
+                 goes out, then the escalation chain resumes only if still unacknowledged.",
+                incident.id,
+                incident.opened_at.to_rfc3339(),
+                incident.notify_count
+            ),
+        });
+    }
+    Ok(ToolResult {
+        output: format!(
+            "already tracking this as incident {} (opened {}, {} notifications sent so far) — \
+             attached as a new occurrence, not a new incident.",
+            incident.id,
+            incident.opened_at.to_rfc3339(),
+            incident.notify_count
+        ),
+    })
 }
 
 #[async_trait]
@@ -214,18 +268,8 @@ impl Tool for NotifyTool {
             .find_open_by_fingerprint(&fingerprint)
             .await
             .map_err(|e| ToolError::Internal(format!("incident lookup failed: {e}")))?;
-
         if let Some(incident) = existing {
-            label_incident(ctx, incident.id).await;
-            return Ok(ToolResult {
-                output: format!(
-                    "already tracking this as incident {} (opened {}, {} notifications sent \
-                     so far) — attached as a new occurrence, not a new incident.",
-                    incident.id,
-                    incident.opened_at.to_rfc3339(),
-                    incident.notify_count
-                ),
-            });
+            return attach(ctx, repo, &incident).await;
         }
 
         // An EXPIRED match (chain exhausted, never acked) re-opens rather
@@ -237,55 +281,41 @@ impl Tool for NotifyTool {
             .await
             .map_err(|e| ToolError::Internal(format!("incident lookup failed: {e}")))?;
         if let Some(incident) = expired {
-            repo.reopen(incident.id, Utc::now())
-                .await
-                .map_err(|e| ToolError::Internal(format!("incident reopen failed: {e}")))?;
-            label_incident(ctx, incident.id).await;
-            return Ok(ToolResult {
-                output: format!(
-                    "re-opened incident {} (originally opened {}, expired unacknowledged after \
-                     {} notifications) — same fault re-detected; a single re-open notification \
-                     goes out, then the escalation chain resumes only if still unacknowledged.",
-                    incident.id,
-                    incident.opened_at.to_rfc3339(),
-                    incident.notify_count
-                ),
-            });
+            return attach(ctx, repo, &incident).await;
         }
 
         // Same target and fault class but a different resource string is
         // often the SAME fault named differently (one missing secret breaking
-        // three workloads was filed twice on 2026-11-04). Show the open
-        // candidates and make the model say which it is.
+        // three workloads was filed twice on 2026-11-04). Show the
+        // candidates and make the model say which it is. Expired incidents
+        // count too: nobody acks in a web-only setup, so most incidents
+        // expire within the hour, and the next scan's rewording used to
+        // open a fresh duplicate every time (three for one stuck message).
         let same_as = args["same_as"].as_str().filter(|s| !s.trim().is_empty());
         let distinct = args["distinct"].as_bool().unwrap_or(false);
-        let candidates: Vec<Incident> = repo
-            .list(false, 500)
+        let unresolved: Vec<Incident> = repo
+            .list(true, 500)
             .await
             .map_err(|e| ToolError::Internal(format!("incident lookup failed: {e}")))?
             .into_iter()
-            .filter(|i| i.target == target && i.fault_class == fault_class)
+            .filter(|i| i.target == target && i.state != IncidentState::Resolved)
             .collect();
+        let candidates: Vec<Incident> =
+            unresolved.iter().filter(|i| i.fault_class == fault_class).cloned().collect();
         if let Some(id) = same_as {
-            let Some(incident) = candidates.iter().find(|i| i.id.to_string() == id) else {
+            // Any unresolved incident on this target: the model may pick a
+            // different fault_class for the same fault on a later scan.
+            let Some(incident) = unresolved.iter().find(|i| i.id.to_string() == id) else {
                 return Err(ToolError::UserFacing(format!(
-                    "same_as {id:?} is not an open {fault_class} incident on {target}. Open ones: {}",
+                    "same_as {id:?} is not an unresolved incident on {target}. {fault_class} ones: {}",
                     describe_candidates(&candidates)
                 )));
             };
-            label_incident(ctx, incident.id).await;
-            return Ok(ToolResult {
-                output: format!(
-                    "attached to incident {} (opened {}) as a new occurrence of the same fault, \
-                     not a new incident.",
-                    incident.id,
-                    incident.opened_at.to_rfc3339()
-                ),
-            });
+            return attach(ctx, repo, incident).await;
         }
         if !candidates.is_empty() && !distinct {
             return Err(ToolError::UserFacing(format!(
-                "not opened yet: {target} already has open {fault_class} incident(s): {}. If \
+                "not opened yet: {target} already has unresolved {fault_class} incident(s): {}. If \
                  this is the same fault, call opsclaw_notify again with same_as set to that \
                  incident's id. If it is a genuinely different fault, call again with \
                  distinct: true.",
@@ -313,6 +343,8 @@ impl Tool for NotifyTool {
             notify_count: 0,
             escalation_step: 0,
             step_started_at: None,
+            accepted_at: None,
+            accepted_by: None,
         };
         repo.insert(&incident)
             .await
@@ -470,7 +502,7 @@ mod tests {
         let mut same = again.clone();
         same["same_as"] = json!(id);
         let out = NotifyTool.call(&ctx, same).await.unwrap().output;
-        assert!(out.contains("attached to incident"), "{out}");
+        assert!(out.contains("already tracking"), "{out}");
         assert_eq!(db.list(false, 100).await.unwrap().len(), 1, "attached, not duplicated");
 
         let mut bad = again.clone();
@@ -537,6 +569,71 @@ mod tests {
             reopened.opened_at, original.opened_at,
             "opened_at keeps the original detection for age-tracking"
         );
+    }
+
+    /// The live duplicate: a scan names the resource differently after the
+    /// first incident expired unacked. It must be offered the expired one
+    /// and re-open it, not open a twin.
+    #[tokio::test]
+    async fn an_expired_twin_with_a_different_resource_is_offered_and_reopened() {
+        let db: Arc<dyn IncidentRepo> = Arc::new(InMemoryDb::new());
+        let ctx = ctx_with(db.clone());
+        let mut first = base_args();
+        first["fault_class"] = json!("queue_backlog");
+        first["resource"] = json!("sbq-orders");
+        NotifyTool.call(&ctx, first).await.unwrap();
+        let original = db.list(false, 10).await.unwrap().remove(0);
+        db.set_state(original.id, IncidentState::Expired, None).await.unwrap();
+
+        let mut again = base_args();
+        again["fault_class"] = json!("queue_backlog");
+        again["resource"] = json!("servicebus/sbq-orders");
+        let ToolError::UserFacing(msg) = NotifyTool.call(&ctx, again.clone()).await.unwrap_err()
+        else {
+            panic!("expected UserFacing")
+        };
+        assert!(msg.contains(&original.id.to_string()) && msg.contains("expired"), "{msg}");
+
+        again["same_as"] = json!(original.id.to_string());
+        let out = NotifyTool.call(&ctx, again).await.unwrap().output;
+        assert!(out.contains("re-opened incident"), "{out}");
+        let all = db.list(true, 10).await.unwrap();
+        assert_eq!(all.len(), 1, "re-opened, not duplicated");
+        assert_eq!(all[0].state, IncidentState::Active);
+    }
+
+    /// `same_as` may point at an unresolved incident filed under another
+    /// fault class: a later scan may classify the same fault differently.
+    #[tokio::test]
+    async fn same_as_attaches_across_fault_classes() {
+        let db: Arc<dyn IncidentRepo> = Arc::new(InMemoryDb::new());
+        let ctx = ctx_with(db.clone());
+        NotifyTool.call(&ctx, base_args()).await.unwrap();
+        let id = db.list(false, 10).await.unwrap()[0].id.to_string();
+        let mut other = base_args();
+        other["fault_class"] = json!("error_rate");
+        other["same_as"] = json!(id);
+        let out = NotifyTool.call(&ctx, other).await.unwrap().output;
+        assert!(out.contains("already tracking"), "{out}");
+        assert_eq!(db.list(true, 10).await.unwrap().len(), 1);
+    }
+
+    /// "Known, leave it": a repeat of an accepted fault raises nothing and
+    /// tells the model to stop investigating it.
+    #[tokio::test]
+    async fn an_accepted_incident_absorbs_repeats_quietly() {
+        let db: Arc<dyn IncidentRepo> = Arc::new(InMemoryDb::new());
+        let ctx = ctx_with(db.clone());
+        NotifyTool.call(&ctx, base_args()).await.unwrap();
+        let id = db.list(false, 10).await.unwrap()[0].id;
+        db.accept(id, None, Utc::now()).await.unwrap();
+
+        let out = NotifyTool.call(&ctx, base_args()).await.unwrap().output;
+        assert!(out.contains("known fault") && out.contains("Nothing was raised"), "{out}");
+        let all = db.list(true, 10).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].state, IncidentState::Acknowledged, "stays acknowledged, not re-opened");
+        assert!(all[0].accepted_at.is_some());
     }
 
     #[tokio::test]

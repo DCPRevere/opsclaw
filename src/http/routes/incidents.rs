@@ -26,6 +26,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/incidents/{id}", get(get_one))
         .route("/api/incidents/{id}/ack", post(ack))
         .route("/api/incidents/{id}/resolve", post(resolve))
+        .route("/api/incidents/{id}/accept", post(accept))
+        .route("/api/incidents/{id}/unaccept", post(unaccept))
         .route("/api/incidents/{id}/postmortem", get(postmortem))
 }
 
@@ -83,6 +85,9 @@ fn incident_json(i: &crate::domain::Incident) -> Value {
         "last_notified_at": i.last_notified_at,
         "notify_count": i.notify_count,
         "escalation_step": i.escalation_step,
+        "reopened_at": i.reopened_at,
+        "accepted_at": i.accepted_at,
+        "accepted_by": i.accepted_by,
     })
 }
 
@@ -163,6 +168,39 @@ async fn resolve(
 ) -> Result<Json<Value>> {
     get_visible(&state, &ctx, id).await?;
     let updated = transition(&state, id, IncidentState::Resolved, Some(ctx.account_id)).await?;
+    Ok(Json(visible(&state, &ctx, &updated).await.unwrap_or_else(|| incident_json(&updated))))
+}
+
+/// POST /api/incidents/{id}/accept — "known, leave it": the fault stays
+/// open and acknowledged, repeats attach to it, and scans skip it. Not for
+/// a resolved incident (a fault back after a fix is new).
+async fn accept(
+    State(state): State<AppState>,
+    Authed(ctx): Authed,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
+    let (current, _) = get_visible(&state, &ctx, id).await?;
+    if current.state == IncidentState::Resolved {
+        return Err(Error::Policy("a resolved incident can't be accepted".into()));
+    }
+    state.repos.accept(id, Some(ctx.account_id), chrono::Utc::now()).await?;
+    let updated = IncidentRepo::get(&*state.repos, id)
+        .await?
+        .ok_or_else(|| Error::NotFound("incident".into()))?;
+    Ok(Json(visible(&state, &ctx, &updated).await.unwrap_or_else(|| incident_json(&updated))))
+}
+
+/// POST /api/incidents/{id}/unaccept — undo `accept`; it stays acknowledged.
+async fn unaccept(
+    State(state): State<AppState>,
+    Authed(ctx): Authed,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
+    get_visible(&state, &ctx, id).await?;
+    state.repos.unaccept(id).await?;
+    let updated = IncidentRepo::get(&*state.repos, id)
+        .await?
+        .ok_or_else(|| Error::NotFound("incident".into()))?;
     Ok(Json(visible(&state, &ctx, &updated).await.unwrap_or_else(|| incident_json(&updated))))
 }
 
@@ -249,6 +287,32 @@ mod tests {
             postmortem(State(f.state.clone()), Authed(bob), Path(id)).await.is_err(),
             "the postmortem needs unredacted access"
         );
+    }
+
+    #[tokio::test]
+    async fn known_leave_it_accepts_an_expired_incident_and_can_be_undone() {
+        let f = Fixture::new();
+        let id = f.incident("backups never ran", &[]).await;
+        f.state.repos.set_state(id, IncidentState::Expired, None).await.unwrap();
+        let bob_id = f.person("bob@acme.com", &["oncall"]).await.account_id;
+        let bob = || Ctx { account_id: bob_id, via: crate::access::Via::Web };
+        let Json(v) = accept(State(f.state.clone()), Authed(bob()), Path(id)).await.unwrap();
+        assert_eq!(v["state"], "acknowledged");
+        assert!(!v["accepted_at"].is_null());
+        assert_eq!(v["accepted_by"], json!(bob_id));
+
+        let Json(v) = unaccept(State(f.state.clone()), Authed(bob()), Path(id)).await.unwrap();
+        assert!(v["accepted_at"].is_null());
+
+        // An expired incident can be resolved now, and a resolved one can't
+        // be accepted.
+        f.state.repos.set_state(id, IncidentState::Expired, None).await.unwrap();
+        let _ = resolve(State(f.state.clone()), Authed(bob()), Path(id)).await.unwrap();
+        assert!(accept(State(f.state.clone()), Authed(bob()), Path(id)).await.is_err());
+
+        // Someone who may not see it gets a not-found.
+        let eve = f.person("eve@acme.com", &[]).await;
+        assert!(unaccept(State(f.state.clone()), Authed(eve), Path(id)).await.is_err());
     }
 
     #[tokio::test]

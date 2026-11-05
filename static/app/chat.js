@@ -102,6 +102,7 @@ export async function openStream() {
     // A new or re-sent page: its thread may be new, so refresh the sidebar.
     loadSidebar();
     if ((body.conversation || 'operations') === state.chatConversation) addIncidentCard(body);
+    else refreshIncidentCards();
   });
   evtSource.onerror = () => {
     evtSource.close();
@@ -197,43 +198,103 @@ function addApprovalCard(a) {
   actions.append(ap, dn);
 }
 
+// An incident card shows the incident as it is NOW, not as it was paged:
+// one card per incident (a reminder for the same incident moves its card
+// down rather than adding another), refreshed from /api/incidents/{id}
+// after every action, on every incident event, when the tab regains focus,
+// and once a minute.
 function addIncidentCard(i) {
+  const log = document.getElementById('chat-log');
+  const old = log.querySelector(`.actioncard.incident[data-incident="${CSS.escape(String(i.id))}"]`);
+  if (old) old.remove();
   const rows = [line('ac-line', targetText(i.target))];
   if (i.hypothesis) rows.push(line('ac-line muted', i.hypothesis));
-  const { card, actions, note } = actionCard(
+  const { card } = actionCard(
     'incident',
-    `Incident <span class="badge">${escapeHtml(i.severity || '')}</span>`,
+    `Incident <span class="badge">${escapeHtml(i.severity || '')}</span> <span class="ac-state"></span>`,
     rows,
   );
-  const thread = threadIdFor(targetText(i.target), i.id);
+  card.dataset.incident = i.id;
+  card.dataset.target = targetText(i.target);
+  renderIncidentCard(card, i);
+  refreshIncidentCard(card);
+}
+
+const STATE_TEXT = {
+  active: 'open',
+  acknowledged: 'acknowledged',
+  resolved: 'resolved',
+  expired: 'expired, nobody acknowledged',
+};
+
+function renderIncidentCard(card, i) {
+  const st = String(i.state || 'active').toLowerCase();
+  const accepted = !!i.accepted_at;
+  const badge = card.querySelector('.ac-state');
+  badge.className = `ac-state badge state-${accepted ? 'accepted' : st}`;
+  badge.textContent = accepted ? 'known, left alone' : (STATE_TEXT[st] || st);
+  card.classList.toggle('decided', st === 'resolved' || accepted);
+  const actions = card.querySelector('.ac-actions');
+  const note = card.querySelector('.ac-note');
+  actions.innerHTML = '';
+  const button = (label, cls, onClick) => {
+    const b = document.createElement('button');
+    b.className = cls;
+    b.textContent = label;
+    b.addEventListener('click', onClick);
+    actions.appendChild(b);
+  };
+  const thread = threadIdFor(card.dataset.target, card.dataset.incident);
   if (thread) {
-    const open = document.createElement('button');
-    open.className = 'ghost';
-    open.textContent = 'Open thread';
-    open.addEventListener('click', () => {
+    button('Open thread', 'ghost', () => {
       state.chatConversation = thread;
       uncertainSend = null;
       clearPending();
       loadHistory();
     });
-    actions.appendChild(open);
   }
-  const ack = document.createElement('button');
-  ack.className = 'primary';
-  ack.textContent = 'Acknowledge';
-  ack.addEventListener('click', async () => {
-    ack.disabled = true;
-    const r = await api(`/api/incidents/${i.id}/ack`, 'POST');
+  const act = (verb, done) => async () => {
+    actions.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    const r = await api(`/api/incidents/${card.dataset.incident}/${verb}`, 'POST');
     if (r.ok) {
-      note.textContent = 'Acknowledged — paging stops; details in the Incidents tab.';
-      card.classList.add('decided');
+      note.textContent = done;
+      renderIncidentCard(card, r.data);
+      loadSidebar();
     } else {
-      note.textContent = (r.data && r.data.error) || 'Could not acknowledge — see the Incidents tab.';
-      ack.disabled = false;
+      note.textContent = (r.data && r.data.error) || 'Could not update the incident — see the Incidents tab.';
+      actions.querySelectorAll('button').forEach((b) => { b.disabled = false; });
     }
-  });
-  actions.append(ack);
+  };
+  if (st === 'resolved') return;
+  if (st === 'active' || st === 'expired') {
+    button('Acknowledge', 'primary', act('ack', 'Acknowledged — notifications stop.'));
+  }
+  if (accepted) {
+    button('Watch again', 'ghost', act('unaccept', 'Scans will report it again.'));
+  } else {
+    button('Known, leave it', 'ghost', act('accept', 'Accepted — scans will leave it alone.'));
+  }
+  button('Resolve', 'ghost', act('resolve', 'Resolved.'));
 }
+
+async function refreshIncidentCard(card) {
+  const r = await api(`/api/incidents/${card.dataset.incident}`);
+  if (!card.isConnected) return;
+  if (r.ok) {
+    renderIncidentCard(card, r.data);
+  } else if (r.status === 404) {
+    card.querySelector('.ac-actions').innerHTML = '';
+    card.querySelector('.ac-note').textContent = 'This incident is no longer available.';
+    card.classList.add('decided');
+  }
+}
+
+export function refreshIncidentCards() {
+  document.querySelectorAll('#chat-log .actioncard.incident[data-incident]').forEach(refreshIncidentCard);
+}
+
+setInterval(() => { if (!document.hidden) refreshIncidentCards(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshIncidentCards(); });
 
 export function closeStream() {
   if (evtSource) { evtSource.close(); evtSource = null; }

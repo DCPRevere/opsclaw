@@ -393,6 +393,7 @@ async fn conversations(State(state): State<AppState>, Authed(ctx): Authed) -> Re
             "severity": incident.severity,
             "state": incident.state,
             "closed": closed,
+            "accepted": incident.accepted_at.is_some(),
             "opened_at": incident.opened_at,
         }));
     }

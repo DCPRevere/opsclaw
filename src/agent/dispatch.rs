@@ -269,6 +269,65 @@ pub struct AgentJobComposer {
     deps: DispatchDeps,
 }
 
+/// The unresolved incidents on a scan's target, for the scan prompt: open,
+/// acknowledged and expired ones to attach repeats to (`same_as`), and
+/// accepted ones not to re-investigate. `None` when there are none.
+pub(crate) fn known_incidents_brief(
+    incidents: &[crate::domain::Incident],
+    target: &crate::domain::FqTarget,
+) -> Option<String> {
+    use crate::domain::IncidentState;
+    let here = |i: &&crate::domain::Incident| {
+        i.state != IncidentState::Resolved
+            && i.target.project == target.project
+            && i.target.env == target.env
+            && i.target.target == target.target
+    };
+    let line = |i: &crate::domain::Incident| {
+        let h: String = i.hypothesis.chars().take(160).collect();
+        let state = match i.state {
+            IncidentState::Expired => "expired, unacknowledged",
+            IncidentState::Acknowledged => "acknowledged",
+            _ => "open",
+        };
+        format!("- {} [{}, {state}] {h}", i.id, i.fault_class)
+    };
+    let tracked: Vec<String> = incidents
+        .iter()
+        .filter(here)
+        .filter(|i| i.accepted_at.is_none())
+        .take(40)
+        .map(line)
+        .collect();
+    let accepted: Vec<String> = incidents
+        .iter()
+        .filter(here)
+        .filter(|i| i.accepted_at.is_some())
+        .take(40)
+        .map(line)
+        .collect();
+    if tracked.is_empty() && accepted.is_empty() {
+        return None;
+    }
+    let mut out = String::from("KNOWN INCIDENTS on this target.");
+    if !tracked.is_empty() {
+        out.push_str(
+            " Already tracked: if you confirm one of these is still happening, call \
+             opsclaw_notify with same_as set to its id instead of filing it again, even if \
+             you would word or classify it differently.\n",
+        );
+        out.push_str(&tracked.join("\n"));
+    }
+    if !accepted.is_empty() {
+        out.push_str(
+            "\nAccepted as known by a person (\"known, leave it\"): do not investigate, \
+             report or notify these. At most, list them as known at the end.\n",
+        );
+        out.push_str(&accepted.join("\n"));
+    }
+    Some(out)
+}
+
 impl AgentJobComposer {
     pub fn new(deps: DispatchDeps) -> Self {
         AgentJobComposer { deps }
@@ -327,8 +386,20 @@ impl JobComposer for AgentJobComposer {
         // provider hiccup the fallback chain gave up on), so this just
         // propagates it through `?` rather than swallowing or downgrading
         // it.
+        // A scan sees what is already known on its target, so a repeat
+        // attaches to the existing incident and accepted ones are skipped.
+        let prompt = match &job.payload {
+            Payload::ScanRoutine { target: Some(target), .. } => {
+                let known = self.deps.incidents.list(true, 500).await?;
+                match known_incidents_brief(&known, target) {
+                    Some(brief) => format!("{prompt}\n\n{brief}"),
+                    None => prompt.to_string(),
+                }
+            }
+            _ => prompt.to_string(),
+        };
         let reply =
-            agent::run_turn(&agent_deps, &ctx, &registry, team_context.as_deref(), prompt).await?;
+            agent::run_turn(&agent_deps, &ctx, &registry, team_context.as_deref(), &prompt).await?;
 
         // Retain what the turn LEARNED, never what it was told to do: the
         // prompt is static routine text (`DEFAULT_SCAN_PROMPT`, identical
@@ -1841,5 +1912,61 @@ mod tests {
             }
             other => panic!("expected re-framed user + assistant, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod known_incidents_tests {
+    use super::known_incidents_brief;
+    use crate::domain::{FqTarget, Incident, IncidentState, Severity};
+
+    fn incident(target: &FqTarget, state: IncidentState, accepted: bool, h: &str) -> Incident {
+        Incident {
+            id: uuid::Uuid::new_v4(),
+            fingerprint: h.into(),
+            fault_class: "other".into(),
+            target: target.clone(),
+            severity: Severity::Warning,
+            state,
+            signals: String::new(),
+            hypothesis: h.into(),
+            recommended_action: None,
+            opened_at: chrono::Utc::now(),
+            reopened_at: None,
+            acked_at: None,
+            acked_by: None,
+            resolved_at: None,
+            last_notified_at: None,
+            notify_count: 0,
+            escalation_step: 0,
+            step_started_at: None,
+            accepted_at: accepted.then(chrono::Utc::now),
+            accepted_by: None,
+        }
+    }
+
+    #[test]
+    fn lists_unresolved_incidents_on_the_target_and_separates_accepted_ones() {
+        let here = FqTarget::new("example", "dev", "cluster");
+        let elsewhere = FqTarget::new("example", "sandbox", "cluster");
+        let all = vec![
+            incident(&here, IncidentState::Expired, false, "stuck queue message"),
+            incident(&here, IncidentState::Acknowledged, true, "backups never ran"),
+            incident(&here, IncidentState::Resolved, false, "fixed already"),
+            incident(&elsewhere, IncidentState::Active, false, "other environment"),
+        ];
+        let brief = known_incidents_brief(&all, &here).unwrap();
+        assert!(brief.contains("stuck queue message") && brief.contains("same_as"), "{brief}");
+        assert!(
+            brief.contains("backups never ran") && brief.contains("do not investigate"),
+            "{brief}"
+        );
+        assert!(
+            !brief.contains("fixed already") && !brief.contains("other environment"),
+            "{brief}"
+        );
+        let accepted_at = brief.find("backups never ran").unwrap();
+        assert!(brief.find("Accepted as known").unwrap() < accepted_at);
+        assert!(known_incidents_brief(&all[2..3], &here).is_none());
     }
 }

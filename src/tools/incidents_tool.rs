@@ -148,6 +148,8 @@ mod tests {
             notify_count: 0,
             escalation_step: 0,
             step_started_at: None,
+            accepted_at: None,
+            accepted_by: None,
         }
     }
 

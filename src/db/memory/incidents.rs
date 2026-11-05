@@ -72,6 +72,29 @@ impl crate::db::IncidentRepo for InMemoryDb {
         Ok(())
     }
 
+    async fn accept(&self, id: Uuid, by: Option<Uuid>, at: DateTime<Utc>) -> Result<()> {
+        let mut store = self.store.lock().unwrap();
+        if let Some(i) = store.incidents.get_mut(&id) {
+            i.state = IncidentState::Acknowledged;
+            if i.acked_at.is_none() {
+                i.acked_at = Some(at);
+                i.acked_by = by;
+            }
+            i.accepted_at = Some(at);
+            i.accepted_by = by;
+        }
+        Ok(())
+    }
+
+    async fn unaccept(&self, id: Uuid) -> Result<()> {
+        let mut store = self.store.lock().unwrap();
+        if let Some(i) = store.incidents.get_mut(&id) {
+            i.accepted_at = None;
+            i.accepted_by = None;
+        }
+        Ok(())
+    }
+
     async fn record_notification(
         &self,
         id: Uuid,

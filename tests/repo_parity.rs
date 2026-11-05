@@ -168,6 +168,8 @@ fn incident(id: Uuid, fingerprint: &str) -> Incident {
         notify_count: 0,
         escalation_step: 0,
         step_started_at: None,
+        accepted_at: None,
+        accepted_by: None,
     }
 }
 
@@ -424,6 +426,35 @@ incident_set_state_stamps_ack_and_resolve => |db| {
     let got = IncidentRepo::get(db, id).await.unwrap().unwrap();
     assert_eq!(got.state, IncidentState::Resolved);
     assert!(got.resolved_at.is_some());
+}
+
+incident_accept_acks_keeps_the_first_ack_and_unaccept_clears => |db| {
+    let id = Uuid::new_v4();
+    let mut row = incident(id, "fp-accept");
+    row.state = IncidentState::Expired;
+    IncidentRepo::insert(db, &row).await.unwrap();
+    let who = Uuid::new_v4();
+    let at = chrono::Utc::now();
+
+    db.accept(id, Some(who), at).await.unwrap();
+    let got = IncidentRepo::get(db, id).await.unwrap().unwrap();
+    assert_eq!(got.state, IncidentState::Acknowledged);
+    assert_eq!(got.accepted_by, Some(who));
+    assert!(got.accepted_at.is_some());
+    assert_eq!(got.acked_by, Some(who), "an unacked incident is acked by the accepter");
+    let first_ack = got.acked_at;
+    // Accepted incidents stay open, so repeats attach to them.
+    assert!(db.find_open_by_fingerprint("fp-accept").await.unwrap().is_some());
+
+    db.accept(id, Some(Uuid::new_v4()), at + chrono::Duration::minutes(5)).await.unwrap();
+    let got = IncidentRepo::get(db, id).await.unwrap().unwrap();
+    assert_eq!(got.acked_by, Some(who), "an earlier ack is kept");
+    assert_eq!(got.acked_at, first_ack);
+
+    db.unaccept(id).await.unwrap();
+    let got = IncidentRepo::get(db, id).await.unwrap().unwrap();
+    assert!(got.accepted_at.is_none() && got.accepted_by.is_none());
+    assert_eq!(got.state, IncidentState::Acknowledged);
 }
 
 incident_record_notification_bumps_count_and_persists_chain_position => |db| {

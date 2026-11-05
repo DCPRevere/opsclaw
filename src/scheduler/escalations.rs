@@ -293,6 +293,8 @@ mod tests {
             notify_count: 0,
             escalation_step: 0,
             step_started_at: None,
+            accepted_at: None,
+            accepted_by: None,
         };
         let page = render_summary_page(&incident, "NEW", 0, 2);
         assert!(page.contains("config_error on acme::prod::aks"), "{page}");

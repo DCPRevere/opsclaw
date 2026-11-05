@@ -33,6 +33,14 @@ pub trait IncidentRepo: Send + Sync {
     /// (cumulative; keeps claim-key occurrences unique) are preserved.
     async fn reopen(&self, id: Uuid, at: DateTime<Utc>) -> Result<()>;
     async fn set_state(&self, id: Uuid, state: IncidentState, by: Option<Uuid>) -> Result<()>;
+    /// "Known, leave it": mark an open or expired incident accepted by `by`.
+    /// It becomes Acknowledged (keeping an earlier ack's time and person),
+    /// with `accepted_at`/`accepted_by` set. Callers check the incident is
+    /// not Resolved first.
+    async fn accept(&self, id: Uuid, by: Option<Uuid>, at: DateTime<Utc>) -> Result<()>;
+    /// Undo `accept`: clear the accepted fields. The incident stays
+    /// Acknowledged.
+    async fn unaccept(&self, id: Uuid) -> Result<()>;
     /// Record one escalation-chain send atomically: `last_notified_at = at`,
     /// `notify_count += 1`, and the chain position (`escalation_step`,
     /// `step_started_at`) as computed by `incidents::escalation` — a first

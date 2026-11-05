@@ -129,6 +129,8 @@ async fn daemon_boots_serves_drains_on_the_shutdown_token_and_persists_across_re
         notify_count: 0,
         escalation_step: 0,
         step_started_at: None,
+        accepted_at: None,
+        accepted_by: None,
     };
     IncidentRepo::insert(&*state.repos, &incident).await.unwrap();
 

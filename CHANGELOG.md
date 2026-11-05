@@ -6,6 +6,28 @@ release out.
 
 ## Unreleased
 
+### Fewer duplicate incidents, "known, leave it", live incident cards
+
+- A scan no longer re-files a fault as a new incident because it named it
+  differently after the first one expired. Each scan is given the
+  target's unresolved incidents and is told to attach repeats with
+  `same_as`. `opsclaw_notify` now offers expired incidents as candidates
+  (and re-opens them), and `same_as` works across fault classes on the
+  same target.
+- "Known, leave it" (web chat cards, thread header, Incidents tab, and
+  `POST /api/incidents/{id}/accept` / `unaccept`): the incident stays
+  acknowledged, repeats attach to it without notifying, and scans are told
+  not to investigate it. "Watch again" undoes it. Accepted incidents get
+  their own fold in the sidebar.
+- An expired incident can now be acknowledged or resolved directly.
+- Incident cards in chat show the incident's current state (open,
+  acknowledged, expired, known, resolved) and the matching buttons. They
+  refresh after an action, on new incident events, on focus, and every
+  minute. A reminder for the same incident moves its card rather than
+  adding another.
+- **Deploying:** migration `0013_incident_accepted` adds two nullable
+  columns to `incidents`. It runs automatically at start.
+
 ### Incident threads, traces, and scan scope
 
 - The web chat has a sidebar.

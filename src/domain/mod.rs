@@ -414,6 +414,14 @@ pub struct Incident {
     /// When the CURRENT escalation step was first notified (its `ack_timeout`
     /// clock). `None` until the chain's first notification.
     pub step_started_at: Option<DateTime<Utc>>,
+    /// A person marked this a known, accepted fault ("known, leave it"). It
+    /// stays open and acknowledged: re-detections attach to it, nothing is
+    /// notified, and scans are told not to re-investigate it. Resolving it
+    /// ends that; a fault that comes back after a resolve is new.
+    #[serde(default)]
+    pub accepted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub accepted_by: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
